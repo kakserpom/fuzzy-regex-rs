@@ -1,14 +1,14 @@
-# Levenshtein NFA
+# Damerau-Levenshtein NFA
 
 Fuzzy matching via finite automata for longer patterns.
 
 ## Overview
 
-For patterns longer than 64 characters or when complex regex features are needed, fuzzy-regex uses a Levenshtein NFA. This is an extension of the classic Levenshtein automaton.
+For patterns longer than 64 characters or when complex regex features are needed, fuzzy-regex uses a Damerau-Levenshtein NFA. This is an extension of the classic Damerau-Levenshtein automaton.
 
-## Levenshtein Automaton
+## Damerau-Levenshtein Automaton
 
-The Levenshtein automaton for a pattern P and max distance k accepts all strings within k edits of P.
+The Damerau-Levenshtein automaton for a pattern P and max distance k accepts all strings within k edits of P.
 
 ### State Representation
 
@@ -52,7 +52,7 @@ For each input character, the NFA can transition to:
 
 ## Performance Characteristics
 
-| Aspect | Levenshtein NFA |
+| Aspect | Damerau-Levenshtein NFA |
 |--------|----------------|
 | Time Complexity | O(n × k × m) |
 | Space Complexity | O(k × m) |
@@ -66,7 +66,7 @@ Where:
 
 ## Comparison with Bitap
 
-| Feature | Bitap | Levenshtein NFA |
+| Feature | Bitap | Damerau-Levenshtein NFA |
 |---------|-------|-----------------|
 | Max Pattern Length | 64 | Unlimited |
 | Time Complexity | O(n×k) | O(n×k×m) |

@@ -26,7 +26,7 @@ How fuzzy-regex works internally.
      ┌───────────┴───────────┐
      ▼                       ▼
 ┌──────────┐         ┌──────────┐
-│  Bitap   │         │  Lev.    │
+│  Bitap   │         │   D-L    │
 │ Matcher  │         │   NFA    │
 └──────────┘         └──────────┘
 ```
@@ -60,7 +60,7 @@ How fuzzy-regex works internally.
 - O(n×k) time complexity
 - SIMD-accelerated
 
-#### Levenshtein NFA
+#### Damerau-Levenshtein NFA
 - Fuzzy matching via automata
 - Supports all edit types
 - Used for longer patterns

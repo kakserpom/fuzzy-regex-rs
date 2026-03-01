@@ -1,6 +1,6 @@
 # Edit Distance
 
-The edit distance (Levenshtein distance) measures how many operations it takes to transform the pattern into the matched text.
+The edit distance (Damerau-Levenshtein distance) measures how many operations it takes to transform the pattern into the matched text.
 
 ## Edit Types
 

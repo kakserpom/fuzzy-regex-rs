@@ -32,7 +32,7 @@ struct BitapState {
 
 ### Pattern Length Limit
 - Maximum 64 characters (uses 64-bit integers)
-- Longer patterns use Levenshtein NFA
+- Longer patterns use Damerau-Levenshtein NFA
 
 ### Edit Distance
 - Supports insertions, deletions, substitutions

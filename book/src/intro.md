@@ -1,6 +1,6 @@
 # Introduction
 
-`fuzzy-regex` is a high-performance fuzzy regular expression engine written in Rust. It combines traditional regex constructs with approximate string matching using Levenshtein automata and the Bitap algorithm.
+`fuzzy-regex` is a high-performance fuzzy regular expression engine written in Rust. It combines traditional regex constructs with approximate string matching using Damerau-Levenshtein automata and the Bitap algorithm.
 
 ## Key Features
 

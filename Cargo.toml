@@ -8,8 +8,8 @@ readme = "README.md"
 license = "MIT OR Apache-2.0"
 keywords = ["regex", "fuzzy", "levenshtein", "approximate", "matching"]
 categories = ["text-processing", "algorithms"]
-homepage = "https://github.com/kakserpom/fuzzy-regex"
-repository = "https://github.com/kakserpom/fuzzy-regex"
+homepage = "https://github.com/kakserpom/fuzzy-regex-rs"
+repository = "https://github.com/kakserpom/fuzzy-regex-rs"
 documentation = "https://kakserpom.github.io/fuzzy-regex-rs/"
 
 [features]

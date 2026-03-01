@@ -4,7 +4,7 @@ Connecting regex engine with fuzzy matching components.
 
 ## Purpose
 
-The Fuzzy Bridge coordinates between the NFA-based regex engine and specialized fuzzy matchers (Bitap, Levenshtein NFA).
+The Fuzzy Bridge coordinates between the NFA-based regex engine and specialized fuzzy matchers (Bitap, Damerau-Levenshtein NFA).
 
 ## Responsibilities
 
@@ -54,7 +54,7 @@ Regex Pattern:  hello (?:world){e<=1}
 For `(?:hello){e<=1}`:
 
 1. Use Bitap directly (pattern ≤64 chars)
-2. Or build Levenshtein NFA (longer patterns)
+2. Or build Damerau-Levenshtein NFA (longer patterns)
 
 ### Mixed Pattern
 

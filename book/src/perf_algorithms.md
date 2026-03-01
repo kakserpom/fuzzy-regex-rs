@@ -26,8 +26,8 @@ Pattern Analysis
             Yes       No
              │         │
              ▼         ▼
-          Bitap    Levenshtein
-                     NFA
+           Bitap    Damerau-Levenshtein
+                      NFA
 ```
 
 ## Algorithm Comparison
@@ -36,7 +36,7 @@ Pattern Analysis
 |-----------|----------|------------|----------|
 | DFA | Exact patterns | O(n) | Limited |
 | Bitap | Short fuzzy (≤64 chars) | O(n×k) | Most |
-| Levenshtein NFA | Long fuzzy patterns | O(n×k×m) | Full |
+| Damerau-Levenshtein NFA | Long fuzzy patterns | O(n×k×m) | Full |
 
 ## Automatic Selection
 

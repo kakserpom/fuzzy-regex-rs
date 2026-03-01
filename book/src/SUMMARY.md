@@ -32,7 +32,7 @@
 
 - [Architecture Overview](./impl_overview.md)
 - [Bitap Algorithm](./impl_bitap.md)
-- [Levenshtein NFA](./impl_nfa.md)
+- [Damerau-Levenshtein NFA](./impl_nfa.md)
 - [Fuzzy Bridge](./impl_bridge.md)
 - [DFA Optimization](./impl_dfa.md)
 - [Streaming Implementation](./impl_streaming.md)
