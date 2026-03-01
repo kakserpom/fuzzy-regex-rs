@@ -1,0 +1,44 @@
+[package]
+name = "fuzzy-regex"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "High-performance fuzzy regular expression engine combining regex with Damerau-Levenshtein distance"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["regex", "fuzzy", "levenshtein", "approximate", "matching"]
+categories = ["text-processing", "algorithms"]
+homepage = "https://github.com/SoftEtherVPN/fuzzy-regex"
+repository = "https://github.com/SoftEtherVPN/fuzzy-regex"
+documentation = "https://docs.rs/fuzzy-regex/"
+
+[features]
+default = ["simd"]
+simd = []
+mimalloc = ["dep:mimalloc"]
+
+[dependencies]
+unicode-segmentation = "1.12"
+thiserror = "2.0"
+memchr = "2.8"
+smallvec = "1.13"
+mimalloc = { version = "0.1", default-features = false, optional = true }
+smartcow = "0.2"
+
+[dev-dependencies]
+criterion = "0.8.2"
+regex = "1"
+# Fuzz testing
+arbitrary = { version = "1", features = ["derive"] }
+# Property-based testing
+proptest = "1.10"
+# Documentation
+mdbook = "0.5"
+
+[[bench]]
+name = "fuzzy_benchmarks"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1

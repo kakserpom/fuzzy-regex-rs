@@ -1,0 +1,3 @@
+[book]
+title = "fuzzy-regex"
+description = "A high-performance fuzzy regular expression engine in Rust"

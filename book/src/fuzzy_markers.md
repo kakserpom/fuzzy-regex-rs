@@ -1,0 +1,70 @@
+# Fuzziness Markers
+
+Detailed syntax for controlling fuzzy matching.
+
+## Basic Markers
+
+| Marker | Description | Example |
+|--------|-------------|---------|
+| `{e<=N}` | Total edits ≤ N | `{e<=2}` |
+| `{i<=N}` | Insertions ≤ N | `{i<=1}` |
+| `{d<=N}` | Deletions ≤ N | `{d<=1}` |
+| `{s<=N}` | Substitutions ≤ N | `{s<=1}` |
+| `{t<=N}` | Transpositions ≤ N | `{t<=1}` |
+
+## Combining Markers
+
+```rust
+use fuzzy_regex::FuzzyRegex;
+
+// Allow 1 insertion AND 1 deletion
+let re1 = FuzzyRegex::new("(?:hello){i<=1,d<=1}").unwrap();
+
+// Allow up to 2 substitutions OR up to 1 deletion (combined constraint)
+let re2 = FuzzyRegex::new("(?:hello){s<=2,d<=1}").unwrap();
+
+// Each constraint is independent
+// The match must satisfy ALL specified constraints
+```
+
+## Character Class Restrictions
+
+Restrict which characters can be used for edits:
+
+```rust
+use fuzzy_regex::FuzzyRegex;
+
+// Only allow substitutions with lowercase letters
+let re1 = FuzzyRegex::new(r"(?:hello){s<=1:[a-z]}").unwrap();
+assert!(re1.is_match("hallo"));  // 'a' is in [a-z]
+assert!(!re1.is_match("h3llo")); // '3' is not in [a-z]
+
+// Only allow insertions of digits
+let re2 = FuzzyRegex::new(r"(?:hello){i<=1:[0-9]}").unwrap();
+
+// Only allow substitutions with whitespace
+let re3 = FuzzyRegex::new(r"(?:hello){s<=1:\s}").unwrap();
+```
+
+## Min/Max Error Ranges
+
+```rust
+use fuzzy_regex::FuzzyRegex;
+
+// Require at least 1 edit, allow up to 2
+let re = FuzzyRegex::new("(?:hello){e>=1,e<=2}").unwrap();
+
+// Minimum errors with shorthand
+let re2 = FuzzyRegex::new("(?:hello){1e<=2}").unwrap();
+```
+
+## Editing Classes
+
+Apply fuzziness to specific character classes:
+
+```rust
+use fuzzy_regex::FuzzyRegex;
+
+// Apply different limits to different parts
+let re = FuzzyRegex::new("(?:hello){e<=1} world{e<=1}").unwrap();
+```
