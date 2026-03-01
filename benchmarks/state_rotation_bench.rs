@@ -1,7 +1,7 @@
 //! Benchmark for state rotation optimization.
 
 use fuzzy_regex::engine::bitap::BitapMatcher;
-use fuzzy_regex::engine::levenshtein::EditLimits;
+use fuzzy_regex::engine::damlev::EditLimits;
 use std::time::Instant;
 
 fn main() {

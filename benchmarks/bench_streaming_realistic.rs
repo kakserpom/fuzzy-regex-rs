@@ -1,5 +1,5 @@
 use fuzzy_regex::engine::bitap::BitapMatcher;
-use fuzzy_regex::engine::levenshtein::EditLimits;
+use fuzzy_regex::engine::damlev::EditLimits;
 use std::time::Instant;
 
 /// Calculate elapsed time in nanoseconds per iteration (returns f64 for calculations)
@@ -14,12 +14,7 @@ fn throughput_mb_per_sec(bytes: u32, start: Instant, iterations: u32) -> f64 {
 }
 
 /// Benchmark a single text size
-fn benchmark_text_size(
-    matcher: &BitapMatcher,
-    name: &str,
-    text: &str,
-    iterations: u32,
-) {
+fn benchmark_text_size(matcher: &BitapMatcher, name: &str, text: &str, iterations: u32) {
     let bytes = u32::try_from(text.len()).expect("text too large");
     let start = Instant::now();
     for _ in 0..iterations {

@@ -1,5 +1,5 @@
 use fuzzy_regex::engine::bitap::BitapMatcher;
-use fuzzy_regex::engine::levenshtein::EditLimits;
+use fuzzy_regex::engine::damlev::EditLimits;
 use std::time::Instant;
 
 /// Calculate elapsed time in nanoseconds per iteration (returns f64 for calculations)
@@ -14,12 +14,7 @@ fn throughput_mb_per_sec(bytes: u32, start: Instant, iterations: u32) -> f64 {
 }
 
 /// Benchmark a single text size
-fn benchmark_text_size(
-    matcher: &BitapMatcher,
-    name: &str,
-    text: &str,
-    iterations: u32,
-) {
+fn benchmark_text_size(matcher: &BitapMatcher, name: &str, text: &str, iterations: u32) {
     let bytes = u32::try_from(text.len()).expect("text too large");
     let start = Instant::now();
     for _ in 0..iterations {
@@ -50,9 +45,7 @@ fn benchmark_all_sizes(
     } else {
         "(streaming_large_k)"
     };
-    println!(
-        "--- max_edits = {k} {impl_name} ---"
-    );
+    println!("--- max_edits = {k} {impl_name} ---");
 
     let k_u8 = u8::try_from(k).expect("k too large");
     let matcher = BitapMatcher::new(pattern, EditLimits::new(k_u8), false).unwrap();
@@ -118,7 +111,10 @@ fn benchmark_late_match(matcher: &BitapMatcher, text: &[u8], iterations: u32) {
     );
     println!("  Streaming:           {streaming_ns:>6.0} ns/iter");
     println!("  Position-based scan: {position_scan_ns:>6.0} ns/iter");
-    println!("  Streaming speedup: {:.1}x\n", position_scan_ns / streaming_ns);
+    println!(
+        "  Streaming speedup: {:.1}x\n",
+        position_scan_ns / streaming_ns
+    );
 }
 
 /// Benchmark three-buffer overhead

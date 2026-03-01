@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use fuzzy_regex::engine::bitap::BitapMatcher;
-use fuzzy_regex::engine::levenshtein::EditLimits;
+use fuzzy_regex::engine::damlev::EditLimits;
 
 /// Calculate elapsed time in nanoseconds per iteration
 fn elapsed_ns(start: Instant, iterations: u32) -> f64 {
@@ -59,7 +59,10 @@ fn main() {
         "Russian pattern: 'Привет' - 6 chars, {} bytes",
         "Привет".len()
     );
-    println!("English pattern: 'Hello' - 5 chars, {} bytes", "Hello".len());
+    println!(
+        "English pattern: 'Hello' - 5 chars, {} bytes",
+        "Hello".len()
+    );
     println!(
         "Russian text: 'Привет мир!' - {} chars, {} bytes",
         "Привет мир!".chars().count(),

@@ -1,7 +1,7 @@
 // This test directly benchmarks bitap verification without FuzzyRegex overhead
 
 use fuzzy_regex::engine::bitap::BitapMatcher;
-use fuzzy_regex::engine::levenshtein::EditLimits;
+use fuzzy_regex::engine::damlev::EditLimits;
 use std::time::Instant;
 
 fn elapsed_us(start: Instant, iterations: u32) -> f64 {

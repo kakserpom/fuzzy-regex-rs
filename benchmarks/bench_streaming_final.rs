@@ -1,5 +1,5 @@
 use fuzzy_regex::engine::bitap::BitapMatcher;
-use fuzzy_regex::engine::levenshtein::EditLimits;
+use fuzzy_regex::engine::damlev::EditLimits;
 use std::time::Instant;
 
 /// Calculate elapsed time in nanoseconds per iteration (returns f64 for calculations)
@@ -25,10 +25,7 @@ fn get_iterations(name: &str) -> u32 {
 }
 
 /// Benchmark full-scan throughput for different text sizes
-fn benchmark_full_scan_throughput(
-    matcher: &BitapMatcher,
-    texts: &[(&str, &String)],
-) {
+fn benchmark_full_scan_throughput(matcher: &BitapMatcher, texts: &[(&str, &String)]) {
     for (name, text) in texts {
         let bytes = u32::try_from(text.len()).expect("text too large");
         let iterations = get_iterations(name);
@@ -195,9 +192,9 @@ fn main() {
 
     // Exact match text
     let exact_text = format!("{}quick", "12345 ".repeat(3333)); // 20KB + exact
-    // Transposition text
+                                                                // Transposition text
     let trans_text = format!("{}qucik", "12345 ".repeat(3333)); // 20KB + transposition
-    // No match text
+                                                                // No match text
     let no_match = "12345 ".repeat(3334); // 20KB, no match
 
     benchmark_transposition_overhead(&matcher, &exact_text, &trans_text, &no_match, 100);

@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use fuzzy_regex::engine::bitap::BitapMatcher;
-use fuzzy_regex::engine::levenshtein::EditLimits;
+use fuzzy_regex::engine::damlev::EditLimits;
 
 /// Calculate elapsed time in nanoseconds per iteration
 fn elapsed_ns(start: Instant, iterations: u32) -> f64 {

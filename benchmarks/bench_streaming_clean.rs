@@ -1,5 +1,5 @@
 use fuzzy_regex::engine::bitap::BitapMatcher;
-use fuzzy_regex::engine::levenshtein::EditLimits;
+use fuzzy_regex::engine::damlev::EditLimits;
 use std::time::Instant;
 
 /// Calculate elapsed time in nanoseconds per iteration (returns f64 for calculations)
@@ -35,10 +35,7 @@ fn benchmark_by_k_value(pattern: &str, text: &str, iterations: u32) {
 }
 
 /// Benchmark streaming with different text sizes
-fn benchmark_by_text_size(
-    matcher: &BitapMatcher,
-    texts: &[(&str, &String, u32)],
-) {
+fn benchmark_by_text_size(matcher: &BitapMatcher, texts: &[(&str, &String, u32)]) {
     for (name, text, iters) in texts {
         let bytes = u32::try_from(text.len()).expect("text too large");
         let start = Instant::now();

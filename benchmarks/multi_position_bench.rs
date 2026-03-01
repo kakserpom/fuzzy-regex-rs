@@ -75,13 +75,14 @@ fn bench_pattern(pattern: &str, edits: u8, text: &str, _positions: &[usize], ite
     println!("Time per find: {per_iter_ns:.0} ns");
     // Throughput calculation - text is small enough that u32 suffices
     let text_len = u32::try_from(text.len()).unwrap_or(u32::MAX);
-    let throughput = f64::from(text_len) * f64::from(iterations) / elapsed.as_secs_f64() / 1_000_000.0;
+    let throughput =
+        f64::from(text_len) * f64::from(iterations) / elapsed.as_secs_f64() / 1_000_000.0;
     println!("Throughput: {throughput:.1} MB/s");
 }
 
 fn compare_sequential_vs_parallel(text: &str, positions: &[usize]) {
     use fuzzy_regex::engine::bitap::BitapMatcher;
-    use fuzzy_regex::engine::levenshtein::EditLimits;
+    use fuzzy_regex::engine::damlev::EditLimits;
 
     let pattern = "fox";
     let text_bytes = text.as_bytes();
