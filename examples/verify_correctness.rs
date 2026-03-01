@@ -34,7 +34,10 @@ fn verify_match(pattern: &str, text: &str, expected_match: Option<&str>) {
             // (greedy returns first found, normal may return best)
         }
         (None, None, None) => {
-            println!("✓ Pattern: {:?} - correctly found no match in {:?}", pattern, text);
+            println!(
+                "✓ Pattern: {:?} - correctly found no match in {:?}",
+                pattern, text
+            );
         }
         (Some(n), None, _) => {
             let normal_text = &text[n.start()..n.end()];
@@ -98,7 +101,12 @@ fn main() {
     // Test 6: DNA sequences
     println!("\n--- Test 6: DNA sequences ---");
     let dna: String = (0..100)
-        .map(|i| match i % 4 { 0 => 'A', 1 => 'C', 2 => 'G', _ => 'T' })
+        .map(|i| match i % 4 {
+            0 => 'A',
+            1 => 'C',
+            2 => 'G',
+            _ => 'T',
+        })
         .collect();
     verify_match("(?:ACGT){e<=1}", &dna, Some("ACGT"));
     verify_match("(?:ACGTACGT){e<=2}", &dna, Some("ACGTACGT"));
@@ -134,7 +142,11 @@ fn main() {
 
     // Test 12: Special regex characters in pattern
     println!("\n--- Test 12: Patterns with context ---");
-    verify_match("The (?:quick){e<=1} brown", "The quack brown fox", Some("The quack brown"));
+    verify_match(
+        "The (?:quick){e<=1} brown",
+        "The quack brown fox",
+        Some("The quack brown"),
+    );
     verify_match("(?:hello){e<=1} world", "hallo world!", Some("hallo world"));
 
     println!("\n=== All correctness tests passed! ===");

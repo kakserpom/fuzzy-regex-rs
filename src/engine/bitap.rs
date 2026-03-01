@@ -14,8 +14,8 @@
     clippy::inline_always
 )]
 
+use super::damlev::{DamLevMatch, EditLimits};
 use super::hash::FxHashMap;
-use super::damlev::{EditLimits, DamLevMatch};
 
 /// Fast UTF-8 character decoder - avoids `str::from_utf8` + `chars().next()` overhead.
 /// Returns (char, `byte_length`).
@@ -703,11 +703,7 @@ impl BitapMatcher {
     /// Find the first match using the same algorithm as `find_all_non_overlapping`.
     /// Returns as soon as a match is found, avoiding scanning the rest of the text.
     #[must_use]
-    pub fn find_first_non_overlapping(
-        &self,
-        text: &str,
-        threshold: f32,
-    ) -> Option<DamLevMatch> {
+    pub fn find_first_non_overlapping(&self, text: &str, threshold: f32) -> Option<DamLevMatch> {
         // Try ASCII fast path if both pattern and text are ASCII
         if self.is_ascii && text.is_ascii() {
             if let Some(m) = self.find_first_ascii_fast(text.as_bytes(), threshold) {
@@ -3179,11 +3175,7 @@ impl BitapMatcher {
 
     /// Streaming search for large k values (uses heap allocation with three-buffer rotation).
     /// Supports transposition detection. Continues processing after fuzzy matches to prefer exact matches.
-    fn find_first_streaming_large_k(
-        &self,
-        text: &[u8],
-        threshold: f32,
-    ) -> Option<DamLevMatch> {
+    fn find_first_streaming_large_k(&self, text: &[u8], threshold: f32) -> Option<DamLevMatch> {
         let max_edits = self.limits.max_edits as usize;
 
         // Handle empty text: pattern can still match via pure deletions

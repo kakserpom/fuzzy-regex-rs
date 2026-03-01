@@ -14,8 +14,8 @@ use std::cell::RefCell;
 
 use super::GuardNfa;
 use super::bitap::BitapMatcher;
+use super::damlev::{DamLevNfa, EditLimits, SearchBuffers};
 use super::hash::{FxHashMap, FxHashSet};
-use super::damlev::{EditLimits, DamLevNfa, SearchBuffers};
 use crate::ir::{EditCharRestriction, LiteralPattern};
 
 /// Cached search results from fuzzy search.

@@ -8,12 +8,12 @@
 pub mod backtrack;
 pub mod bitap;
 pub mod captures;
+pub mod damlev;
 pub mod dfa;
 pub mod fuzzy_bridge;
 pub mod fuzzy_nfa;
 pub mod guard_nfa;
 pub mod hash;
-pub mod damlev;
 pub mod matcher;
 pub mod myers;
 pub mod prefilter;

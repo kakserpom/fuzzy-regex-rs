@@ -1611,7 +1611,7 @@ fn test_cost_constraint_rejects_over_limit() {
     let re = FuzzyRegex::new("(?:hi){c<=1}").unwrap();
     assert!(re.is_match("hi")); // exact, cost=0
     assert!(re.is_match("ho")); // 1 sub, cost=1
-                                // "xy" would need 2 substitutions (cost=2), should NOT match
+    // "xy" would need 2 substitutions (cost=2), should NOT match
     assert!(!re.is_match("xy"));
 }
 
@@ -2036,7 +2036,7 @@ fn test_cost_exclusive_bound() {
     assert!(re.is_match("ab")); // cost=0
     assert!(re.is_match("ac")); // 1 sub, cost=1
     assert!(re.is_match("cb")); // 1 sub, cost=1
-                                // 2 subs would be cost=2, which is < 3
+    // 2 subs would be cost=2, which is < 3
 }
 
 #[test]

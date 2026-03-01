@@ -33,7 +33,10 @@ where
     let per_iter = elapsed / iterations;
     let per_iter_us = per_iter.as_nanos() as f64 / 1000.0;
 
-    println!("{:40} {:>10.2} us/iter ({} iters)", name, per_iter_us, iterations);
+    println!(
+        "{:40} {:>10.2} us/iter ({} iters)",
+        name, per_iter_us, iterations
+    );
 }
 
 fn main() {

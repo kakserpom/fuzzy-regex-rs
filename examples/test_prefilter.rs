@@ -8,7 +8,8 @@ fn main() {
     let m = re.find("hello");
     println!("Match: {:?}", m);
     if let Some(m) = m {
-        println!("Edits: total={}, i={}, d={}, s={}",
+        println!(
+            "Edits: total={}, i={}, d={}, s={}",
             m.edits().total(),
             m.edits().insertions,
             m.edits().deletions,

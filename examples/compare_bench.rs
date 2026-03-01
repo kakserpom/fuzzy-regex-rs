@@ -77,7 +77,12 @@ fn main() {
     // Test 6: DNA sequence
     println!("\nTest 6: DNA sequence (1000 bp)");
     let dna: String = (0..1000)
-        .map(|i| match i % 4 { 0 => 'A', 1 => 'C', 2 => 'G', _ => 'T' })
+        .map(|i| match i % 4 {
+            0 => 'A',
+            1 => 'C',
+            2 => 'G',
+            _ => 'T',
+        })
         .collect();
     let re6 = FuzzyRegex::new("(?:ACGTACGT){e<=2}").unwrap();
     bench("  find motif with e<=2", 100, || {

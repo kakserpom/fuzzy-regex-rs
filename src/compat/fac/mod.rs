@@ -2,11 +2,11 @@
 
 use super::matches::{FuzzyMatch, FuzzyMatches, Segment};
 use super::pattern::Pattern;
-use crate::api::regex::FuzzyRegex;
-use crate::engine::damlev::EditLimits;
-use crate::engine::MultiBitapMatcher;
-use crate::types::{FuzzyLimits, FuzzyPenalties};
 use crate::FuzzyRegexBuilder;
+use crate::api::regex::FuzzyRegex;
+use crate::engine::MultiBitapMatcher;
+use crate::engine::damlev::EditLimits;
+use crate::types::{FuzzyLimits, FuzzyPenalties};
 use std::borrow::Cow;
 
 /// Escape special regex characters in a pattern string.
