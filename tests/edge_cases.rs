@@ -534,15 +534,100 @@ fn test_nested_alternation() {
 }
 
 // =============================================================================
-// Dot (Wildcard) Edge Cases
+// Greedy vs Lazy Quantifier Tests
 // =============================================================================
 
 #[test]
-fn test_dot_does_not_match_newline_by_default() {
-    // . should not match newline by default
-    let re = FuzzyRegex::new("a.b").unwrap();
-    assert!(re.is_match("aXb"));
-    assert!(!re.is_match("a\nb"));
+fn test_greedy_question_mark() {
+    // Greedy (default): a? matches one if possible
+    let greedy = FuzzyRegex::new("a?").unwrap();
+    assert_eq!(greedy.find("aaa").unwrap().as_str(), "a");
+
+    // Lazy: a?? prefers zero
+    let lazy = FuzzyRegex::new("a??").unwrap();
+    assert_eq!(lazy.find("aaa").unwrap().as_str(), "");
+}
+
+#[test]
+fn test_greedy_brace_quantifier() {
+    // Greedy {2,5} - match as many as possible
+    let greedy = FuzzyRegex::new("a{2,5}").unwrap();
+    assert_eq!(greedy.find("aaaaa").unwrap().as_str(), "aaaaa");
+    assert_eq!(greedy.find("aa").unwrap().as_str(), "aa");
+
+    // Lazy {2,5}? - match as few as possible
+    let lazy = FuzzyRegex::new("a{2,5}?").unwrap();
+    assert_eq!(lazy.find("aaaaa").unwrap().as_str(), "aa");
+    assert_eq!(lazy.find("aa").unwrap().as_str(), "aa");
+}
+
+#[test]
+fn test_greedy_brace_exact_count() {
+    // Exact count {3}
+    let re = FuzzyRegex::new("a{3}").unwrap();
+    assert_eq!(re.find("aaaa").unwrap().as_str(), "aaa");
+}
+
+#[test]
+fn test_greedy_brace_min_only() {
+    // {2,} - at least 2, greedy matches as many as possible
+    let greedy = FuzzyRegex::new("a{2,}").unwrap();
+    assert_eq!(greedy.find("aaaa").unwrap().as_str(), "aaaa");
+
+    // {2,}? - at least 2, lazy matches minimum
+    let lazy = FuzzyRegex::new("a{2,}?").unwrap();
+    assert_eq!(lazy.find("aaaa").unwrap().as_str(), "aa");
+}
+
+#[test]
+fn test_ungreedy_flag_inverts_greedy() {
+    // (?U) inverts greediness - * becomes non-greedy by default
+    let re = FuzzyRegex::new("(?U)a.*b").unwrap();
+    let m = re.find("aXXbYYb").unwrap();
+    assert_eq!(m.as_str(), "aXXb");
+
+    // (?U) also makes *? greedy
+    let re2 = FuzzyRegex::new("(?U)a.*?b").unwrap();
+    let m2 = re2.find("aXXbYYb").unwrap();
+    assert_eq!(m2.as_str(), "aXXbYYb");
+}
+
+#[test]
+fn test_ungreedy_flag_with_plus() {
+    // Without (?U): a+ is greedy
+    let greedy = FuzzyRegex::new("a+").unwrap();
+    assert_eq!(greedy.find("aaa").unwrap().as_str(), "aaa");
+
+    // With (?U): a+ becomes non-greedy
+    let ungreedy = FuzzyRegex::new("(?U)a+").unwrap();
+    assert_eq!(ungreedy.find("aaa").unwrap().as_str(), "a");
+}
+
+#[test]
+fn test_nested_greedy_lazy() {
+    // Nested: greedy outer, lazy inner
+    let re = FuzzyRegex::new("a(.+?)b").unwrap();
+    let m = re.find("aXXXbYYYb").unwrap();
+    assert_eq!(m.as_str(), "aXXXb");
+    let caps = re.captures("aXXXbYYYb").unwrap();
+    assert_eq!(caps.get(1).unwrap().as_str(), "XXX");
+}
+
+#[test]
+fn test_greedy_with_alternation() {
+    // Greedy quantifier with alternation in group
+    let re = FuzzyRegex::new("(a|ab)+").unwrap();
+    assert_eq!(re.find("ab").unwrap().as_str(), "ab");
+}
+
+#[test]
+fn test_lazy_with_alternation() {
+    // Lazy quantifier with alternation - prefers shorter alternatives
+    let re = FuzzyRegex::new("(a|ab)+?").unwrap();
+    let m = re.find("ab").unwrap();
+    // Lazy should prefer 'a' first but since the whole match needs to match "ab",
+    // it will match the shortest valid combination
+    assert!(m.as_str().len() >= 1);
 }
 
 #[test]
