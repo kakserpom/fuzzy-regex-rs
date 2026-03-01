@@ -10,22 +10,24 @@ Match positions in the string.
 | `$` | End of string |
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Match at start
-let re1 = FuzzyRegex::new("^hello").unwrap();
-assert!(re1.is_match("hello world"));
-assert!(!re1.is_match("say hello"));
+    // Match at start
+    let re1 = FuzzyRegex::new("^hello").unwrap();
+    assert!(re1.is_match("hello world"));
+    assert!(!re1.is_match("say hello"));
 
-// Match at end
-let re2 = FuzzyRegex::new("hello$").unwrap();
-assert!(re2.is_match("say hello"));
-assert!(!re2.is_match("hello world"));
+    // Match at end
+    let re2 = FuzzyRegex::new("hello$").unwrap();
+    assert!(re2.is_match("say hello"));
+    assert!(!re2.is_match("hello world"));
 
-// Match entire string
-let re3 = FuzzyRegex::new("^hello$").unwrap();
-assert!(re3.is_match("hello"));
-assert!(!re3.is_match("hello world"));
+    // Match entire string
+    let re3 = FuzzyRegex::new("^hello$").unwrap();
+    assert!(re3.is_match("hello"));
+    assert!(!re3.is_match("hello world"));
+}
 ```
 
 ## Word Boundaries
@@ -36,18 +38,20 @@ assert!(!re3.is_match("hello world"));
 | `\B` | Non-word boundary |
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Match whole word "cat"
-let re1 = FuzzyRegex::new(r"\bcat\b").unwrap();
-assert!(re1.is_match("cat"));
-assert!(re1.is_match("the cat sat"));
-assert!(!re1.is_match("category"));
+    // Match whole word "cat"
+    let re1 = FuzzyRegex::new(r"\bcat\b").unwrap();
+    assert!(re1.is_match("cat"));
+    assert!(re1.is_match("the cat sat"));
+    assert!(!re1.is_match("category"));
 
-// Match "cat" not at word boundary
-let re2 = FuzzyRegex::new(r"\Bcat\B").unwrap();
-assert!(re2.is_match("category"));
-assert!(!re2.is_match("cat"));
+    // Match "cat" not at word boundary
+    let re2 = FuzzyRegex::new(r"\Bcat\B").unwrap();
+    assert!(re2.is_match("category"));
+    assert!(!re2.is_match("cat"));
+}
 ```
 
 ## Multi-line Mode
@@ -55,10 +59,12 @@ assert!(!re2.is_match("cat"));
 With `(?m)`, `^` and `$` match line boundaries:
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-let re = FuzzyRegex::new("(?m)^hello$").unwrap();
-let text = "hello\nhello\nhello";
-let matches: Vec<_> = re.find_iter(text).collect();
-assert_eq!(matches.len(), 3);
+    let re = FuzzyRegex::new("(?m)^hello$").unwrap();
+    let text = "hello\nhello\nhello";
+    let matches: Vec<_> = re.find_iter(text).collect();
+    assert_eq!(matches.len(), 3);
+}
 ```

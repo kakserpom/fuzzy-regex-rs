@@ -5,12 +5,16 @@ Match incomplete or streaming input.
 ## Enabling Partial Matching
 
 ```rust
-use fuzzy_regex::FuzzyRegexBuilder;
+fn main() {
+    use fuzzy_regex::FuzzyRegexBuilder;
 
-let re = FuzzyRegexBuilder::new("(?:hello){e<=1}")
-    .partial(true)
-    .build()
-    .unwrap();
+    let re = FuzzyRegexBuilder::new("(?:hello){e<=1}")
+        .partial(true)
+        .build()
+        .unwrap();
+    
+    println!("Created");
+}
 ```
 
 ## How It Works
@@ -18,22 +22,26 @@ let re = FuzzyRegexBuilder::new("(?:hello){e<=1}")
 When enabled, matches that reach the end of the input are marked as "partial":
 
 ```rust
-let re = FuzzyRegexBuilder::new("(?:hello){e<=1}")
-    .partial(true)
-    .build()
-    .unwrap();
+fn main() {
+    use fuzzy_regex::FuzzyRegexBuilder;
 
-// Match at end of text - partial
-let m1 = re.find("hello").unwrap();
-assert!(m1.partial());
+    let re = FuzzyRegexBuilder::new("(?:hello){e<=1}")
+        .partial(true)
+        .build()
+        .unwrap();
 
-// Match not at end - not partial
-let m2 = re.find("say hello").unwrap();
-assert!(!m2.partial());
+    // Match at end of text - partial
+    let m1 = re.find("hello").unwrap();
+    assert!(m1.partial());
 
-// Fuzzy match reaching end - also partial
-let m3 = re.find("hallo").unwrap();
-assert!(m3.partial());
+    // Match not at end - not partial
+    let m2 = re.find("say hello").unwrap();
+    assert!(!m2.partial());
+
+    // Fuzzy match reaching end - also partial
+    let m3 = re.find("hallo").unwrap();
+    assert!(m3.partial());
+}
 ```
 
 ## Use Cases
@@ -41,19 +49,21 @@ assert!(m3.partial());
 ### Streaming Input
 
 ```rust
-use fuzzy_regex::FuzzyRegexBuilder;
+fn main() {
+    use fuzzy_regex::FuzzyRegexBuilder;
 
-let re = FuzzyRegexBuilder::new("(?:command){e<=1}")
-    .partial(true)
-    .build()
-    .unwrap();
+    let re = FuzzyRegexBuilder::new("(?:command){e<=1}")
+        .partial(true)
+        .build()
+        .unwrap();
 
-let mut stream = re.stream();
+    let mut stream = re.stream();
 
-// Feed incomplete data
-for m in stream.feed(b"cmd") {
-    if m.partial() {
-        println!("Partial match: might be complete when more data arrives");
+    // Feed incomplete data
+    for m in stream.feed(b"cmd") {
+        if m.partial() {
+            println!("Partial match: might be complete when more data arrives");
+        }
     }
 }
 ```
@@ -61,10 +71,19 @@ for m in stream.feed(b"cmd") {
 ### Progressive Matching
 
 ```rust
-// Check if more input needed
-let m = re.find("incomplete");
-if m.map(|m| m.partial()).unwrap_or(false) {
-    // Get more input
+fn main() {
+    use fuzzy_regex::FuzzyRegexBuilder;
+
+    let re = FuzzyRegexBuilder::new("(?:hello){e<=1}")
+        .partial(true)
+        .build()
+        .unwrap();
+
+    // Check if more input needed
+    let m = re.find("incomplete");
+    if m.map(|m| m.partial()).unwrap_or(false) {
+        // Get more input
+    }
 }
 ```
 
@@ -73,11 +92,15 @@ if m.map(|m| m.partial()).unwrap_or(false) {
 By default (`partial(false)`), partial matches behave the same as full matches:
 
 ```rust
-let re = FuzzyRegexBuilder::new("(?:hello){e<=1}")
-    .partial(false) // default
-    .build()
-    .unwrap();
+fn main() {
+    use fuzzy_regex::FuzzyRegexBuilder;
 
-let m = re.find("hello").unwrap();
-assert!(!m.partial()); // Always false
+    let re = FuzzyRegexBuilder::new("(?:hello){e<=1}")
+        .partial(false) // default
+        .build()
+        .unwrap();
+
+    let m = re.find("hello").unwrap();
+    assert!(!m.partial()); // Always false
+}
 ```

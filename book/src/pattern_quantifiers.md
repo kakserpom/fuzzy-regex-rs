@@ -18,17 +18,19 @@ Control how many times to match a pattern.
 Add `?` to make quantifiers lazy (match as few as possible):
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Greedy: matches as much as possible
-let re1 = FuzzyRegex::new(r"<.+>").unwrap();
+    // Greedy: matches as much as possible
+    let re1 = FuzzyRegex::new(r"<.+>").unwrap();
 
-// Lazy: matches as little as possible  
-let re2 = FuzzyRegex::new(r"<.+?>").unwrap();
+    // Lazy: matches as little as possible  
+    let re2 = FuzzyRegex::new(r"<.+?>").unwrap();
 
-let text = "<tag>more</tag>";
-assert!(re1.find(text).unwrap().as_str() == "<tag>more</tag>");
-assert!(re2.find(text).unwrap().as_str() == "<tag>");
+    let text = "<tag>more</tag>";
+    assert!(re1.find(text).unwrap().as_str() == "<tag>more</tag>");
+    assert!(re2.find(text).unwrap().as_str() == "<tag>");
+}
 ```
 
 ## Possessive Quantifiers
@@ -36,17 +38,23 @@ assert!(re2.find(text).unwrap().as_str() == "<tag>");
 Prevent backtracking (useful for performance):
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// a*+ doesn't backtrack
-let re = FuzzyRegex::new("a*+b").unwrap();
+    // a*+ doesn't backtrack
+    let re = FuzzyRegex::new("a*+b").unwrap();
+    println!("{}", re.is_match("ab"));
+}
 ```
 
 ## Quantifiers with Fuzzy Matching
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Match "ab" with up to 1 error, repeated 1-3 times
-let re = FuzzyRegex::new("(?:ab){e<=1}{1,3}").unwrap();
+    // Match "ab" with up to 1 error, repeated 1-3 times
+    let re = FuzzyRegex::new("(?:ab){e<=1}{1,3}").unwrap();
+    println!("{}", re.is_match("ab"));
+}
 ```

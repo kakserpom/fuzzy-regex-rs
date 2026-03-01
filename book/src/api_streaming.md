@@ -5,33 +5,46 @@ Process large data incrementally without loading into memory.
 ## Creating a Stream
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
-let mut stream = re.stream();
+    let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
+    let mut stream = re.stream();
+    println!("Stream created");
+}
 ```
 
 ## Feeding Data
 
 ```rust
-let mut stream = re.stream();
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Feed data in chunks
-for m in stream.feed(b"some hay and niddle here") {
-    println!("Found '{}' at {}", m.as_str(), m.start());
+    let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
+    let mut stream = re.stream();
+
+    // Feed data in chunks
+    for m in stream.feed(b"some hay and niddle here") {
+        println!("Found '{}' at {}", m.as_str(), m.start());
+    }
 }
 ```
 
 ## Position Tracking
 
 ```rust
-let mut stream = re.stream();
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-stream.feed(b"hello");
-assert_eq!(stream.position(), 5);
+    let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
+    let mut stream = re.stream();
 
-stream.feed(b" world");
-assert_eq!(stream.position(), 11);
+    stream.feed(b"hello");
+    assert_eq!(stream.position(), 5);
+
+    stream.feed(b" world");
+    assert_eq!(stream.position(), 11);
+}
 ```
 
 ## Cross-Boundary Matches
@@ -39,24 +52,35 @@ assert_eq!(stream.position(), 11);
 Matches can span chunk boundaries:
 
 ```rust
-let mut stream = re.stream();
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// First chunk - no match yet
-let _ = stream.feed(b"xxx ");
+    let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
+    let mut stream = re.stream();
 
-// Second chunk - match spanning boundary
-let matches: Vec<_> = stream.feed(b"hello").collect();
+    // First chunk - no match yet
+    let _ = stream.feed(b"xxx ");
+
+    // Second chunk - match spanning boundary
+    let matches: Vec<_> = stream.feed(b"hello").collect();
+    println!("Matches: {}", matches.len());
+}
 ```
 
 ## Resetting
 
 ```rust
-let mut stream = re.stream();
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-stream.feed(b"hello world");
-stream.reset();
+    let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
+    let mut stream = re.stream();
 
-assert_eq!(stream.position(), 0);
+    stream.feed(b"hello world");
+    stream.reset();
+
+    assert_eq!(stream.position(), 0);
+}
 ```
 
 ## Finish
@@ -64,11 +88,16 @@ assert_eq!(stream.position(), 0);
 Check for remaining matches at end of stream:
 
 ```rust
-let mut stream = re.stream();
-stream.feed(b"test hel");
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Check remaining buffer
-let final_match = stream.finish();
+    let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
+    let mut stream = re.stream();
+    stream.feed(b"test hel");
+
+    // Check remaining buffer
+    let final_match = stream.finish();
+}
 ```
 
 ## Reader Integration
@@ -76,15 +105,17 @@ let final_match = stream.finish();
 Process files or other readers:
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
-use std::io::BufReader;
-use std::fs::File;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
+    use std::io::BufReader;
+    use std::fs::File;
 
-let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
-let file = File::open("large_file.txt").unwrap();
+    let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
+    let file = File::open("Cargo.toml").unwrap();
 
-for m in re.stream().search_reader(BufReader::new(file)) {
-    println!("Match at byte {}", m.start());
+    for m in re.stream().search_reader(BufReader::new(file)) {
+        println!("Match at byte {}", m.start());
+    }
 }
 ```
 
@@ -93,12 +124,15 @@ for m in re.stream().search_reader(BufReader::new(file)) {
 Search byte slices directly:
 
 ```rust
-let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
+fn main() {
+    let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
 
-if let Some(m) = re.find_bytes(b"hello world") {
-    println!("Found at {}-{}", m.start(), m.end());
+    if let Some(m) = re.find_bytes(b"hello world") {
+        println!("Found at {}-{}", m.start(), m.end());
+    }
+
+    // Iterate over bytes
+    let matches: Vec<_> = re.find_iter_bytes(b"hello hullo").collect();
+    println!("Matches: {}", matches.len());
 }
-
-// Iterate over bytes
-let matches: Vec<_> = re.find_iter_bytes(b"hello hullo").collect();
 ```

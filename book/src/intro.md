@@ -18,16 +18,18 @@
 Traditional regex requires exact matches. Fuzzy regex allows for "close enough" matches:
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Match "hello" with up to 1 edit
-let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
+    // Match "hello" with up to 1 edit
+    let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
 
-re.is_match("hello"); // Exact match
-re.is_match("hallo"); // 1 substitution
-re.is_match("helo"); // 1 deletion  
-re.is_match("helllo"); // 1 insertion
-re.is_match("hlelo"); // 1 transposition
+    println!("{}", re.is_match("hello")); // Exact match
+    println!("{}", re.is_match("hallo")); // 1 substitution
+    println!("{}", re.is_match("helo")); // 1 deletion  
+    println!("{}", re.is_match("helllo")); // 1 insertion
+    println!("{}", re.is_match("hlelo")); // 1 transposition
+}
 ```
 
 ## Performance

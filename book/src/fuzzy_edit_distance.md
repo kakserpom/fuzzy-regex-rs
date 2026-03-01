@@ -51,16 +51,18 @@ Cost:    1
 ## Accessing Edit Information
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-let re = FuzzyRegex::new("(?:hello){e<=2}").unwrap();
-let m = re.find("hallo").unwrap();
+    let re = FuzzyRegex::new("(?:hello){e<=2}").unwrap();
+    let m = re.find("hallo").unwrap();
 
-println!("Similarity: {:.2}", m.similarity());
-println!("Edits: {}", m.len()); // Match length
+    println!("Similarity: {:.2}", m.similarity());
+    println!("Edits: {}", m.len()); // Match length
 
-// Edit counts available in the engine
-// Use engine::EditCounts for detailed info
+    // Edit counts available in the engine
+    // Use engine::EditCounts for detailed info
+}
 ```
 
 ## Similarity Score
@@ -68,14 +70,18 @@ println!("Edits: {}", m.len()); // Match length
 The similarity score ranges from 0.0 to 1.0, where 1.0 is an exact match:
 
 ```rust
-use fuzzy_regex::FuzzyRegexBuilder;
+fn main() {
+    use fuzzy_regex::FuzzyRegexBuilder;
 
-let re = FuzzyRegexBuilder::new("(?:hello){e<=2}")
-    .similarity(0.8) // Minimum similarity threshold
-    .build()
-    .unwrap();
+    let re = FuzzyRegexBuilder::new("(?:hello){e<=2}")
+        .similarity(0.8) // Minimum similarity threshold
+        .build()
+        .unwrap();
 
-// Exact match: similarity = 1.0
-// 1 edit: similarity around 0.8-0.9
-// 2 edits: similarity around 0.6-0.8
+    // Exact match: similarity = 1.0
+    // 1 edit: similarity around 0.8-0.9
+    // 2 edits: similarity around 0.6-0.8
+    println!("{}", re.is_match("hello"));
+    println!("{}", re.is_match("hallo"));
+}
 ```

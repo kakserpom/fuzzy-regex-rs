@@ -7,11 +7,15 @@ Optimize fuzzy-regex for your use case.
 ### 1. Use Specific Edit Limits
 
 ```rust
-// Good: Specific limit
-"(?:hello){e<=1}"
+fn main() {
+    // Good: Specific limit
+    let _ = fuzzy_regex::FuzzyRegex::new("(?:hello){e<=1}").unwrap();
 
-// Less efficient: Higher limit
-"(?:hello){e<=5}"
+    // Less efficient: Higher limit
+    let _ = fuzzy_regex::FuzzyRegex::new("(?:hello){e<=5}").unwrap();
+    
+    println!("Done");
+}
 ```
 
 Lower edit limits = faster matching.
@@ -19,21 +23,29 @@ Lower edit limits = faster matching.
 ### 2. Prefer Shorter Patterns
 
 ```rust
-// Bitap (fast): ≤64 chars
-"(?:short){e<=1}"
+fn main() {
+    // Bitap (fast): ≤64 chars
+    let _ = fuzzy_regex::FuzzyRegex::new("(?:short){e<=1}").unwrap();
 
-// NFA (slower): >64 chars
-"(?:very_long_pattern_that_exceeds_sixty_four_characters){e<=1}"
+    // NFA (slower): >64 chars
+    let _ = fuzzy_regex::FuzzyRegex::new("(?:very_long_pattern_that_exceeds_sixty_four_characters){e<=1}").unwrap();
+    
+    println!("Done");
+}
 ```
 
 ### 3. Extract Exact Parts
 
 ```rust
-// Good: Exact prefix and suffix help prefilter
-"exact_prefix (?:fuzzy){e<=1} exact_suffix"
+fn main() {
+    // Good: Exact prefix and suffix help prefilter
+    let _ = fuzzy_regex::FuzzyRegex::new("exact_prefix (?:fuzzy){e<=1} exact_suffix").unwrap();
 
-// Slower: Entirely fuzzy
-"(?:entirely_fuzzy){e<=1}"
+    // Slower: Entirely fuzzy
+    let _ = fuzzy_regex::FuzzyRegex::new("(?:entirely_fuzzy){e<=1}").unwrap();
+    
+    println!("Done");
+}
 ```
 
 ## Builder Options
@@ -41,19 +53,31 @@ Lower edit limits = faster matching.
 ### 1. Set Similarity Threshold
 
 ```rust
-// Skip low-quality matches early
-FuzzyRegexBuilder::new("(?:hello){e<=2}")
-    .similarity(0.8)
-    .build();
+fn main() {
+    use fuzzy_regex::FuzzyRegexBuilder;
+
+    // Skip low-quality matches early
+    let _ = FuzzyRegexBuilder::new("(?:hello){e<=2}")
+        .similarity(0.8)
+        .build();
+    
+    println!("Done");
+}
 ```
 
 ### 2. Use Case Insensitive at Builder
 
 ```rust
-// More efficient than inline (?i)
-FuzzyRegexBuilder::new("(?:hello)")
-    .case_insensitive(true)
-    .build();
+fn main() {
+    use fuzzy_regex::FuzzyRegexBuilder;
+
+    // More efficient than inline (?i)
+    let _ = FuzzyRegexBuilder::new("(?:hello)")
+        .case_insensitive(true)
+        .build();
+    
+    println!("Done");
+}
 ```
 
 ## API Usage
@@ -61,35 +85,56 @@ FuzzyRegexBuilder::new("(?:hello)")
 ### 1. Use Streaming for Large Data
 
 ```rust
-// Good: Process in chunks
-let mut stream = re.stream();
-for chunk in data.chunks(8192) {
-    // Process chunk
-}
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Bad: Load all into memory
-let matches: Vec<_> = re.find_iter(&large_text).collect();
+    let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
+    
+    // Good: Process in chunks
+    let mut stream = re.stream();
+    let data = b"hello world";
+    for chunk in data.chunks(8) {
+        // Process chunk
+    }
+
+    // Bad: Load all into memory
+    let large_text = "hello world";
+    let _matches: Vec<_> = re.find_iter(&large_text).collect();
+}
 ```
 
 ### 2. Use find() for First Match
 
 ```rust
-// Good: Stop after first match
-if let Some(m) = re.find(text) {
-    // ...
-}
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Unnecessary: Find all when only first needed
-let all: Vec<_> = re.find_iter(text).collect();
+    let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
+    let text = "hello world";
+
+    // Good: Stop after first match
+    if let Some(m) = re.find(text) {
+        println!("Found: {}", m.as_str());
+    }
+
+    // Unnecessary: Find all when only first needed
+    let _all: Vec<_> = re.find_iter(text).collect();
+}
 ```
 
 ### 3. Check supports_streaming()
 
 ```rust
-if re.supports_streaming() {
-    // Use streaming API for best performance
-    let mut stream = re.stream();
-    // ...
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
+
+    let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
+    
+    if re.supports_streaming() {
+        // Use streaming API for best performance
+        let mut stream = re.stream();
+        println!("Streaming supported");
+    }
 }
 ```
 

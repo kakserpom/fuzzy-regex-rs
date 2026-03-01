@@ -27,11 +27,16 @@ fuzzy-regex supports standard regex syntax plus fuzzy matching.
 Special characters that need escaping: `.^$*+?{}[]\\|()`
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Match literal dot
-let re = FuzzyRegex::new(r"file\.txt").unwrap();
+    // Match literal dot
+    let re = FuzzyRegex::new(r"file\.txt").unwrap();
 
-// Match literal backslash
-let re2 = FuzzyRegex::new(r"path\\to\\file").unwrap();
+    // Match literal backslash
+    let re2 = FuzzyRegex::new(r"path\\to\\file").unwrap();
+    
+    println!("dot match: {}", re.is_match("file.txt"));
+    println!("backslash match: {}", re2.is_match(r"path\to\file"));
+}
 ```

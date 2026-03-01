@@ -5,36 +5,44 @@ Define named lists of patterns for reuse.
 ## Basic Usage
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-let mut re = FuzzyRegex::new(r"\L<keywords>").unwrap();
+    let mut re = FuzzyRegex::new(r"\L<keywords>").unwrap();
 
-// Set the word list
-re.set_word_list(&["hello", "world", "test"]).unwrap();
+    // Set the word list
+    re.set_word_list(&["hello", "world", "test"]).unwrap();
 
-assert!(re.is_match("hello"));
-assert!(re.is_match("world"));
-assert!(!re.is_match("foo"));
+    assert!(re.is_match("hello"));
+    assert!(re.is_match("world"));
+    assert!(!re.is_match("foo"));
+}
 ```
 
 ## With Fuzzy Matching
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-let mut re = FuzzyRegex::new(r"\L<keywords>{e<=1}").unwrap();
-re.set_word_list(&["hello", "world"]).unwrap();
+    let mut re = FuzzyRegex::new(r"\L<keywords>{e<=1}").unwrap();
+    re.set_word_list(&["hello", "world"]).unwrap();
 
-assert!(re.is_match("hallo")); // "hello" with 1 error
-assert!(re.is_match("wrold")); // "world" with 1 error
+    assert!(re.is_match("hallo")); // "hello" with 1 error
+    assert!(re.is_match("wrold")); // "world" with 1 error
+}
 ```
 
 ## Multiple Word Lists
 
 ```rust
-let re = FuzzyRegex::new(r"\L<names>|\L<places>").unwrap();
-re.set_word_list(&["alice", "bob"]).unwrap();
-// Note: Multiple lists require builder pattern
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
+
+    let re = FuzzyRegex::new(r"\L<names>|\L<places>").unwrap();
+    // Note: Multiple lists require builder pattern
+    println!("Created");
+}
 ```
 
 ## Use Cases

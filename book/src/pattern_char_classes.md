@@ -5,19 +5,24 @@ Define sets of characters to match.
 ## Basic Classes
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Match any vowel
-let re1 = FuzzyRegex::new("[aeiou]").unwrap();
+    // Match any vowel
+    let re1 = FuzzyRegex::new("[aeiou]").unwrap();
 
-// Match any consonant
-let re2 = FuzzyRegex::new("[^aeiou]").unwrap();
+    // Match any consonant
+    let re2 = FuzzyRegex::new("[^aeiou]").unwrap();
 
-// Match any lowercase letter
-let re3 = FuzzyRegex::new("[a-z]").unwrap();
+    // Match any lowercase letter
+    let re3 = FuzzyRegex::new("[a-z]").unwrap();
 
-// Match any alphanumeric
-let re4 = FuzzyRegex::new("[a-zA-Z0-9]").unwrap();
+    // Match any alphanumeric
+    let re4 = FuzzyRegex::new("[a-zA-Z0-9]").unwrap();
+    
+    println!("vowel: {}", re1.is_match("a"));
+    println!("consonant: {}", re2.is_match("b"));
+}
 ```
 
 ## Predefined Classes
@@ -38,37 +43,49 @@ By default, `\w`, `\d`, `\s` match ASCII characters only:
 Enable Unicode character classes with `(?u)` flag:
 
 ```rust
-use fuzzy_regex::FuzzyRegexBuilder;
+fn main() {
+    use fuzzy_regex::FuzzyRegexBuilder;
 
-// Via inline flag
-let re1 = FuzzyRegex::new("(?u)\\w+").unwrap();
-assert!(re1.is_match("привет")); // Cyrillic matched
+    // Via inline flag
+    let re1 = FuzzyRegex::new(r"(?u)\w+").unwrap();
+    assert!(re1.is_match("привет")); // Cyrillic matched
 
-// Via builder
-let re2 = FuzzyRegexBuilder::new("\\w+")
-    .unicode(true)
-    .build()
-    .unwrap();
+    // Via builder
+    let re2 = FuzzyRegexBuilder::new(r"\w+")
+        .unicode(true)
+        .build()
+        .unwrap();
+}
 ```
 
 ## Unicode Property Escapes
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Unicode letters
-let re1 = FuzzyRegex::new(r"\p{L}").unwrap();
+    // Unicode letters
+    let re1 = FuzzyRegex::new(r"\p{L}").unwrap();
 
-// Unicode digits
-let re2 = FuzzyRegex::new(r"\p{N}").unwrap();
+    // Unicode digits
+    let re2 = FuzzyRegex::new(r"\p{N}").unwrap();
 
-// Emoji
-let re3 = FuzzyRegex::new(r"\p{Emoji}").unwrap();
+    // Emoji
+    let re3 = FuzzyRegex::new(r"\p{Emoji}").unwrap();
+    
+    println!("letter: {}", re1.is_match("a"));
+    println!("digit: {}", re2.is_match("١")); // Arabic-Indic digit
+}
 ```
 
 ## Nested Classes
 
 ```rust
-// POSIX-like classes (inside character class)
-let re = FuzzyRegex::new("[[:alpha:]]").unwrap();
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
+
+    // POSIX-like classes (inside character class)
+    let re = FuzzyRegex::new("[[:alpha:]]").unwrap();
+    println!("alpha: {}", re.is_match("a"));
+}
 ```

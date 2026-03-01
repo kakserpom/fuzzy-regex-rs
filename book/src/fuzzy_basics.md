@@ -26,16 +26,22 @@ Apply fuzziness to a pattern segment using `{...}`:
 | `(?:text){t<=N}` | Allow up to N transpositions |
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// Allow up to 2 total edits
-let re1 = FuzzyRegex::new("(?:hello){e<=2}").unwrap();
+    // Allow up to 2 total edits
+    let re1 = FuzzyRegex::new("(?:hello){e<=2}").unwrap();
 
-// Allow specific edit types
-let re2 = FuzzyRegex::new("(?:hello){i<=1,d<=1}").unwrap();
+    // Allow specific edit types
+    let re2 = FuzzyRegex::new("(?:hello){i<=1,d<=1}").unwrap();
 
-// Allow substitutions only
-let re3 = FuzzyRegex::new("(?:hello){s<=2}").unwrap();
+    // Allow substitutions only
+    let re3 = FuzzyRegex::new("(?:hello){s<=2}").unwrap();
+    
+    println!("re1: {:?}", re1.is_match("hello"));
+    println!("re2: {:?}", re2.is_match("helo"));
+    println!("re3: {:?}", re3.is_match("hallo"));
+}
 ```
 
 ## Shorthand Syntax
@@ -43,14 +49,19 @@ let re3 = FuzzyRegex::new("(?:hello){s<=2}").unwrap();
 Use `~N` as shorthand for `{e<=N}`:
 
 ```rust
-use fuzzy_regex::FuzzyRegex;
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-// These are equivalent:
-let re1 = FuzzyRegex::new("(?:hello)~2").unwrap();
-let re2 = FuzzyRegex::new("(?:hello){e<=2}").unwrap();
+    // These are equivalent:
+    let re1 = FuzzyRegex::new("(?:hello)~2").unwrap();
+    let re2 = FuzzyRegex::new("(?:hello){e<=2}").unwrap();
 
-// Exact match with ~0
-let re3 = FuzzyRegex::new("(?:hello)~0").unwrap();
+    // Exact match with ~0
+    let re3 = FuzzyRegex::new("(?:hello)~0").unwrap();
+    
+    println!("re1 == re2: {}", re1.is_match("hello") == re2.is_match("hello"));
+    println!("re3 exact: {}", re3.is_match("hello"));
+}
 ```
 
 ## Unlimited Errors
@@ -58,9 +69,14 @@ let re3 = FuzzyRegex::new("(?:hello)~0").unwrap();
 Omit the number to allow unlimited edits:
 
 ```rust
-// Allow unlimited substitutions
-let re = FuzzyRegex::new("(?:hello){s}").unwrap();
+fn main() {
+    // Allow unlimited substitutions
+    let re = FuzzyRegex::new("(?:hello){s}").unwrap();
 
-// Allow any number of errors
-let re2 = FuzzyRegex::new("(?:hello){e}").unwrap();
+    // Allow any number of errors
+    let re2 = FuzzyRegex::new("(?:hello){e}").unwrap();
+    
+    println!("{}", re.is_match("hallo"));
+    println!("{}", re2.is_match("xyz"));
+}
 ```
