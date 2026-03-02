@@ -13,14 +13,12 @@
 )]
 // Note: dead_code is a valid lint but clippy::dead_code isn't a separate allow
 
+use std::borrow::Cow;
 use std::sync::Arc;
-
-use smartcow::SmartCow;
-use smartstring::{Compact, SmartString};
 
 use super::builder::{FuzzyRegexBuilder, HandlerMap, RegexConfig};
 
-type SmartStr = SmartString<Compact>;
+type SmartStr = String;
 use super::match_result::{CaptureMatches, Captures, Match, Matches, Replacer, Split};
 use crate::compiler::build_nfa;
 use crate::engine::hash::FxHashMap;
@@ -74,7 +72,7 @@ pub struct FuzzyRegex {
     dfa: Option<RefCell<Dfa>>,
     /// Named word lists for \L<name> patterns.
     /// Map from list name to vector of words.
-    word_lists: FxHashMap<SmartStr, Vec<SmartCow<'static>>>,
+    word_lists: FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
     /// Custom handlers for (?call:name) patterns.
     handlers: HandlerMap,
 }
@@ -316,7 +314,7 @@ impl FuzzyRegex {
     pub fn set_word_list(
         &mut self,
         name: impl Into<SmartStr>,
-        words: Vec<impl Into<SmartCow<'static>>>,
+        words: Vec<impl Into<Cow<'static, str>>>,
     ) {
         self.word_lists
             .insert(name.into(), words.into_iter().map(Into::into).collect());
@@ -324,7 +322,7 @@ impl FuzzyRegex {
 
     /// Get a named word list.
     #[must_use]
-    pub fn get_word_list(&self, name: &str) -> Option<&[SmartCow<'static>]> {
+    pub fn get_word_list(&self, name: &str) -> Option<&[Cow<'static, str>]> {
         self.word_lists.get(name).map(Vec::as_slice)
     }
 
@@ -333,7 +331,7 @@ impl FuzzyRegex {
     /// Returns a reference to the internal word lists map.
     /// This matches the API of mrab-regex's `named_lists` property.
     #[must_use]
-    pub fn named_lists(&self) -> &FxHashMap<SmartStr, Vec<SmartCow<'static>>> {
+    pub fn named_lists(&self) -> &FxHashMap<SmartStr, Vec<Cow<'static, str>>> {
         &self.word_lists
     }
 
@@ -454,6 +452,22 @@ impl FuzzyRegex {
                 ));
             }
             return None;
+        }
+
+        // Fast path for simple alternation: use Matcher::find directly
+        // This avoids the overhead of find_iter -> find_all
+        // Only for exact alternations (no fuzzy edits) - fuzzy alternations need special handling
+        if self.nfa.is_simple_alternation()
+            && !self.config.match_flags.best_match
+            && !self.config.match_flags.enhance_match
+            && !self.config.match_flags.posix
+            && self.fuzzy_bridge.as_ref().is_some_and(|b| {
+                // Check that all patterns have max_edits = 0 (exact matching)
+                (0..b.pattern_count()).all(|i| b.pattern_max_edits(i).unwrap_or(0) == 0)
+            })
+        {
+            let matcher = self.create_matcher(self.is_unanchored());
+            return matcher.find(text).map(|m| self.convert_match(text, m));
         }
 
         // Fallback: use full matcher
@@ -1418,13 +1432,20 @@ impl FuzzyRegex {
                     .map(|slot| slot.map(|(s, e)| (idx + s, idx + e)))
                     .collect();
 
+                let handler_overrides: Vec<(usize, usize, String)> = m
+                    .captures
+                    .handler_overrides()
+                    .iter()
+                    .map(|(s, e, t)| (*s, *e, t.clone()))
+                    .collect();
+
                 results.push(Captures::new(
                     text,
-                    adjusted_slots,
                     self.named_groups.clone(),
-                    m.similarity,
+                    adjusted_slots,
+                    handler_overrides,
                     m.edits,
-                    m.captures.handler_overrides().to_vec(),
+                    m.similarity,
                 ));
             }
         }
@@ -1445,15 +1466,24 @@ impl FuzzyRegex {
             if let Some(m) = matcher.find(&text[start + idx..]) {
                 let mut caps = self.convert_captures(&text[start + idx..], m);
                 // Adjust offsets
+                let adjusted_slots: Vec<Option<(usize, usize)>> = caps
+                    .iter()
+                    .map(|opt| opt.map(|m| (start + idx + m.start(), start + idx + m.end())))
+                    .collect();
+
+                let handler_overrides: Vec<(usize, usize, String)> = caps
+                    .handler_overrides()
+                    .iter()
+                    .map(|(s, e, t)| (*s, *e, t.clone()))
+                    .collect();
+
                 caps = Captures::new(
                     text,
-                    caps.iter()
-                        .map(|opt| opt.map(|m| (start + idx + m.start(), start + idx + m.end())))
-                        .collect(),
                     self.named_groups.clone(),
-                    caps.similarity(),
+                    adjusted_slots,
+                    handler_overrides,
                     caps.edits().clone(),
-                    caps.handler_overrides().to_vec(),
+                    caps.similarity(),
                 );
                 return Some(caps);
             }
@@ -1692,13 +1722,22 @@ impl FuzzyRegex {
 
     /// Convert internal match result to Captures type.
     fn convert_captures<'t>(&self, text: &'t str, result: MatchResult) -> Captures<'t> {
+        let slots: Vec<Option<(usize, usize)>> = result.captures.slots().to_vec();
+
+        let handler_overrides: Vec<(usize, usize, String)> = result
+            .captures
+            .handler_overrides()
+            .iter()
+            .map(|(s, e, t)| (*s, *e, t.clone()))
+            .collect();
+
         Captures::new(
             text,
-            result.captures.slots().to_vec(),
             self.named_groups.clone(),
-            result.similarity,
+            slots,
+            handler_overrides,
             result.edits,
-            result.captures.handler_overrides().to_vec(),
+            result.similarity,
         )
     }
 
@@ -1832,7 +1871,7 @@ fn collect_captures_recursive(
         Ast::Group { index, name, expr } => {
             *max_index = (*max_index).max(*index);
             if let Some(n) = name {
-                names.insert(n.clone().into(), *index);
+                names.insert(n.clone(), *index);
             }
             collect_captures_recursive(expr, max_index, names);
         }

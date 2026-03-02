@@ -1391,6 +1391,59 @@ impl FuzzyBridge {
             return None;
         }
 
+        // Fast path for exact matches: use memmem instead of Bitap
+        // Check if all patterns have max_edits = 0
+        let all_exact = pattern_indices
+            .iter()
+            .all(|&idx| self.pattern_max_edits(idx).unwrap_or(0) == 0);
+
+        if all_exact {
+            // Fast path for exact matches: use prefilter candidates + memcmp
+            // This avoids scanning the entire text for each pattern
+            let mut best: Option<(usize, usize, FuzzyMatchResult)> = None;
+
+            // Get candidate positions from prefilter
+            let candidates: Vec<usize> = prefilter.find_candidates(text).collect();
+
+            for &candidate in &candidates {
+                // Try each pattern at this position
+                for &pattern_idx in pattern_indices {
+                    if let Some(pattern_text) = self.pattern_text(pattern_idx) {
+                        let pattern_bytes = pattern_text.as_bytes();
+                        let pos = candidate;
+
+                        // Check if pattern fits at this position
+                        if pos + pattern_bytes.len() <= text.len() {
+                            // Use memcmp for fast comparison
+                            if text[pos..pos + pattern_bytes.len()] == *pattern_bytes {
+                                let result = FuzzyMatchResult {
+                                    end: pos + pattern_bytes.len(),
+                                    similarity: 1.0,
+                                    insertions: 0,
+                                    deletions: 0,
+                                    substitutions: 0,
+                                    swaps: 0,
+                                };
+
+                                if best
+                                    .as_ref()
+                                    .is_none_or(|(_, best_start, _)| pos < *best_start)
+                                {
+                                    best = Some((pattern_idx, pos, result));
+                                    if pos == 0 {
+                                        return best;
+                                    }
+                                }
+                                break; // Found match at this position, try next candidate
+                            }
+                        }
+                    }
+                }
+            }
+
+            return best;
+        }
+
         let text_str = std::str::from_utf8(text).ok()?;
         let max_offset = prefilter.max_offset();
 
@@ -1567,6 +1620,10 @@ impl FuzzyBridge {
                         .is_none_or(|(_, best_start, _)| m.start < *best_start)
                     {
                         best = Some((pattern_idx, m.start, result));
+                        // Early termination: if we found a match at position 0, no need to check other patterns
+                        if m.start == 0 {
+                            return best;
+                        }
                     }
                     continue;
                 }
@@ -1610,6 +1667,10 @@ impl FuzzyBridge {
                             .is_none_or(|(_, best_start, _)| m.start < *best_start)
                         {
                             best = Some((pattern_idx, m.start, result));
+                            // Early termination: if we found a match at position 0, no need to check other patterns
+                            if m.start == 0 {
+                                return best;
+                            }
                         }
                     }
                 }

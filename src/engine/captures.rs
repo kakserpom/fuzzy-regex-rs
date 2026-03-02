@@ -1,20 +1,19 @@
 //! Capture group handling during matching.
 
-use smallvec::SmallVec;
-use smartstring::{Compact, SmartString};
 use std::sync::{Arc, OnceLock};
 
 use super::hash::FxHashMap;
 
-type SmartStr = SmartString<Compact>;
+/// Type alias for capture group slots.
+type CaptureSlots = Vec<Option<(usize, usize)>>;
 
-/// Most patterns have few capture groups, so inline storage for 8 slots avoids heap allocation.
-type SlotVec = SmallVec<[Option<(usize, usize)>; 8]>;
+/// Type alias for string storage (using String for better performance).
+type Str = String;
 
 /// Static empty `FxHashMap` to avoid allocation for patterns without named groups.
-static EMPTY_NAMES: OnceLock<Arc<FxHashMap<SmartStr, usize>>> = OnceLock::new();
+static EMPTY_NAMES: OnceLock<Arc<FxHashMap<Str, usize>>> = OnceLock::new();
 
-fn empty_names() -> Arc<FxHashMap<SmartStr, usize>> {
+fn empty_names() -> Arc<FxHashMap<Str, usize>> {
     EMPTY_NAMES
         .get_or_init(|| Arc::new(FxHashMap::default()))
         .clone()
@@ -24,18 +23,19 @@ fn empty_names() -> Arc<FxHashMap<SmartStr, usize>> {
 #[derive(Debug, Clone)]
 pub struct CaptureState {
     /// Capture slots: (start, end) for each group (0 = full match).
-    slots: SlotVec,
+    slots: CaptureSlots,
     /// Named group mapping (shared across clones - never mutated after setup).
-    names: Arc<FxHashMap<SmartStr, usize>>,
+    names: Arc<FxHashMap<String, usize>>,
     /// Handler overrides: (`start_pos`, `end_pos`, `override_text`)
-    handler_overrides: Vec<(usize, usize, SmartStr)>,
+    /// Kept as Vec since most patterns don't use handlers.
+    handler_overrides: Vec<(usize, usize, String)>,
 }
 
 impl CaptureState {
     /// Create a new capture state for n groups.
     #[must_use]
     pub fn new(group_count: usize) -> Self {
-        let mut slots = SlotVec::new();
+        let mut slots = CaptureSlots::new();
         slots.resize(group_count + 1, None); // +1 for group 0 (full match)
         CaptureState {
             slots,
@@ -45,18 +45,18 @@ impl CaptureState {
     }
 
     /// Set handler overrides.
-    pub fn set_handler_overrides(&mut self, overrides: Vec<(usize, usize, SmartStr)>) {
+    pub fn set_handler_overrides(&mut self, overrides: Vec<(usize, usize, String)>) {
         self.handler_overrides = overrides;
     }
 
     /// Get handler overrides.
     #[must_use]
-    pub fn handler_overrides(&self) -> &[(usize, usize, SmartStr)] {
+    pub fn handler_overrides(&self) -> &[(usize, usize, String)] {
         &self.handler_overrides
     }
 
     /// Register a named group.
-    pub fn register_name(&mut self, name: SmartStr, index: usize) {
+    pub fn register_name(&mut self, name: String, index: usize) {
         Arc::make_mut(&mut self.names).insert(name, index);
     }
 
@@ -90,7 +90,7 @@ impl CaptureState {
 
     /// Get the captured text for a group.
     #[must_use]
-    pub fn get_text(&self, index: usize, text: &str) -> Option<SmartStr> {
+    pub fn get_text(&self, index: usize, text: &str) -> Option<String> {
         self.get(index).map(|(start, end)| {
             if self.handler_overrides.is_empty() {
                 text[start..end].into()
@@ -100,8 +100,8 @@ impl CaptureState {
         })
     }
 
-    fn apply_overrides(&self, text: &str, start: usize, end: usize) -> SmartStr {
-        let mut result = SmartString::new();
+    fn apply_overrides(&self, text: &str, start: usize, end: usize) -> String {
+        let mut result = String::new();
         let mut pos = start;
 
         for (ov_start, ov_end, ov_text) in &self.handler_overrides {
@@ -145,7 +145,7 @@ impl CaptureState {
 
     /// Get the name mapping.
     #[must_use]
-    pub fn names(&self) -> &FxHashMap<SmartStr, usize> {
+    pub fn names(&self) -> &FxHashMap<String, usize> {
         &self.names
     }
 
@@ -174,7 +174,7 @@ impl CaptureState {
 /// Builder for constructing capture state with names.
 pub struct CaptureStateBuilder {
     group_count: usize,
-    names: FxHashMap<SmartStr, usize>,
+    names: FxHashMap<String, usize>,
 }
 
 impl CaptureStateBuilder {
@@ -189,7 +189,7 @@ impl CaptureStateBuilder {
 
     /// Add a named group.
     #[must_use]
-    pub fn with_name(mut self, name: SmartStr, index: usize) -> Self {
+    pub fn with_name(mut self, name: String, index: usize) -> Self {
         self.names.insert(name, index);
         self
     }
@@ -197,7 +197,7 @@ impl CaptureStateBuilder {
     /// Build the capture state.
     #[must_use]
     pub fn build(self) -> CaptureState {
-        let mut slots = SlotVec::new();
+        let mut slots = CaptureSlots::new();
         slots.resize(self.group_count + 1, None);
         CaptureState {
             slots,
