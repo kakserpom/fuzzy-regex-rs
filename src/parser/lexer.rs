@@ -93,6 +93,8 @@ pub enum Token {
     RecursiveGroup(usize),
     /// `(?&name)` - Recursive named group.
     RecursiveNamedGroup(String),
+    /// `(?call:name)` - Custom handler invocation.
+    Handler(String),
     /// End of input.
     Eof,
 }
@@ -420,6 +422,42 @@ impl<'a> Lexer<'a> {
                     self.next_char();
                     self.lex_recursive_name()
                 }
+                Some('c') => {
+                    // Custom handler: (?call:name)
+                    self.next_char();
+                    match self.peek_char() {
+                        Some('a') => {
+                            self.next_char();
+                            match self.peek_char() {
+                                Some('l') => {
+                                    self.next_char();
+                                    match self.peek_char() {
+                                        Some('l') => {
+                                            self.next_char();
+                                            // Now expect ':' after 'call'
+                                            match self.peek_char() {
+                                                Some(':') => {
+                                                    self.next_char();
+                                                    self.lex_handler_name()
+                                                }
+                                                _ => Err(Error::parse(
+                                                    self.position,
+                                                    "expected ':' after '(?call'",
+                                                )),
+                                            }
+                                        }
+                                        _ => Err(Error::parse(
+                                            self.position,
+                                            "expected 'l' after '(?cal'",
+                                        )),
+                                    }
+                                }
+                                _ => Err(Error::parse(self.position, "expected 'l' after '(?ca'")),
+                            }
+                        }
+                        _ => Err(Error::parse(self.position, "expected 'a' after '(?c'")),
+                    }
+                }
                 Some(c) if c.is_ascii_digit() => {
                     // Recursive numbered group: (?1), (?2), etc.
                     self.lex_recursive_number()
@@ -510,6 +548,30 @@ impl<'a> Lexer<'a> {
         }
 
         Err(Error::unclosed("recursive group", self.position))
+    }
+
+    fn lex_handler_name(&mut self) -> Result<Token> {
+        let mut name = String::new();
+
+        while let Some(ch) = self.peek_char() {
+            if ch == ')' {
+                self.next_char();
+                if name.is_empty() {
+                    return Err(Error::parse(self.position, "empty handler name"));
+                }
+                return Ok(Token::Handler(name));
+            } else if ch.is_alphanumeric() || ch == '_' {
+                name.push(ch);
+                self.next_char();
+            } else {
+                return Err(Error::parse(
+                    self.position,
+                    format!("invalid character in handler name: '{ch}'"),
+                ));
+            }
+        }
+
+        Err(Error::unclosed("handler", self.position))
     }
 
     /// Lex an escape sequence.

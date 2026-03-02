@@ -19,6 +19,7 @@ string matching using Damerau-Levenshtein automata and the Bitap algorithm.
 - **Capture Groups**: Named and numbered capture groups with fuzzy matching
 - **Similarity Scoring**: Get match quality scores (0.0 - 1.0)
 - **Streaming API**: Process large files and network streams incrementally
+- **Custom Handlers**: Invoke custom logic during matching with `(?call:name)` syntax
 - **High Performance**: Bitap algorithm for patterns ≤64 chars, SIMD optimizations
 - **Unicode Support**: Full Unicode support including case-insensitive matching
 
@@ -82,6 +83,29 @@ let re3 = FuzzyRegexBuilder::new(r"\w+")
     .unicode(true)
     .build()
     .unwrap();
+```
+
+### Custom Handlers
+
+Use `(?call:name)` to invoke custom logic during matching:
+
+```rust,ignore
+use fuzzy_regex::FuzzyRegexBuilder;
+
+// Match strings with escaped quotes: "hello \"world\""
+let re = FuzzyRegexBuilder::new(r#""((?call:unescape)|.)*""#)
+    .handler("unescape", |text, pos| {
+        // Match backslash + any char (e.g., \", \n, \\)
+        if pos + 1 < text.len() && text.as_bytes()[pos] == b'\\' {
+            Some(2) // consume \ and next char
+        } else {
+            None
+        }
+    })
+    .build()
+    .unwrap();
+
+re.find(r#""hello \"world\"""#); // matches the entire string
 ```
 
 ## Pattern Syntax

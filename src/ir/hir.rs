@@ -162,6 +162,12 @@ pub enum Hir {
         /// The name of the capture group to recurse into.
         name: String,
     },
+
+    /// Custom handler invocation: (?call:name)
+    Handler {
+        /// The name of the handler to invoke.
+        name: std::sync::Arc<str>,
+    },
 }
 
 impl Hir {
@@ -549,6 +555,13 @@ impl HirLowering {
             Ast::RecursiveNamedGroup { name } => {
                 // (?&name) or (?P>name) - recursively match a named capture group
                 Hir::RecursiveNamedGroup { name: name.clone() }
+            }
+
+            Ast::Handler { name } => {
+                // (?call:name) - invoke a custom handler
+                Hir::Handler {
+                    name: name.as_str().into(),
+                }
             }
         }
     }

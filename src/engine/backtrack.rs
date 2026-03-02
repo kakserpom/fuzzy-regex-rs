@@ -517,6 +517,12 @@ impl<'a> BacktrackMatcher<'a> {
                         state = *next;
                     }
                 }
+
+                State::Handler { name: _, next } => {
+                    // (?call:name) - invoke custom handler
+                    // For now, just continue to next state
+                    state = *next;
+                }
             }
         }
     }

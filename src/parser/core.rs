@@ -626,6 +626,11 @@ impl<'a> Parser<'a> {
                 Ok(Ast::RecursiveNamedGroup { name })
             }
 
+            Token::Handler(name) => {
+                // (?call:name) - invoke a custom handler
+                Ok(Ast::Handler { name })
+            }
+
             token => Err(Error::parse(
                 self.lexer.position(),
                 format!("unexpected token: {token:?}"),

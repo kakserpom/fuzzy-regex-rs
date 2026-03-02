@@ -656,6 +656,7 @@ dependencies = [
  "regex",
  "smallvec",
  "smartcow",
+ "smartstring",
  "thiserror",
  "unicode-segmentation",
 ]

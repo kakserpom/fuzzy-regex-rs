@@ -26,6 +26,7 @@
   - [Capture Groups](./advanced_captures.md)
   - [Partial Matching](./advanced_partial.md)
   - [Word Lists](./advanced_wordlists.md)
+  - [Custom Handlers](./advanced_handlers.md)
   - [Compatibility Layer](./advanced_compat.md)
 
 # Implementation Guide

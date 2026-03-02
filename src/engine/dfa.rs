@@ -546,7 +546,8 @@ impl Dfa {
                 | State::AtomicGroup { .. }
                 | State::RecursivePattern { .. }
                 | State::RecursiveGroup { .. }
-                | State::RecursiveNamedGroup { .. } => return false,
+                | State::RecursiveNamedGroup { .. }
+                | State::Handler { .. } => return false,
             }
         }
         true

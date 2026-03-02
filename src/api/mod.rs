@@ -11,7 +11,7 @@ pub mod match_result;
 pub mod regex;
 pub mod streaming;
 
-pub use builder::{FuzzyRegexBuilder, MatchFlags, RegexConfig};
+pub use builder::{FuzzyRegexBuilder, Handler, HandlerMap, HandlerResult, MatchFlags, RegexConfig};
 pub use match_result::{CaptureMatches, Captures, Match, Matches, Split};
 pub use regex::FuzzyRegex;
 pub use streaming::{ByteMatches, FeedMatches, ReaderMatches, StreamingMatch, StreamingMatcher};
