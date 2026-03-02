@@ -610,20 +610,40 @@ impl<'a> Matcher<'a> {
         let use_prefilter =
             self.prefilter.is_active() && self.prefilter.is_selective() && self.is_simple_fuzzy;
         if use_prefilter {
-            if let Some((start, result)) =
-                bridge.find_first_lazy(text_bytes, self.config.threshold, &self.prefilter)
-            {
-                let mut captures = CaptureState::new(self.capture_count);
-                captures.set_full_match(start, result.end);
-                return Some(MatchResult {
-                    start,
-                    end: result.end,
-                    similarity: result.similarity,
-                    edits: EditCounts::from_fuzzy_result(&result),
-                    captures,
-                });
+            // Use batch parallel for selective prefilters (few candidates), lazy otherwise
+            if self.prefilter.selectivity() <= 2 {
+                // Few candidates - use batch parallel with SIMD
+                if let Some((start, result)) = bridge.find_first_batch_parallel(
+                    text_bytes,
+                    self.config.threshold,
+                    &self.prefilter,
+                ) {
+                    let mut captures = CaptureState::new(self.capture_count);
+                    captures.set_full_match(start, result.end);
+                    return Some(MatchResult {
+                        start,
+                        end: result.end,
+                        similarity: result.similarity,
+                        edits: EditCounts::from_fuzzy_result(&result),
+                        captures,
+                    });
+                }
+            } else {
+                // Many candidates - use lazy (better for early termination)
+                if let Some((start, result)) =
+                    bridge.find_first_lazy(text_bytes, self.config.threshold, &self.prefilter)
+                {
+                    let mut captures = CaptureState::new(self.capture_count);
+                    captures.set_full_match(start, result.end);
+                    return Some(MatchResult {
+                        start,
+                        end: result.end,
+                        similarity: result.similarity,
+                        edits: EditCounts::from_fuzzy_result(&result),
+                        captures,
+                    });
+                }
             }
-            // Prefilter searched all candidates and found nothing - no match exists
             return None;
         }
 
