@@ -1953,10 +1953,12 @@ fn test_replace_no_match() {
 
 #[test]
 fn test_replace_with_closure() {
+    use fuzzy_regex::Replacer;
+
     let re = FuzzyRegex::new(r"(\d+)").unwrap();
     let result = re.replace_all_with("price: 100 amount: 200", |caps| {
         let num: i32 = caps.get(1).unwrap().as_str().parse().unwrap();
-        format!("${}", num)
+        Replacer::replace(format!("${}", num))
     });
     assert_eq!(result, "price: $100 amount: $200");
 }

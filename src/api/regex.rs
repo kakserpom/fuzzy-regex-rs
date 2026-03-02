@@ -21,7 +21,7 @@ use smartstring::{Compact, SmartString};
 use super::builder::{FuzzyRegexBuilder, HandlerMap, RegexConfig};
 
 type SmartStr = SmartString<Compact>;
-use super::match_result::{CaptureMatches, Captures, Match, Matches, Split};
+use super::match_result::{CaptureMatches, Captures, Match, Matches, Replacer, Split};
 use crate::compiler::build_nfa;
 use crate::engine::hash::FxHashMap;
 use crate::engine::{Dfa, FuzzyBridge, MatchResult, Matcher, MatcherConfig, Prefilter};
@@ -1506,24 +1506,98 @@ impl FuzzyRegex {
         result
     }
 
-    /// Replace matches using a closure.
-    pub fn replace_all_with<F>(&self, text: &str, mut replacer: F) -> String
+    /// Replace all non-overlapping matches using a closure with control.
+    ///
+    /// The closure returns a `Replacer` enum that controls the replacement behavior:
+    /// - `Replacer::Replace(text)` - replace the match with this text
+    /// - `Replacer::Skip` - skip this match (leave original text)
+    /// - `Replacer::Break` - stop replacing, return rest of text as-is
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fuzzy_regex::{FuzzyRegex, Replacer};
+    ///
+    /// let re = FuzzyRegex::new(r"\d+").unwrap();
+    ///
+    /// // Replace all numbers with bracketed versions
+    /// let result = re.replace_all_with("a1b2c3", |_caps| {
+    ///     Replacer::replace("[NUM]")
+    /// });
+    /// assert_eq!(result, "a[NUM]b[NUM]c[NUM]");
+    ///
+    /// // Skip numbers less than 2
+    /// let re2 = FuzzyRegex::new(r"\d+").unwrap();
+    /// let result2 = re2.replace_all_with("1a2b3c", |caps| {
+    ///     let num: u32 = caps.get(0).unwrap().as_str().parse().unwrap();
+    ///     if num < 2 {
+    ///         Replacer::skip()
+    ///     } else {
+    ///         Replacer::replace(format!("[{}]", num))
+    ///     }
+    /// });
+    /// assert_eq!(result2, "1a[2]b[3]c");
+    ///
+    /// // You can also return &str directly (or String)
+    /// let re3 = FuzzyRegex::new(r"\d+").unwrap();
+    /// let result3 = re3.replace_all_with("a1b2c", |_caps| "[n]");
+    /// assert_eq!(result3, "a[n]b[n]c");
+    ///
+    /// // ReplaceAndBreak: replace this match and stop
+    /// let re4 = FuzzyRegex::new(r"\d+").unwrap();
+    /// let result4 = re4.replace_all_with("a1b2c3", |caps| {
+    ///     let num: u32 = caps.get(0).unwrap().as_str().parse().unwrap();
+    ///     if num == 2 { Replacer::replace_and_break("[STOP]") } else { Replacer::replace("[n]") }
+    /// });
+    /// assert_eq!(result4, "a[n]b[STOP]c3");
+    /// ```
+    pub fn replace_all_with<'a, R, F>(&self, text: &'a str, mut replacer: F) -> String
     where
-        F: FnMut(&Captures<'_>) -> String,
+        F: FnMut(&Captures<'_>) -> R,
+        R: Into<Replacer<'a>>,
     {
         let mut result = String::with_capacity(text.len());
         let mut last_end = 0;
 
         for caps in self.captures_iter(text) {
             if let Some(m) = caps.get(0) {
-                result.push_str(&text[last_end..m.start()]);
-                result.push_str(&replacer(&caps));
+                match replacer(&caps).into() {
+                    Replacer::Replace(replacement) => {
+                        result.push_str(&text[last_end..m.start()]);
+                        result.push_str(&replacement);
+                    }
+                    Replacer::Skip => {
+                        // Don't replace - add the matched text as-is
+                        result.push_str(&text[last_end..m.end()]);
+                    }
+                    Replacer::Break => {
+                        // Stop here, append rest of text and return
+                        result.push_str(&text[last_end..]);
+                        return result;
+                    }
+                    Replacer::ReplaceAndBreak(replacement) => {
+                        // Replace this match and stop
+                        result.push_str(&text[last_end..m.start()]);
+                        result.push_str(&replacement);
+                        result.push_str(&text[m.end()..]);
+                        return result;
+                    }
+                }
                 last_end = m.end();
             }
         }
 
         result.push_str(&text[last_end..]);
         result
+    }
+
+    /// Alias for [`replace_all_with`].
+    pub fn replace_fn<'a, R, F>(&self, text: &'a str, replacer: F) -> String
+    where
+        F: FnMut(&Captures<'_>) -> R,
+        R: Into<Replacer<'a>>,
+    {
+        self.replace_all_with(text, replacer)
     }
 
     /// Split the text by matches.

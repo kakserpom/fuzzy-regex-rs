@@ -10,6 +10,77 @@ use smartstring::{Compact, SmartString};
 use crate::engine::EditCounts;
 use crate::engine::hash::FxHashMap;
 
+/// Control replacement behavior in `replace_all_with`.
+#[derive(Debug, Clone)]
+pub enum Replacer<'a> {
+    /// Replace with this text.
+    Replace(Cow<'a, str>),
+    /// Skip this match (leave original text unchanged).
+    Skip,
+    /// Stop replacing and return the rest of the text as-is.
+    Break,
+    /// Replace this match and stop further replacements.
+    ReplaceAndBreak(Cow<'a, str>),
+}
+
+impl<'a> From<&'a str> for Replacer<'a> {
+    fn from(s: &'a str) -> Self {
+        Replacer::Replace(Cow::Borrowed(s))
+    }
+}
+
+impl From<String> for Replacer<'static> {
+    fn from(s: String) -> Self {
+        Replacer::Replace(Cow::Owned(s))
+    }
+}
+
+impl Replacer<'static> {
+    /// Convenience function to skip a match.
+    #[must_use]
+    pub fn skip() -> Self {
+        Replacer::Skip
+    }
+
+    /// Convenience function to break/stop replacing.
+    #[must_use]
+    pub fn break_now() -> Self {
+        Replacer::Break
+    }
+
+    /// Create a replacement with the given text.
+    ///
+    /// Accepts `&str`, `String`, or anything that implements `Into<Cow<str>>`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fuzzy_regex::Replacer;
+    ///
+    /// // From &str
+    /// let r = Replacer::replace("hello");
+    ///
+    /// // From String
+    /// let r = Replacer::replace(String::from("hello"));
+    ///
+    /// // From Cow
+    /// use std::borrow::Cow;
+    /// let r = Replacer::replace(Cow::Borrowed("hello"));
+    /// ```
+    #[must_use]
+    pub fn replace(s: impl Into<Cow<'static, str>>) -> Self {
+        Replacer::Replace(s.into())
+    }
+
+    /// Create a replacement and stop further replacements.
+    ///
+    /// This is equivalent to `Replacer::Replace(...)` followed by `Replacer::Break`.
+    #[must_use]
+    pub fn replace_and_break(s: impl Into<Cow<'static, str>>) -> Self {
+        Replacer::ReplaceAndBreak(s.into())
+    }
+}
+
 /// A single match in the text.
 #[derive(Debug, Clone)]
 pub struct Match<'t> {
