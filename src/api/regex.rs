@@ -454,6 +454,22 @@ impl FuzzyRegex {
             return None;
         }
 
+        // Fast path for simple alternation: use Matcher::find directly
+        // This avoids the overhead of find_iter -> find_all
+        // Only for exact alternations (no fuzzy edits) - fuzzy alternations need special handling
+        if self.nfa.is_simple_alternation()
+            && !self.config.match_flags.best_match
+            && !self.config.match_flags.enhance_match
+            && !self.config.match_flags.posix
+            && self.fuzzy_bridge.as_ref().is_some_and(|b| {
+                // Check that all patterns have max_edits = 0 (exact matching)
+                (0..b.pattern_count()).all(|i| b.pattern_max_edits(i).unwrap_or(0) == 0)
+            })
+        {
+            let matcher = self.create_matcher(self.is_unanchored());
+            return matcher.find(text).map(|m| self.convert_match(text, m));
+        }
+
         // Fallback: use full matcher
         self.find_iter(text).next()
     }
@@ -1416,10 +1432,12 @@ impl FuzzyRegex {
                     .map(|slot| slot.map(|(s, e)| (idx + s, idx + e)))
                     .collect();
 
-                let handler_overrides: Vec<(usize, usize, String)> = 
-                    m.captures.handler_overrides().iter()
-                        .map(|(s, e, t)| (*s, *e, t.clone()))
-                        .collect();
+                let handler_overrides: Vec<(usize, usize, String)> = m
+                    .captures
+                    .handler_overrides()
+                    .iter()
+                    .map(|(s, e, t)| (*s, *e, t.clone()))
+                    .collect();
 
                 results.push(Captures::new(
                     text,
@@ -1448,15 +1466,17 @@ impl FuzzyRegex {
             if let Some(m) = matcher.find(&text[start + idx..]) {
                 let mut caps = self.convert_captures(&text[start + idx..], m);
                 // Adjust offsets
-                let adjusted_slots: Vec<Option<(usize, usize)>> = caps.iter()
+                let adjusted_slots: Vec<Option<(usize, usize)>> = caps
+                    .iter()
                     .map(|opt| opt.map(|m| (start + idx + m.start(), start + idx + m.end())))
                     .collect();
-                
-                let handler_overrides: Vec<(usize, usize, String)> = 
-                    caps.handler_overrides().iter()
-                        .map(|(s, e, t)| (*s, *e, t.clone()))
-                        .collect();
-                
+
+                let handler_overrides: Vec<(usize, usize, String)> = caps
+                    .handler_overrides()
+                    .iter()
+                    .map(|(s, e, t)| (*s, *e, t.clone()))
+                    .collect();
+
                 caps = Captures::new(
                     text,
                     self.named_groups.clone(),
@@ -1703,12 +1723,14 @@ impl FuzzyRegex {
     /// Convert internal match result to Captures type.
     fn convert_captures<'t>(&self, text: &'t str, result: MatchResult) -> Captures<'t> {
         let slots: Vec<Option<(usize, usize)>> = result.captures.slots().to_vec();
-        
-        let handler_overrides: Vec<(usize, usize, String)> = 
-            result.captures.handler_overrides().iter()
-                .map(|(s, e, t)| (*s, *e, t.clone()))
-                .collect();
-        
+
+        let handler_overrides: Vec<(usize, usize, String)> = result
+            .captures
+            .handler_overrides()
+            .iter()
+            .map(|(s, e, t)| (*s, *e, t.clone()))
+            .collect();
+
         Captures::new(
             text,
             self.named_groups.clone(),

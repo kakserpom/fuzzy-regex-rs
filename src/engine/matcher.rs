@@ -349,13 +349,15 @@ impl<'a> Matcher<'a> {
         // Multi-pattern fast path: for simple alternations (cat|bat|rat),
         // use parallel Bitap search instead of full NFA simulation.
         // Skip for POSIX mode which needs to find the longest match.
+        let has_alt = self.simple_alternation_indices.is_some();
+        let has_pf = self.multi_prefilter.is_some();
         if !self.config.global
             && !self.config.best_match
             && !self.config.enhance_match
             && !self.config.posix
             && self.config.unanchored
-            && self.simple_alternation_indices.is_some()
-            && self.multi_prefilter.is_some()
+            && has_alt
+            && has_pf
         {
             return self.find_multi_pattern_fast(text);
         }
@@ -368,8 +370,8 @@ impl<'a> Matcher<'a> {
             && !self.config.enhance_match
             && !self.config.posix
             && self.config.unanchored
-            && self.simple_alternation_indices.is_some()
-            && self.multi_prefilter.is_none()
+            && has_alt
+            && !has_pf
         {
             return self.find_multi_pattern_individual_fallback(text);
         }

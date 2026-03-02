@@ -84,3 +84,4 @@ All tests pass. Performance maintained at baseline.
 2. Struct field ordering - minor improvement
 3. Avoiding unnecessary clones where practical
 4. **GuardNFA ASCII optimization** - Added byte-level path for ASCII text, avoiding Vec<char> allocation. ~27% improvement for exact matches on ASCII text (45µs -> 33µs).
+5. **Alternation fast path** - Added fast path in FuzzyRegex::find() for exact alternations (e.g., "cat|dog|bat"). This avoids the expensive find_iter -> find_all path. ~25x improvement (16µs -> 0.6µs).

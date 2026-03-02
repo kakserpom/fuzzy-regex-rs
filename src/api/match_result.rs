@@ -5,8 +5,8 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use crate::engine::hash::FxHashMap;
 use crate::engine::EditCounts;
+use crate::engine::hash::FxHashMap;
 
 /// Control replacement behavior in `replace_all_with`.
 #[derive(Debug, Clone)]
