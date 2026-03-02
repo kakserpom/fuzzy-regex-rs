@@ -1,7 +1,5 @@
 # Performance Optimization Findings
 
-## Summary
-
 This document records the performance investigations and optimizations attempted for fuzzy-regex.
 
 ## Benchmark Configuration
@@ -11,97 +9,67 @@ All benchmarks run with `cargo run --example mini_bench --release`:
 - Long text: 10KB of text
 - Pattern: `(?:quikc){e<=1}` or `(?:qwick){e<=2}`
 
-## Baseline Performance
+## Current Performance
 
 ```
 short text, 1 edit:         1.5 µs
-short text, 2 edits:        2.5-3.0 µs
-long text, 2 edits:        42-45 µs
+short text, 2 edits:        2.6 µs
+long text, 2 edits:        43-45 µs
 long text, no match:       33-35 µs
 ```
 
-## Investigations & Results
+## Optimizations Applied
 
-### 1. SmallVec vs Vec
-
-**Finding**: Vec is 2.5-3.6x faster than SmallVec for all common cases.
-
-**Conclusion**: Use standard `Vec` instead of `SmallVec`.
-
-### 2. SmartString vs String
-
-**Finding**: String is 3-6x faster than SmartString (except for very short strings <23 bytes).
-
-**Conclusion**: Use standard `String` instead of `SmartString`.
-
-### 3. Mimalloc vs System Allocator
-
-**Finding**: System allocator is faster for this workload - mimalloc added overhead.
-
-**Conclusion**: Keep system allocator.
-
-### 4. Option<Vec> for handler_overrides
-
-**Attempted**: Using `Option<Vec>` to avoid cloning empty Vecs.
-
-**Finding**: Added branch overhead and made it slower.
-
-**Conclusion**: Keep `Vec` with empty check before clone.
-
-### 5. EditCounts Copy Derive
-
-**Attempted**: Made `EditCounts` `Copy`-able to reduce clone() overhead.
-
-**Finding**: Caused ~2x regression on long text benchmarks. The clone() is cheap enough that explicit copying hurts performance (likely due to register pressure or cache effects).
-
-**Conclusion**: Keep `EditCounts` as `Clone` only - reverted.
-
-### 6. Struct Field Ordering
-
-**Applied**: Optimized struct field ordering for better cache locality.
-
-**Finding**: Minor improvements.
-
-## Final State
-
-Successfully removed dependencies:
+### 1. Dependencies Removed
 - `smallvec` → replaced with `Vec`
 - `smartstring` → replaced with `String`
 - `smartcow` → replaced with `std::borrow::Cow`
 
-All tests pass. Performance maintained at baseline.
+### 2. GuardNFA ASCII Optimization
+Added byte-level path for ASCII text, avoiding `Vec<char>` allocation.
+- ~27% improvement for exact matches on ASCII text
 
-## What Didn't Help
+### 3. Alternation Fast Path
+Added direct path in `FuzzyRegex::find()` for exact alternations (e.g., "cat|dog|bat").
+- Avoids expensive `find_iter -> find_all` path
+- ~25x improvement (16µs -> 0.6µs)
 
-1. Making EditCounts Copy - hurt performance
-2. Using Option<Vec> for empty checks - hurt performance  
-3. Mimalloc allocator - hurt performance
-4. SmartString for short strings - hurt performance
+### 4. Pigeonhole Prefilter Extension
+Extended pigeonhole prefilter to work with shorter patterns.
+- Changed threshold from 10+ chars to `2*(k+1)` chars
+- For k=1: now uses pigeonhole for patterns >= 4 chars
+- For k=2: now uses pigeonhole for patterns >= 6 chars
+- ~38% improvement for long text fuzzy matching
 
-## What Helped
+### 5. SIMD Batch Parallel
+Use batch parallel SIMD search when prefilter selectivity <= 2.
+- Uses lazy search otherwise (better for early termination)
 
-1. Removing smallvec/smartstring/smartcow - reduced dependencies, no performance loss
-2. Struct field ordering - minor improvement
-3. Avoiding unnecessary clones where practical
-4. **GuardNFA ASCII optimization** - Added byte-level path for ASCII text, avoiding Vec<char> allocation. ~27% improvement for exact matches on ASCII text (45µs -> 33µs).
-5. **Alternation fast path** - Added fast path in FuzzyRegex::find() for exact alternations (e.g., "cat|dog|bat"). This avoids the expensive find_iter -> find_all path. ~25x improvement (16µs -> 0.6µs).
+## Investigations That Didn't Help
 
-## Investigation: Long Text Fuzzy Matching
+1. **EditCounts Copy** - Caused ~2x regression (reverted)
+2. **Option<Vec>** - Added branch overhead (reverted)
+3. **Mimalloc allocator** - Added overhead (reverted)
+4. **SmartString** - Slower than String for most cases
 
-After detailed profiling, found that long text fuzzy matching is fundamentally expensive:
+## Long Text Fuzzy Matching Analysis
+
+Long text fuzzy matching is fundamentally expensive:
 
 - For pattern "lorem" with e<=1 in 4KB text:
   - Fuzzy prefilter finds ~500 candidate positions
   - Bitap runs ~70ns per candidate
-  - Total: 500 * 70ns = 35µs (matches observed performance)
+  - Total: 500 * 70ns = 35µs (matches observed)
 
-- When match exists at position 0: ~1.5µs (fast termination)
-- When match exists in middle: ~0.4µs (prefilter finds it quickly)
-- When no match: ~35µs (must scan entire text)
+- Performance varies by match position:
+  - Match at start: ~1.5µs (fast termination)
+  - Match in middle: ~0.4µs (prefilter finds it quickly)
+  - No match: ~35µs (must scan entire text)
 
-The bottleneck is the Bitap algorithm running for each prefilter candidate. The prefilter is already quite selective (4 bytes for e<=1), but common letters like 'l', 'o' appear frequently in text.
+The bottleneck is Bitap running for each prefilter candidate. Common letters like 'l', 'o' appear frequently, generating many candidates.
 
-Further optimization would require:
-1. More selective prefilters (pigeonhole requires pattern >= 6 chars)
+## Future Optimization Opportunities
+
+1. More selective prefilters (currently limited by pattern length)
 2. Parallel processing for very long texts
-3. SIMD improvements to Bitap (already has AVX2/NEON)
+3. SIMD improvements to Bitap (AVX2/NEON already implemented)
