@@ -17,8 +17,6 @@
 
 use std::sync::Arc;
 
-use smartstring::{Compact, SmartString};
-
 use super::captures::CaptureState;
 use super::fuzzy_bridge::{CachedMatches, FuzzyBridge, FuzzyMatchResult};
 use crate::api::builder::{HandlerMap, HandlerResult};
@@ -42,7 +40,7 @@ struct Thread {
     /// Total edits.
     edits: EditCounts,
     /// Handler overrides: (`start_pos`, `end_pos`, `override_text`)
-    handler_overrides: Vec<(usize, usize, SmartString<Compact>)>,
+    handler_overrides: Vec<(usize, usize, String)>,
 }
 
 impl Default for Thread {
@@ -1917,7 +1915,7 @@ impl<'a> Matcher<'a> {
                             new_thread.handler_overrides.push((
                                 thread.pos,
                                 thread.pos + consumed,
-                                override_text.into(),
+                                override_text,
                             ));
                             next_threads.push(new_thread);
                         }

@@ -5,10 +5,8 @@
 use std::borrow::Cow;
 use std::ops::Range;
 
-use smartstring::{Compact, SmartString};
-
-use crate::engine::EditCounts;
 use crate::engine::hash::FxHashMap;
+use crate::engine::EditCounts;
 
 /// Control replacement behavior in `replace_all_with`.
 #[derive(Debug, Clone)]
@@ -84,13 +82,16 @@ impl Replacer<'static> {
 /// A single match in the text.
 #[derive(Debug, Clone)]
 pub struct Match<'t> {
+    // Largest fields first (for better memory layout)
     text: &'t str,
-    override_text: Option<SmartString<Compact>>,
+    override_text: Option<String>,
+    fuzzy_changes: Option<(Vec<usize>, Vec<usize>, Vec<usize>)>,
+    // Medium fields
     start: usize,
     end: usize,
-    similarity: f32,
     edits: EditCounts,
-    fuzzy_changes: Option<(Vec<usize>, Vec<usize>, Vec<usize>)>,
+    // Small fields last
+    similarity: f32,
     partial: bool,
 }
 
@@ -186,7 +187,7 @@ impl<'t> Match<'t> {
     #[must_use]
     pub fn as_str(&self) -> Cow<'t, str> {
         if let Some(ref r#override) = self.override_text {
-            Cow::Owned(r#override.clone().into())
+            Cow::Owned(r#override.clone())
         } else {
             Cow::Borrowed(&self.text[self.start..self.end])
         }
@@ -367,41 +368,44 @@ fn compute_fuzzy_changes(pattern: &str, text: &str) -> (Vec<usize>, Vec<usize>, 
 /// Capture groups from a match.
 #[derive(Debug, Clone)]
 pub struct Captures<'t> {
+    // Largest fields first
     text: &'t str,
+    names: FxHashMap<String, usize>,
+    // Smaller fields
     slots: Vec<Option<(usize, usize)>>,
-    names: FxHashMap<SmartString<Compact>, usize>,
-    similarity: f32,
+    /// Handler overrides - kept as Vec since most patterns don't use handlers.
+    handler_overrides: Vec<(usize, usize, String)>,
     edits: EditCounts,
-    handler_overrides: Vec<(usize, usize, SmartString<Compact>)>,
+    similarity: f32,
 }
 
 impl<'t> Captures<'t> {
     /// Create captures from match result.
     pub(crate) fn new(
         text: &'t str,
+        names: FxHashMap<String, usize>,
         slots: Vec<Option<(usize, usize)>>,
-        names: FxHashMap<SmartString<Compact>, usize>,
-        similarity: f32,
+        handler_overrides: Vec<(usize, usize, String)>,
         edits: EditCounts,
-        handler_overrides: Vec<(usize, usize, SmartString<Compact>)>,
+        similarity: f32,
     ) -> Self {
         Captures {
             text,
-            slots,
             names,
-            similarity,
-            edits,
+            slots,
             handler_overrides,
+            edits,
+            similarity,
         }
     }
 
     /// Apply handler overrides to capture text.
-    fn apply_overrides(&self, start: usize, end: usize) -> SmartString<Compact> {
+    fn apply_overrides(&self, start: usize, end: usize) -> String {
         if self.handler_overrides.is_empty() {
             return self.text[start..end].into();
         }
 
-        let mut result = SmartString::new();
+        let mut result = String::new();
         let mut pos = start;
 
         for (ov_start, ov_end, ov_text) in &self.handler_overrides {
@@ -469,7 +473,7 @@ impl<'t> Captures<'t> {
 
     /// Get handler overrides.
     #[must_use]
-    pub fn handler_overrides(&self) -> &[(usize, usize, SmartString<Compact>)] {
+    pub fn handler_overrides(&self) -> &[(usize, usize, String)] {
         &self.handler_overrides
     }
 

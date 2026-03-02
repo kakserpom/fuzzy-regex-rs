@@ -61,6 +61,12 @@ impl GuardNfa {
             });
         }
 
+        // Fast path: use byte-level operations for ASCII text
+        // This avoids allocating Vec<char> and char_to_byte mappings
+        if !self.case_insensitive && text.is_ascii() {
+            return self.find_first_ascii(text, threshold, max_edits);
+        }
+
         let text_chars: Vec<char> = if self.case_insensitive {
             text.chars()
                 .map(|c| c.to_lowercase().next().unwrap_or(c))
@@ -249,6 +255,198 @@ impl GuardNfa {
                     return Some(DamLevMatch {
                         start: byte_start,
                         end: byte_end,
+                        insertions: ins,
+                        deletions: new_del,
+                        substitutions: sub,
+                        swaps: 0,
+                        similarity: sim,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Optimized ASCII-only search that avoids allocations.
+    #[inline]
+    fn find_first_ascii(
+        &self,
+        text: &str,
+        threshold: f32,
+        max_edits: usize,
+    ) -> Option<DamLevMatch> {
+        let text_bytes = text.as_bytes();
+        let text_len = text_bytes.len();
+        let m = self.pattern_len;
+
+        if text_len == 0 {
+            if m <= max_edits {
+                let edits = m;
+                let sim = 1.0 - (edits as f32 / (m + max_edits) as f32);
+                return Some(DamLevMatch {
+                    start: 0,
+                    end: 0,
+                    insertions: 0,
+                    deletions: edits as u8,
+                    substitutions: 0,
+                    swaps: 0,
+                    similarity: sim,
+                });
+            }
+            return None;
+        }
+
+        // Precompute pattern bytes (already lowercase if case-insensitive, but we handled that above)
+        let pattern_bytes: Vec<u8> = self.pattern.iter().map(|&c| c as u8).collect();
+        let first_byte = pattern_bytes[0];
+
+        // Vec-based states
+        let mut active: Vec<(usize, usize, usize, u8, u8, u8, usize)> = Vec::with_capacity(32);
+        let mut next_active: Vec<(usize, usize, usize, u8, u8, u8, usize)> = Vec::with_capacity(32);
+
+        // Bit-packed seen
+        let encode_key =
+            |pat_pos: usize, edits: usize| -> u128 { ((pat_pos as u128) << 6) | (edits as u128) };
+
+        let mut pos = 0;
+        while pos < text_len {
+            let text_byte = text_bytes[pos];
+            let mut new_seen: u128 = 0;
+
+            // Start new match at this position
+            active.clear();
+            active.push((0, 0, pos, 0, 0, 0, pos));
+
+            next_active.clear();
+
+            // Process all active states
+            for &(pat_pos, edits, start_pos, ins, del, sub, last_consumed) in &active {
+                if pat_pos >= m || edits > max_edits {
+                    continue;
+                }
+
+                let pat_byte = pattern_bytes[pat_pos];
+
+                // Exact match
+                if text_byte == pat_byte {
+                    let key = encode_key(pat_pos + 1, edits);
+                    if new_seen & (1u128 << key) == 0 {
+                        new_seen |= 1u128 << key;
+                        next_active.push((pat_pos + 1, edits, start_pos, ins, del, sub, pos));
+                    }
+                }
+
+                // Substitution
+                if edits < max_edits && text_byte != pat_byte {
+                    let key = encode_key(pat_pos + 1, edits + 1);
+                    if new_seen & (1u128 << key) == 0 {
+                        new_seen |= 1u128 << key;
+                        next_active.push((
+                            pat_pos + 1,
+                            edits + 1,
+                            start_pos,
+                            ins,
+                            del,
+                            sub + 1,
+                            pos,
+                        ));
+                    }
+                }
+
+                // Insertion
+                if edits < max_edits {
+                    let key = encode_key(pat_pos, edits + 1);
+                    if new_seen & (1u128 << key) == 0 {
+                        new_seen |= 1u128 << key;
+                        next_active.push((
+                            pat_pos,
+                            edits + 1,
+                            start_pos,
+                            ins + 1,
+                            del,
+                            sub,
+                            last_consumed,
+                        ));
+                    }
+                }
+
+                // Deletion
+                if pat_pos + 1 < m && edits < max_edits {
+                    let key = encode_key(pat_pos + 1, edits + 1);
+                    if new_seen & (1u128 << key) == 0 {
+                        new_seen |= 1u128 << key;
+                        next_active.push((
+                            pat_pos + 1,
+                            edits + 1,
+                            start_pos,
+                            ins,
+                            del + 1,
+                            sub,
+                            last_consumed,
+                        ));
+                    }
+                }
+            }
+
+            // Check for matches
+            for &(pat_pos, edits, start_pos, ins, del, sub, last_consumed) in &next_active {
+                if pat_pos >= m && edits <= max_edits {
+                    let sim = 1.0 - (edits as f32 / (m + max_edits) as f32);
+                    if sim >= threshold {
+                        let match_end = last_consumed + 1;
+                        return Some(DamLevMatch {
+                            start: start_pos,
+                            end: match_end,
+                            insertions: ins,
+                            deletions: del,
+                            substitutions: sub,
+                            swaps: 0,
+                            similarity: sim,
+                        });
+                    }
+                }
+            }
+
+            std::mem::swap(&mut active, &mut next_active);
+
+            // Guard pruning
+            if active.is_empty() {
+                pos += 1;
+                while pos < text_len && text_bytes[pos] != first_byte {
+                    pos += 1;
+                }
+            } else {
+                pos += 1;
+            }
+        }
+
+        // Handle trailing deletions
+        for &(pat_pos, edits, start_pos, ins, del, sub, _last_consumed) in &active {
+            if pat_pos >= m && edits <= max_edits {
+                let sim = 1.0 - (edits as f32 / (m + max_edits) as f32);
+                if sim >= threshold {
+                    return Some(DamLevMatch {
+                        start: start_pos,
+                        end: text_len,
+                        insertions: ins,
+                        deletions: del,
+                        substitutions: sub,
+                        swaps: 0,
+                        similarity: sim,
+                    });
+                }
+            }
+
+            let remaining = m - pat_pos;
+            let new_edits = edits + remaining;
+            if new_edits <= max_edits {
+                let new_del = del + remaining as u8;
+                let sim = 1.0 - (new_edits as f32 / (m + max_edits) as f32);
+                if sim >= threshold {
+                    return Some(DamLevMatch {
+                        start: start_pos,
+                        end: text_len,
                         insertions: ins,
                         deletions: new_del,
                         substitutions: sub,
