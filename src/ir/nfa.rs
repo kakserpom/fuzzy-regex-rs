@@ -308,6 +308,19 @@ impl Nfa {
         })
     }
 
+    /// Check if this NFA contains word boundary anchors (not non-word boundaries).
+    /// Used to determine if we can use the literal word boundary fast path.
+    #[must_use]
+    pub fn has_literal_word_boundary(&self) -> bool {
+        self.states.iter().any(|state| {
+            if let State::Anchor { kind, .. } = state {
+                matches!(kind, Anchor::WordBoundary)
+            } else {
+                false
+            }
+        })
+    }
+
     /// Check if this NFA contains any recursive patterns.
     /// Used to determine whether to use backtracking engine.
     #[must_use]

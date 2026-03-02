@@ -16,6 +16,8 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
+use memchr::memmem;
+
 use super::builder::{FuzzyRegexBuilder, HandlerMap, RegexConfig};
 
 type SmartStr = String;
@@ -65,8 +67,6 @@ pub struct FuzzyRegex {
     ends_with_end_anchor: bool,
     /// Maximum match length (for end-anchor optimization).
     max_match_length: Option<usize>,
-    /// Whether the pattern is a word-bounded literal like `\bword\b`.
-    is_word_bounded_literal: bool,
     /// DFA for fast exact matching (if pattern is DFA-compatible).
     /// `RefCell` allows mutation during matching for lazy DFA construction.
     dfa: Option<RefCell<Dfa>>,
@@ -187,9 +187,6 @@ impl FuzzyRegex {
             None
         };
 
-        // Detect if pattern is a word-bounded literal like \bword\b
-        let is_word_bounded_literal = nfa.is_word_bounded_literal();
-
         // Try to build a DFA for fast exact matching
         // DFA is only used for patterns without capture groups, without lazy quantifiers,
         // without ResetMatchStart (\K which needs NFA to track match start reset),
@@ -232,7 +229,6 @@ impl FuzzyRegex {
             has_lazy,
             ends_with_end_anchor,
             max_match_length,
-            is_word_bounded_literal,
             dfa,
             word_lists: FxHashMap::default(),
             handlers: config.handlers,
@@ -407,10 +403,24 @@ impl FuzzyRegex {
             return matcher.find(text).map(|m| self.convert_match(text, m));
         }
 
+        // Fast path for non-fuzzy word-bounded literals: use exact literal search + boundary check
+        // This handles \bword\b, \bword, word\b patterns (but NOT \Bword\B)
+        // IMPORTANT: Must come before DFA path since DFA doesn't handle word boundaries efficiently
+        if self.nfa.has_literal_word_boundary()
+            && self.literals.len() == 1
+            && let Some(literal) = self.literals.first()
+            && literal.limits.is_none()
+        {
+            // Non-fuzzy pattern - use fast exact search
+            return Self::find_word_bounded_exact(text, &literal.text);
+        }
+
         // DFA fast path: use DFA for exact/non-fuzzy patterns
         // Skip if word_lists is populated (use word list matching instead)
+        // Skip if pattern has word boundaries (DFA doesn't handle them)
         if let Some(ref dfa_cell) = self.dfa
             && self.word_lists.is_empty()
+            && !self.nfa.has_word_boundary()
         {
             let mut dfa = dfa_cell.borrow_mut();
             return dfa.find(text).map(|m| {
@@ -1010,9 +1020,18 @@ impl FuzzyRegex {
             return Matches::new(self.find_all_lazy_literal_fast(text));
         }
 
-        // Optimization for word-bounded literals like \bword\b
-        if self.is_word_bounded_literal && self.literals.len() == 1 && self.fuzzy_bridge.is_some() {
-            return Matches::new(self.find_all_word_bounded_literal_fast(text));
+        // Optimization for word-bounded literals like \bword\b, \bword, word\b (but NOT \Bword\B)
+        if self.nfa.has_literal_word_boundary() && self.literals.len() == 1 {
+            if let Some(literal) = self.literals.first()
+                && literal.limits.is_none()
+            {
+                // Non-fuzzy - use fast exact search
+                return Matches::new(Self::find_all_word_bounded_exact(text, &literal.text));
+            }
+            // Fuzzy - use fast fuzzy search (but avoid slow path)
+            if self.fuzzy_bridge.is_some() {
+                return Matches::new(self.find_all_word_bounded_literal_fast(text));
+            }
         }
 
         // For all other patterns, use batch collection with single Matcher
@@ -1240,6 +1259,67 @@ impl FuzzyRegex {
             .is_some_and(|c| c.is_alphanumeric() || c == '_');
 
         before_is_word != after_is_word
+    }
+
+    /// Fast path for non-fuzzy word-bounded literals using exact search.
+    fn find_word_bounded_exact<'t>(text: &'t str, literal: &str) -> Option<Match<'t>> {
+        let literal_bytes = literal.as_bytes();
+
+        // Use memmem for fast literal search
+        let mut pos = 0;
+        while let Some(found) = memmem::find(&text.as_bytes()[pos..], literal_bytes) {
+            let abs_pos = pos + found;
+
+            // Check word boundary at start
+            if Self::is_word_boundary_at(text, abs_pos) {
+                let end_pos = abs_pos + literal.len();
+                // Check word boundary at end
+                if Self::is_word_boundary_at(text, end_pos) {
+                    return Some(Match::new(
+                        text,
+                        abs_pos,
+                        end_pos,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
+                }
+            }
+
+            pos = abs_pos + 1;
+        }
+
+        None
+    }
+
+    /// Fast path for non-fuzzy word-bounded literals - find all matches.
+    fn find_all_word_bounded_exact<'t>(text: &'t str, literal: &str) -> Vec<Match<'t>> {
+        let literal_bytes = literal.as_bytes();
+        let text_bytes = text.as_bytes();
+        let mut matches = Vec::new();
+
+        let mut pos = 0;
+        while let Some(found) = memmem::find(&text_bytes[pos..], literal_bytes) {
+            let abs_pos = pos + found;
+
+            // Check word boundary at start
+            if Self::is_word_boundary_at(text, abs_pos) {
+                let end_pos = abs_pos + literal.len();
+                // Check word boundary at end
+                if Self::is_word_boundary_at(text, end_pos) {
+                    matches.push(Match::new(
+                        text,
+                        abs_pos,
+                        end_pos,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
+                }
+            }
+
+            pos = abs_pos + 1;
+        }
+
+        matches
     }
 
     /// Optimized collection of all non-overlapping matches using greedy-leftmost.
