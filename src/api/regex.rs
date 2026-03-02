@@ -13,14 +13,17 @@
 )]
 // Note: dead_code is a valid lint but clippy::dead_code isn't a separate allow
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use smartcow::SmartCow;
+use smartstring::{Compact, SmartString};
 
-use super::builder::{FuzzyRegexBuilder, RegexConfig};
+use super::builder::{FuzzyRegexBuilder, HandlerMap, RegexConfig};
+
+type SmartStr = SmartString<Compact>;
 use super::match_result::{CaptureMatches, Captures, Match, Matches, Split};
 use crate::compiler::build_nfa;
+use crate::engine::hash::FxHashMap;
 use crate::engine::{Dfa, FuzzyBridge, MatchResult, Matcher, MatcherConfig, Prefilter};
 use crate::error::Result;
 use crate::ir::{Hir, LiteralPattern, Nfa, lower_with_unicode};
@@ -51,7 +54,7 @@ pub struct FuzzyRegex {
     /// Number of capture groups.
     capture_count: usize,
     /// Named group mapping.
-    named_groups: HashMap<String, usize>,
+    named_groups: FxHashMap<SmartStr, usize>,
     /// Configuration.
     config: RegexConfig,
     /// Prefilter for fast candidate detection (Arc to avoid cloning on each `find()`).
@@ -71,7 +74,9 @@ pub struct FuzzyRegex {
     dfa: Option<RefCell<Dfa>>,
     /// Named word lists for \L<name> patterns.
     /// Map from list name to vector of words.
-    word_lists: HashMap<SmartCow<'static>, Vec<SmartCow<'static>>>,
+    word_lists: FxHashMap<SmartStr, Vec<SmartCow<'static>>>,
+    /// Custom handlers for (?call:name) patterns.
+    handlers: HandlerMap,
 }
 
 impl std::fmt::Debug for FuzzyRegex {
@@ -223,7 +228,7 @@ impl FuzzyRegex {
             literals,
             capture_count,
             named_groups,
-            config,
+            config: config.clone(),
             prefilter,
             anchored,
             has_lazy,
@@ -231,7 +236,8 @@ impl FuzzyRegex {
             max_match_length,
             is_word_bounded_literal,
             dfa,
-            word_lists: HashMap::new(),
+            word_lists: FxHashMap::default(),
+            handlers: config.handlers,
         })
     }
 
@@ -309,7 +315,7 @@ impl FuzzyRegex {
     /// ```
     pub fn set_word_list(
         &mut self,
-        name: impl Into<SmartCow<'static>>,
+        name: impl Into<SmartStr>,
         words: Vec<impl Into<SmartCow<'static>>>,
     ) {
         self.word_lists
@@ -327,7 +333,7 @@ impl FuzzyRegex {
     /// Returns a reference to the internal word lists map.
     /// This matches the API of mrab-regex's `named_lists` property.
     #[must_use]
-    pub fn named_lists(&self) -> &HashMap<SmartCow<'static>, Vec<SmartCow<'static>>> {
+    pub fn named_lists(&self) -> &FxHashMap<SmartStr, Vec<SmartCow<'static>>> {
         &self.word_lists
     }
 
@@ -1418,6 +1424,7 @@ impl FuzzyRegex {
                     self.named_groups.clone(),
                     m.similarity,
                     m.edits,
+                    m.captures.handler_overrides().to_vec(),
                 ));
             }
         }
@@ -1446,6 +1453,7 @@ impl FuzzyRegex {
                     self.named_groups.clone(),
                     caps.similarity(),
                     caps.edits().clone(),
+                    caps.handler_overrides().to_vec(),
                 );
                 return Some(caps);
             }
@@ -1590,6 +1598,7 @@ impl FuzzyRegex {
                 greedy_first: self.config.greedy_first,
             },
             self.prefilter.clone(),
+            &self.handlers,
         )
     }
 
@@ -1615,6 +1624,7 @@ impl FuzzyRegex {
             self.named_groups.clone(),
             result.similarity,
             result.edits,
+            result.captures.handler_overrides().to_vec(),
         )
     }
 
@@ -1732,9 +1742,9 @@ impl Clone for FuzzyRegex {
 }
 
 /// Collect capture group information from AST.
-fn collect_captures(ast: &Ast) -> (usize, HashMap<String, usize>) {
+fn collect_captures(ast: &Ast) -> (usize, FxHashMap<SmartStr, usize>) {
     let mut max_index = 0;
-    let mut names = HashMap::new();
+    let mut names = FxHashMap::default();
     collect_captures_recursive(ast, &mut max_index, &mut names);
     (max_index, names)
 }
@@ -1742,13 +1752,13 @@ fn collect_captures(ast: &Ast) -> (usize, HashMap<String, usize>) {
 fn collect_captures_recursive(
     ast: &Ast,
     max_index: &mut usize,
-    names: &mut HashMap<String, usize>,
+    names: &mut FxHashMap<SmartStr, usize>,
 ) {
     match ast {
         Ast::Group { index, name, expr } => {
             *max_index = (*max_index).max(*index);
             if let Some(n) = name {
-                names.insert(n.clone(), *index);
+                names.insert(n.clone().into(), *index);
             }
             collect_captures_recursive(expr, max_index, names);
         }
@@ -4109,4 +4119,71 @@ mod tests {
         assert_eq!(matches[1].as_str(), "dog");
         assert_eq!(matches[2].as_str(), "cat");
     }
+}
+
+#[test]
+fn test_case_insensitive_fuzzy_no_substitution_penalty() {
+    // Case insensitive + fuzzy should NOT count case differences as substitutions
+
+    // Test 1: Inline (?i) flag
+    let re = FuzzyRegexBuilder::new("(?i)(?:hello){e<=1}")
+        .build()
+        .unwrap();
+
+    // Exact match - 0 edits
+    let m = re.find("hello").unwrap();
+    assert_eq!(m.total_edits(), 0, "exact match should have 0 edits");
+
+    // Case difference - should be 0 edits with case_insensitive
+    let m = re.find("HELLO").unwrap();
+    assert_eq!(
+        m.total_edits(),
+        0,
+        "case difference should NOT count as edit"
+    );
+
+    // Case difference in middle - should be 0 edits
+    let m = re.find("HelLo").unwrap();
+    assert_eq!(
+        m.total_edits(),
+        0,
+        "case difference should NOT count as edit"
+    );
+
+    // Actual substitution - should count as edit
+    let m = re.find("hallo").unwrap();
+    assert_eq!(m.total_edits(), 1, "actual substitution should count");
+
+    // Test 2: Builder's case_insensitive(true)
+    let re2 = FuzzyRegexBuilder::new("(?:hello){e<=1}")
+        .case_insensitive(true)
+        .build()
+        .unwrap();
+
+    let m = re2.find("HELLO").unwrap();
+    assert_eq!(
+        m.total_edits(),
+        0,
+        "builder: case difference should NOT count as edit"
+    );
+
+    let m = re2.find("hallo").unwrap();
+    assert_eq!(
+        m.total_edits(),
+        1,
+        "builder: actual substitution should count"
+    );
+
+    // Test 3: Multiple case differences
+    let m = re.find("HeLLo").unwrap();
+    assert_eq!(
+        m.total_edits(),
+        0,
+        "multiple case differences should NOT count as edits"
+    );
+
+    // Test 4: Mix of case difference and actual substitution
+    // "hallo" has 'a' for 'e' - that's a substitution
+    let m = re.find("HALLO").unwrap();
+    assert_eq!(m.total_edits(), 1, "case diff + substitution should be 1");
 }

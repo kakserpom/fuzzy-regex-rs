@@ -17,8 +17,11 @@
 
 use std::sync::Arc;
 
+use smartstring::{Compact, SmartString};
+
 use super::captures::CaptureState;
 use super::fuzzy_bridge::{CachedMatches, FuzzyBridge, FuzzyMatchResult};
+use crate::api::builder::{HandlerMap, HandlerResult};
 use crate::ir::{LiteralPattern, Nfa, State, StateId};
 use crate::parser::Anchor;
 use crate::types::{Distance, FuzzyLimits, NumEdits};
@@ -38,6 +41,8 @@ struct Thread {
     similarity: f32,
     /// Total edits.
     edits: EditCounts,
+    /// Handler overrides: (`start_pos`, `end_pos`, `override_text`)
+    handler_overrides: Vec<(usize, usize, SmartString<Compact>)>,
 }
 
 impl Default for Thread {
@@ -49,6 +54,7 @@ impl Default for Thread {
             captures: CaptureState::new(0),
             similarity: 1.0,
             edits: EditCounts::default(),
+            handler_overrides: Vec::new(),
         }
     }
 }
@@ -205,6 +211,8 @@ pub struct Matcher<'a> {
     ends_with_end_anchor: bool,
     /// Maximum match length for simple patterns (used with end anchor optimization).
     max_simple_length: Option<usize>,
+    /// Custom handlers for (?call:name) patterns.
+    handlers: &'a HandlerMap,
 }
 
 impl<'a> Matcher<'a> {
@@ -215,6 +223,7 @@ impl<'a> Matcher<'a> {
         fuzzy_bridge: Option<&'a FuzzyBridge>,
         capture_count: usize,
         config: MatcherConfig,
+        handlers: &'a HandlerMap,
     ) -> Self {
         let is_simple_fuzzy =
             nfa.is_simple_fuzzy_only() && fuzzy_bridge.is_some_and(|b| b.pattern_count() == 1);
@@ -233,6 +242,7 @@ impl<'a> Matcher<'a> {
             first_char_class,
             ends_with_end_anchor,
             max_simple_length,
+            handlers,
         }
     }
 
@@ -244,6 +254,7 @@ impl<'a> Matcher<'a> {
         capture_count: usize,
         config: MatcherConfig,
         prefilter: Arc<super::prefilter::Prefilter>,
+        handlers: &'a HandlerMap,
     ) -> Self {
         let is_simple_fuzzy =
             nfa.is_simple_fuzzy_only() && fuzzy_bridge.is_some_and(|b| b.pattern_count() == 1);
@@ -273,6 +284,7 @@ impl<'a> Matcher<'a> {
             first_char_class,
             ends_with_end_anchor,
             max_simple_length,
+            handlers,
         }
     }
 
@@ -1222,6 +1234,7 @@ impl<'a> Matcher<'a> {
             captures: CaptureState::new(self.capture_count),
             similarity: 1.0,
             edits: EditCounts::default(),
+            handler_overrides: Vec::new(),
         }];
 
         let mut best_match: Option<MatchResult> = None;
@@ -1319,14 +1332,21 @@ impl<'a> Matcher<'a> {
 
         match state {
             State::Accept => {
+                let match_start = thread.match_start;
+                let end_pos = thread.pos;
+                let similarity = thread.similarity;
+                let edits = thread.edits.clone();
+                let overrides = thread.handler_overrides.clone();
+
                 let mut captures = thread.captures.clone();
-                captures.set_full_match(thread.match_start, thread.pos);
+                captures.set_full_match(match_start, end_pos);
+                captures.set_handler_overrides(overrides);
 
                 let m = MatchResult {
-                    start: thread.match_start,
-                    end: thread.pos,
-                    similarity: thread.similarity,
-                    edits: thread.edits.clone(),
+                    start: match_start,
+                    end: end_pos,
+                    similarity,
+                    edits,
                     captures,
                 };
 
@@ -1596,7 +1616,8 @@ impl<'a> Matcher<'a> {
                                         .edits
                                         .merge(&EditCounts::from_fuzzy_result(&boundary_result)),
                                     captures: thread.captures.clone(),
-                                    ..thread
+                                    match_start: thread.match_start,
+                                    handler_overrides: thread.handler_overrides.clone(),
                                 });
                             }
 
@@ -1612,7 +1633,8 @@ impl<'a> Matcher<'a> {
                                         .edits
                                         .merge(&EditCounts::from_fuzzy_result(&result)),
                                     captures: thread.captures.clone(),
-                                    ..thread
+                                    match_start: thread.match_start,
+                                    handler_overrides: thread.handler_overrides.clone(),
                                 });
                             }
                         } else {
@@ -1641,7 +1663,8 @@ impl<'a> Matcher<'a> {
                                             .edits
                                             .merge(&EditCounts::from_fuzzy_result(&result)),
                                         captures: thread.captures.clone(),
-                                        ..thread
+                                        match_start: thread.match_start,
+                                        handler_overrides: thread.handler_overrides.clone(),
                                     });
                                 }
                             }
@@ -1700,7 +1723,8 @@ impl<'a> Matcher<'a> {
                                                 * deletion_result.similarity,
                                             edits: new_edits,
                                             captures: thread.captures.clone(),
-                                            ..thread
+                                            match_start: thread.match_start,
+                                            handler_overrides: thread.handler_overrides.clone(),
                                         });
                                     }
                                 }
@@ -1780,6 +1804,7 @@ impl<'a> Matcher<'a> {
                         unanchored: false,
                         ..self.config.clone()
                     },
+                    self.handlers,
                 );
 
                 let sub_result = sub_matcher.find_at(text, thread.pos);
@@ -1851,7 +1876,8 @@ impl<'a> Matcher<'a> {
                                         ..Default::default()
                                     }),
                                     captures: thread.captures.clone(),
-                                    ..thread
+                                    match_start: thread.match_start,
+                                    handler_overrides: thread.handler_overrides.clone(),
                                 });
                             }
                         }
@@ -1859,7 +1885,11 @@ impl<'a> Matcher<'a> {
                         next_threads.push(Thread {
                             state: *next,
                             pos: thread.pos + captured.len(),
-                            ..thread
+                            match_start: thread.match_start,
+                            captures: thread.captures.clone(),
+                            similarity: thread.similarity,
+                            edits: thread.edits.clone(),
+                            handler_overrides: thread.handler_overrides.clone(),
                         });
                     }
                 }
@@ -1871,6 +1901,33 @@ impl<'a> Matcher<'a> {
                 new_thread.match_start = thread.pos;
                 new_thread.state = *next;
                 next_threads.push(new_thread);
+            }
+
+            // Custom handler invocation
+            State::Handler { name, next } => {
+                // Look up the handler
+                if let Some(handler) = self.handlers.get(name) {
+                    // Call the handler with current text and position
+                    match handler(text, thread.pos) {
+                        HandlerResult::MatchOverride(consumed, override_text) => {
+                            // Handler matched - advance position and record override
+                            let mut new_thread = thread.clone();
+                            new_thread.pos += consumed;
+                            new_thread.state = *next;
+                            new_thread.handler_overrides.push((
+                                thread.pos,
+                                thread.pos + consumed,
+                                override_text.into(),
+                            ));
+                            next_threads.push(new_thread);
+                        }
+                        HandlerResult::NoMatch => {
+                            // Handler didn't match - thread dies
+                        }
+                    }
+                } else {
+                    // Handler not found - treat as error (thread dies)
+                }
             }
             State::AtomicGroup { .. }
             | State::RecursivePattern { .. }
@@ -1982,7 +2039,8 @@ impl<'a> Matcher<'a> {
             | State::AtomicGroup { .. }
             | State::RecursivePattern { .. }
             | State::RecursiveGroup { .. }
-            | State::RecursiveNamedGroup { .. } => None,
+            | State::RecursiveNamedGroup { .. }
+            | State::Handler { .. } => None,
         }
     }
 
@@ -2046,6 +2104,7 @@ impl<'a> Matcher<'a> {
                 unanchored: false,
                 ..self.config.clone()
             },
+            self.handlers,
         );
 
         // For fixed-length patterns, only try exact position
@@ -2313,7 +2372,7 @@ mod tests {
     use crate::ir::lower;
     use crate::parser::parse;
 
-    fn make_matcher(pattern: &str) -> (Nfa, Option<FuzzyBridge>, usize) {
+    fn make_matcher(pattern: &str) -> (Nfa, Option<FuzzyBridge>, usize, HandlerMap) {
         let ast = parse(pattern).unwrap();
         let hir = lower(&ast, 0);
         let (nfa, literals) = build_nfa(&hir);
@@ -2323,7 +2382,7 @@ mod tests {
         // Count capture groups from AST
         let capture_count = count_captures(&ast);
 
-        (nfa, bridge, capture_count)
+        (nfa, bridge, capture_count, HandlerMap::default())
     }
 
     fn count_captures(ast: &crate::parser::Ast) -> usize {
@@ -2342,8 +2401,14 @@ mod tests {
 
     #[test]
     fn test_simple_match() {
-        let (nfa, bridge, captures) = make_matcher("hello");
-        let matcher = Matcher::new(&nfa, bridge.as_ref(), captures, MatcherConfig::default());
+        let (nfa, bridge, captures, handlers) = make_matcher("hello");
+        let matcher = Matcher::new(
+            &nfa,
+            bridge.as_ref(),
+            captures,
+            MatcherConfig::default(),
+            &handlers,
+        );
 
         let result = matcher.find("hello world");
         assert!(result.is_some());
@@ -2354,8 +2419,14 @@ mod tests {
 
     #[test]
     fn test_find_no_cache() {
-        let (nfa, bridge, captures) = make_matcher("hello");
-        let matcher = Matcher::new(&nfa, bridge.as_ref(), captures, MatcherConfig::default());
+        let (nfa, bridge, captures, handlers) = make_matcher("hello");
+        let matcher = Matcher::new(
+            &nfa,
+            bridge.as_ref(),
+            captures,
+            MatcherConfig::default(),
+            &handlers,
+        );
 
         let result = matcher.find_no_cache("hello world");
         assert!(result.is_some());
@@ -2366,8 +2437,14 @@ mod tests {
 
     #[test]
     fn test_find_no_cache_fuzzy() {
-        let (nfa, bridge, captures) = make_matcher("hello~1");
-        let matcher = Matcher::new(&nfa, bridge.as_ref(), captures, MatcherConfig::default());
+        let (nfa, bridge, captures, handlers) = make_matcher("hello~1");
+        let matcher = Matcher::new(
+            &nfa,
+            bridge.as_ref(),
+            captures,
+            MatcherConfig::default(),
+            &handlers,
+        );
 
         let result = matcher.find_no_cache("hallo world");
         assert!(result.is_some());
@@ -2378,8 +2455,14 @@ mod tests {
 
     #[test]
     fn test_char_class() {
-        let (nfa, bridge, captures) = make_matcher("[a-z]+");
-        let matcher = Matcher::new(&nfa, bridge.as_ref(), captures, MatcherConfig::default());
+        let (nfa, bridge, captures, handlers) = make_matcher("[a-z]+");
+        let matcher = Matcher::new(
+            &nfa,
+            bridge.as_ref(),
+            captures,
+            MatcherConfig::default(),
+            &handlers,
+        );
 
         let result = matcher.find("123abc456");
         assert!(result.is_some());
@@ -2389,8 +2472,14 @@ mod tests {
 
     #[test]
     fn test_capture_group() {
-        let (nfa, bridge, captures) = make_matcher("(abc)");
-        let matcher = Matcher::new(&nfa, bridge.as_ref(), captures, MatcherConfig::default());
+        let (nfa, bridge, captures, handlers) = make_matcher("(abc)");
+        let matcher = Matcher::new(
+            &nfa,
+            bridge.as_ref(),
+            captures,
+            MatcherConfig::default(),
+            &handlers,
+        );
 
         let result = matcher.find("xyzabc123");
         assert!(result.is_some());
@@ -2400,8 +2489,14 @@ mod tests {
 
     #[test]
     fn test_anchors() {
-        let (nfa, bridge, captures) = make_matcher("^hello");
-        let matcher = Matcher::new(&nfa, bridge.as_ref(), captures, MatcherConfig::default());
+        let (nfa, bridge, captures, handlers) = make_matcher("^hello");
+        let matcher = Matcher::new(
+            &nfa,
+            bridge.as_ref(),
+            captures,
+            MatcherConfig::default(),
+            &handlers,
+        );
 
         assert!(matcher.find("hello world").is_some());
         assert!(matcher.find("say hello").is_none());
@@ -2409,8 +2504,14 @@ mod tests {
 
     #[test]
     fn test_alternation() {
-        let (nfa, bridge, captures) = make_matcher("cat|dog");
-        let matcher = Matcher::new(&nfa, bridge.as_ref(), captures, MatcherConfig::default());
+        let (nfa, bridge, captures, handlers) = make_matcher("cat|dog");
+        let matcher = Matcher::new(
+            &nfa,
+            bridge.as_ref(),
+            captures,
+            MatcherConfig::default(),
+            &handlers,
+        );
 
         assert!(matcher.find("I have a cat").is_some());
         assert!(matcher.find("I have a dog").is_some());

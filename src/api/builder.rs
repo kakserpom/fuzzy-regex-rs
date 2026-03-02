@@ -1,12 +1,37 @@
 //! Builder for `FuzzyRegex`.
 
+use crate::engine::FxHashMap;
 use crate::types::{FuzzyLimits, FuzzyPenalties};
+use std::sync::Arc;
 
 use super::regex::FuzzyRegex;
 use crate::error::Result;
 
-/// Builder for constructing a `FuzzyRegex` with custom configuration.
+/// Result from a custom handler.
+///
+/// - `MatchOverride(n, text)` - handler matched, consume n bytes, override capture with text
+/// - `NoMatch` - handler did not match
 #[derive(Debug, Clone)]
+pub enum HandlerResult {
+    /// Handler matched: consumes n bytes and overrides the captured text.
+    /// The capture for the matched region will be set to `text` instead of
+    /// the actual input slice.
+    MatchOverride(usize, String),
+    /// Handler did not match.
+    NoMatch,
+}
+
+/// A custom handler function that can be called from within a regex pattern.
+///
+/// The handler is invoked when the regex engine reaches a `(?call:name)` position.
+/// It receives the text being matched and the current position, and returns a `HandlerResult`.
+pub type Handler = dyn Fn(&str, usize) -> HandlerResult + Send + Sync;
+
+/// A map of handler names to handler functions.
+pub type HandlerMap = FxHashMap<std::sync::Arc<str>, std::sync::Arc<Handler>>;
+
+/// Builder for constructing a `FuzzyRegex` with custom configuration.
+#[derive(Clone)]
 pub struct FuzzyRegexBuilder {
     pattern: String,
     config: RegexConfig,
@@ -41,7 +66,6 @@ pub struct MatchFlags {
 }
 
 /// Configuration for regex matching.
-#[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct RegexConfig {
     /// Case-insensitive matching.
@@ -74,6 +98,30 @@ pub struct RegexConfig {
     /// Similar to mrab-regex behavior - searches position by position,
     /// returning on first match instead of searching for best match.
     pub greedy_first: bool,
+    /// Custom handlers registered for this regex.
+    pub handlers: HandlerMap,
+}
+
+impl Clone for RegexConfig {
+    fn clone(&self) -> Self {
+        RegexConfig {
+            case_insensitive: self.case_insensitive,
+            verbose: self.verbose,
+            dot_all: self.dot_all,
+            multi_line: self.multi_line,
+            ungreedy: self.ungreedy,
+            similarity_threshold: self.similarity_threshold,
+            default_edits: self.default_edits,
+            default_limits: self.default_limits.clone(),
+            penalties: self.penalties.clone(),
+            max_threads: self.max_threads,
+            match_flags: self.match_flags,
+            partial: self.partial,
+            timeout: self.timeout,
+            greedy_first: self.greedy_first,
+            handlers: self.handlers.clone(), // Note: handlers can't really be cloned properly, this is a shallow copy
+        }
+    }
 }
 
 impl Default for RegexConfig {
@@ -96,6 +144,7 @@ impl Default for RegexConfig {
             partial: false,
             timeout: None,
             greedy_first: false,
+            handlers: FxHashMap::default(),
         }
     }
 }
@@ -274,6 +323,43 @@ impl FuzzyRegexBuilder {
     #[must_use]
     pub fn timeout(mut self, duration: std::time::Duration) -> Self {
         self.config.timeout = Some(duration);
+        self
+    }
+
+    /// Register a custom handler that can be invoked from within the regex pattern.
+    ///
+    /// Handlers are called when the regex engine reaches a `(?call:name)` position.
+    /// The handler receives the text being matched and the current position, and returns:
+    /// - `HandlerResult::MatchOverride(n, text)` if the handler matches:
+    ///   - `n` is the number of characters consumed from the input
+    ///   - `text` is the override text to use for captures instead of the actual input slice
+    /// - `HandlerResult::NoMatch` if the handler does not match
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use fuzzy_regex::{FuzzyRegexBuilder, HandlerResult};
+    ///
+    /// let re = FuzzyRegexBuilder::new(r#"(?call:unescape)"#)
+    ///     .handler("unescape", |text, pos| {
+    ///         // Simple handler that matches a backslash-escaped character
+    ///         if pos + 1 < text.len() && text.as_bytes()[pos] == b'\\' {
+    ///             let escaped = &text[pos..pos+2];
+    ///             HandlerResult::MatchOverride(2, escaped.to_string())
+    ///         } else {
+    ///             HandlerResult::NoMatch
+    ///         }
+    ///     })
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    #[must_use]
+    pub fn handler(
+        mut self,
+        name: &str,
+        handler: impl Fn(&str, usize) -> HandlerResult + Send + Sync + 'static,
+    ) -> Self {
+        self.config.handlers.insert(name.into(), Arc::new(handler));
         self
     }
 

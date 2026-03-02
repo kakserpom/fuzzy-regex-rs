@@ -233,7 +233,8 @@ impl Nfa {
             | State::AtomicGroup { .. }
             | State::RecursivePattern { .. }
             | State::RecursiveGroup { .. }
-            | State::RecursiveNamedGroup { .. } => false,
+            | State::RecursiveNamedGroup { .. }
+            | State::Handler { .. } => false,
         }
     }
 
@@ -559,9 +560,8 @@ impl Nfa {
             | State::AtomicGroup { next, .. }
             | State::RecursivePattern { next, .. }
             | State::RecursiveGroup { next, .. }
-            | State::RecursiveNamedGroup { next, .. } => {
-                self.check_ends_with_end_anchor(*next, visited)
-            }
+            | State::RecursiveNamedGroup { next, .. }
+            | State::Handler { next, .. } => self.check_ends_with_end_anchor(*next, visited),
         }
     }
 
@@ -658,6 +658,7 @@ impl Nfa {
             State::RecursivePattern { .. } => None, // Recursive - unknown length
             State::RecursiveGroup { .. } => None,   // Recursive - unknown length
             State::RecursiveNamedGroup { .. } => None, // Recursive - unknown length
+            State::Handler { .. } => None,          // Handler - unknown length
         };
 
         visited[state_id] = false; // Reset for other paths
@@ -802,7 +803,8 @@ impl Nfa {
 
             State::RecursivePattern { .. }
             | State::RecursiveGroup { .. }
-            | State::RecursiveNamedGroup { .. } => (0, None), // Recursive - unknown
+            | State::RecursiveNamedGroup { .. }
+            | State::Handler { .. } => (0, None), // Unknown
         };
 
         visited[state_id] = false;
@@ -976,6 +978,15 @@ pub enum State {
         /// Next state after the recursive call.
         next: StateId,
     },
+
+    /// Custom handler invocation - (?call:name)
+    /// Calls a custom handler function at this point in the match.
+    Handler {
+        /// The name of the handler to invoke.
+        name: std::sync::Arc<str>,
+        /// Next state after the handler returns.
+        next: StateId,
+    },
 }
 
 impl State {
@@ -1111,7 +1122,8 @@ impl State {
             | State::AtomicGroup { next, .. }
             | State::RecursivePattern { next, .. }
             | State::RecursiveGroup { next, .. }
-            | State::RecursiveNamedGroup { next, .. } => vec![*next],
+            | State::RecursiveNamedGroup { next, .. }
+            | State::Handler { next, .. } => vec![*next],
             State::Split { branches, .. } => branches.clone(),
             State::ResetMatchStart { .. } => vec![],
         }

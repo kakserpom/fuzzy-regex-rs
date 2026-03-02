@@ -2,15 +2,19 @@
 
 #![allow(clippy::needless_range_loop)]
 
-use std::collections::HashMap;
+use std::borrow::Cow;
 use std::ops::Range;
 
+use smartstring::{Compact, SmartString};
+
 use crate::engine::EditCounts;
+use crate::engine::hash::FxHashMap;
 
 /// A single match in the text.
 #[derive(Debug, Clone)]
 pub struct Match<'t> {
     text: &'t str,
+    override_text: Option<SmartString<Compact>>,
     start: usize,
     end: usize,
     similarity: f32,
@@ -30,6 +34,27 @@ impl<'t> Match<'t> {
     ) -> Self {
         Match {
             text,
+            override_text: None,
+            start,
+            end,
+            similarity,
+            edits,
+            fuzzy_changes: None,
+            partial: false,
+        }
+    }
+
+    /// Create a new match with override text.
+    pub(crate) fn new_override(
+        text: &str,
+        start: usize,
+        end: usize,
+        similarity: f32,
+        edits: EditCounts,
+    ) -> Self {
+        Match {
+            text: "",
+            override_text: Some(text.into()),
             start,
             end,
             similarity,
@@ -54,6 +79,7 @@ impl<'t> Match<'t> {
     ) -> Self {
         Match {
             text,
+            override_text: None,
             start,
             end,
             similarity,
@@ -75,6 +101,7 @@ impl<'t> Match<'t> {
     ) -> Self {
         Match {
             text,
+            override_text: None,
             start,
             end,
             similarity,
@@ -86,8 +113,12 @@ impl<'t> Match<'t> {
 
     /// Get the matched text.
     #[must_use]
-    pub fn as_str(&self) -> &'t str {
-        &self.text[self.start..self.end]
+    pub fn as_str(&self) -> Cow<'t, str> {
+        if let Some(ref r#override) = self.override_text {
+            Cow::Owned(r#override.clone().into())
+        } else {
+            Cow::Borrowed(&self.text[self.start..self.end])
+        }
     }
 
     /// Get the start byte offset.
@@ -181,7 +212,7 @@ impl<'t> Match<'t> {
         pattern: &str,
     ) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
         let matched_text = self.as_str();
-        compute_fuzzy_changes(pattern, matched_text)
+        compute_fuzzy_changes(pattern, matched_text.as_ref())
     }
 
     /// Check if this is a partial match.
@@ -267,9 +298,10 @@ fn compute_fuzzy_changes(pattern: &str, text: &str) -> (Vec<usize>, Vec<usize>, 
 pub struct Captures<'t> {
     text: &'t str,
     slots: Vec<Option<(usize, usize)>>,
-    names: HashMap<String, usize>,
+    names: FxHashMap<SmartString<Compact>, usize>,
     similarity: f32,
     edits: EditCounts,
+    handler_overrides: Vec<(usize, usize, SmartString<Compact>)>,
 }
 
 impl<'t> Captures<'t> {
@@ -277,9 +309,10 @@ impl<'t> Captures<'t> {
     pub(crate) fn new(
         text: &'t str,
         slots: Vec<Option<(usize, usize)>>,
-        names: HashMap<String, usize>,
+        names: FxHashMap<SmartString<Compact>, usize>,
         similarity: f32,
         edits: EditCounts,
+        handler_overrides: Vec<(usize, usize, SmartString<Compact>)>,
     ) -> Self {
         Captures {
             text,
@@ -287,7 +320,45 @@ impl<'t> Captures<'t> {
             names,
             similarity,
             edits,
+            handler_overrides,
         }
+    }
+
+    /// Apply handler overrides to capture text.
+    fn apply_overrides(&self, start: usize, end: usize) -> SmartString<Compact> {
+        if self.handler_overrides.is_empty() {
+            return self.text[start..end].into();
+        }
+
+        let mut result = SmartString::new();
+        let mut pos = start;
+
+        for (ov_start, ov_end, ov_text) in &self.handler_overrides {
+            let ov_start = *ov_start;
+            let ov_end = *ov_end;
+
+            if ov_end <= start || ov_start >= end {
+                continue;
+            }
+
+            if ov_start > pos {
+                result.push_str(&self.text[pos..ov_start.min(end)]);
+            }
+
+            let overlap_start = ov_start.max(start);
+            let overlap_end = ov_end.min(end);
+            if overlap_start < overlap_end {
+                result.push_str(ov_text);
+            }
+
+            pos = ov_end;
+        }
+
+        if pos < end {
+            result.push_str(&self.text[pos..end]);
+        }
+
+        result
     }
 
     /// Get the full match (group 0).
@@ -298,7 +369,12 @@ impl<'t> Captures<'t> {
             .copied()
             .flatten()
             .map(|(start, end)| {
-                Match::new(self.text, start, end, self.similarity, self.edits.clone())
+                if self.handler_overrides.is_empty() {
+                    Match::new(self.text, start, end, self.similarity, self.edits.clone())
+                } else {
+                    let text = self.apply_overrides(start, end);
+                    Match::new_override(&text, start, end, self.similarity, self.edits.clone())
+                }
             })
     }
 
@@ -318,6 +394,12 @@ impl<'t> Captures<'t> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
+    }
+
+    /// Get handler overrides.
+    #[must_use]
+    pub fn handler_overrides(&self) -> &[(usize, usize, SmartString<Compact>)] {
+        &self.handler_overrides
     }
 
     /// Iterate over all captures.
@@ -387,7 +469,7 @@ impl<'t> Captures<'t> {
                             }
                         }
                         if let Some(m) = self.get(num) {
-                            result.push_str(m.as_str());
+                            result.push_str(&m.as_str());
                         }
                     }
                     Some(&c) if c.is_alphabetic() || c == '_' => {
@@ -401,7 +483,7 @@ impl<'t> Captures<'t> {
                             }
                         }
                         if let Some(m) = self.name(&name) {
-                            result.push_str(m.as_str());
+                            result.push_str(&m.as_str());
                         }
                     }
                     Some('{') => {
@@ -418,10 +500,10 @@ impl<'t> Captures<'t> {
                         // Try as number first
                         if let Ok(num) = name.parse::<usize>() {
                             if let Some(m) = self.get(num) {
-                                result.push_str(m.as_str());
+                                result.push_str(&m.as_str());
                             }
                         } else if let Some(m) = self.name(&name) {
-                            result.push_str(m.as_str());
+                            result.push_str(&m.as_str());
                         }
                     }
                     _ => result.push('$'),

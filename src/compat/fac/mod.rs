@@ -279,6 +279,7 @@ impl FuzzyAhoCorasick {
                     let key = (m.start(), m.end(), pattern_index);
                     let edits = m.edits();
 
+                    let text = m.as_str().to_string();
                     let fm = FuzzyMatch {
                         insertions: edits.insertions,
                         deletions: edits.deletions,
@@ -290,7 +291,7 @@ impl FuzzyAhoCorasick {
                         start: m.start(),
                         end: m.end(),
                         similarity: m.similarity(),
-                        text: m.as_str(),
+                        text: Box::leak(text.into_boxed_str()),
                     };
 
                     best.entry(key)
@@ -354,6 +355,7 @@ impl FuzzyAhoCorasick {
                 .into_iter()
                 .map(|m| {
                     let edits = m.edits();
+                    let text = m.as_str().to_string();
                     FuzzyMatch {
                         insertions: edits.insertions,
                         deletions: edits.deletions,
@@ -365,7 +367,7 @@ impl FuzzyAhoCorasick {
                         start: m.start(),
                         end: m.end(),
                         similarity: m.similarity(),
-                        text: m.as_str(),
+                        text: Box::leak(text.into_boxed_str()),
                     }
                 })
                 .collect();

@@ -290,6 +290,15 @@ impl NfaBuilder {
                 });
                 NfaFragment::single(state, state)
             }
+
+            Hir::Handler { name } => {
+                // (?call:name) - invoke a custom handler
+                let state = self.nfa.add_state(State::Handler {
+                    name: name.clone(),
+                    next: 0, // Will be patched by caller
+                });
+                NfaFragment::single(state, state)
+            }
         }
     }
 
@@ -530,6 +539,7 @@ impl NfaBuilder {
             | State::RecursivePattern { next, .. }
             | State::RecursiveGroup { next, .. }
             | State::RecursiveNamedGroup { next, .. }
+            | State::Handler { next, .. }
             | State::ResetMatchStart { next } => *next = target,
             State::Split { branches, .. } => {
                 // For split, we need to add the target as an option

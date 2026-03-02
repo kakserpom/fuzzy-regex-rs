@@ -398,6 +398,13 @@ pub enum Ast {
         /// The name of the capture group to recurse into.
         name: String,
     },
+
+    /// Custom handler invocation: `(?call:name)`
+    /// Calls a custom handler function at this point in the match.
+    Handler {
+        /// The name of the handler to invoke.
+        name: String,
+    },
 }
 
 impl Ast {

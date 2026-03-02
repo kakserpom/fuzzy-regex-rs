@@ -64,7 +64,8 @@ fn extract_recursive(hir: &Hir, out: &mut Vec<LiteralPattern>) {
         | Hir::ResetMatchStart
         | Hir::RecursivePattern
         | Hir::RecursiveGroup { .. }
-        | Hir::RecursiveNamedGroup { .. } => {}
+        | Hir::RecursiveNamedGroup { .. }
+        | Hir::Handler { .. } => {}
 
         // AtomicGroup - extract from inner expression
         Hir::AtomicGroup { expr } => extract_recursive(expr, out),

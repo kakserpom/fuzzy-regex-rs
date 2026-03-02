@@ -125,8 +125,9 @@ pub mod types;
 
 // Re-export main types at crate root
 pub use api::{
-    ByteMatches, CaptureMatches, Captures, FeedMatches, FuzzyRegex, FuzzyRegexBuilder, Match,
-    MatchFlags, Matches, ReaderMatches, RegexConfig, Split, StreamingMatch, StreamingMatcher,
+    ByteMatches, CaptureMatches, Captures, FeedMatches, FuzzyRegex, FuzzyRegexBuilder, Handler,
+    HandlerMap, HandlerResult, Match, MatchFlags, Matches, ReaderMatches, RegexConfig, Split,
+    StreamingMatch, StreamingMatcher,
 };
 pub use engine::EditCounts;
 pub use error::{Error, Result};
