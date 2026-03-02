@@ -1923,14 +1923,15 @@ fn create_prefilter_from_hir(hir: &Hir, case_insensitive: bool) -> Prefilter {
             // first character could be ANY character, not just case variants.
             if let Some(edits) = max_edits {
                 if edits > 0 {
-                    // For longer patterns with fuzzy matching, use pigeonhole prefilter
-                    // which is much more selective than first-byte prefiltering.
-                    // Pigeonhole requires:
-                    // - Pattern long enough for pieces of at least 3 chars each
-                    // - 3*(k+1) is the minimum (e.g., 9 chars for k=2, 12 chars for k=3)
-                    // - We use a higher threshold (10 chars) for reliability
-                    let min_len_for_pigeonhole = (3 * (edits as usize + 1)).max(10);
-                    if text.len() >= min_len_for_pigeonhole {
+                    // For patterns with fuzzy matching, use pigeonhole prefilter when possible.
+                    // Pigeonhole is more selective than first-byte prefilter.
+                    // Requirements:
+                    // - m >= k+1 (pattern length >= edits + 1)
+                    // - min_piece_len >= 2 (each piece at least 2 bytes for selectivity)
+                    // This means: pattern length >= 2*(k+1)
+                    // Don't use pigeonhole for case_insensitive - fuzzy prefilter handles case variants
+                    let min_len_for_pigeonhole = 2 * (edits as usize + 1);
+                    if !case_insensitive && text.len() >= min_len_for_pigeonhole {
                         crate::engine::prefilter::Prefilter::pigeonhole(&text, edits)
                     } else {
                         // Fuzzy prefilter already includes case variants

@@ -85,3 +85,23 @@ All tests pass. Performance maintained at baseline.
 3. Avoiding unnecessary clones where practical
 4. **GuardNFA ASCII optimization** - Added byte-level path for ASCII text, avoiding Vec<char> allocation. ~27% improvement for exact matches on ASCII text (45µs -> 33µs).
 5. **Alternation fast path** - Added fast path in FuzzyRegex::find() for exact alternations (e.g., "cat|dog|bat"). This avoids the expensive find_iter -> find_all path. ~25x improvement (16µs -> 0.6µs).
+
+## Investigation: Long Text Fuzzy Matching
+
+After detailed profiling, found that long text fuzzy matching is fundamentally expensive:
+
+- For pattern "lorem" with e<=1 in 4KB text:
+  - Fuzzy prefilter finds ~500 candidate positions
+  - Bitap runs ~70ns per candidate
+  - Total: 500 * 70ns = 35µs (matches observed performance)
+
+- When match exists at position 0: ~1.5µs (fast termination)
+- When match exists in middle: ~0.4µs (prefilter finds it quickly)
+- When no match: ~35µs (must scan entire text)
+
+The bottleneck is the Bitap algorithm running for each prefilter candidate. The prefilter is already quite selective (4 bytes for e<=1), but common letters like 'l', 'o' appear frequently in text.
+
+Further optimization would require:
+1. More selective prefilters (pigeonhole requires pattern >= 6 chars)
+2. Parallel processing for very long texts
+3. SIMD improvements to Bitap (already has AVX2/NEON)
