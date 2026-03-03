@@ -323,7 +323,9 @@ impl Dfa {
                     current = *next;
                 }
                 State::Char { class, .. } => {
-                    // Check if this is a single character class
+                    // Check if this is a single character class (only single chars, not ranges or named classes)
+                    // Note: We don't extract prefilters for ranges or named classes because they can match
+                    // multiple different first bytes, making prefilters less effective.
                     if class.chars.len() == 1
                         && class.ranges.is_empty()
                         && class.named.is_empty()
@@ -337,6 +339,81 @@ impl Dfa {
                             break;
                         }
                     }
+
+                    // For character classes with small ranges or named classes,
+                    // collect all possible first bytes and use ManyBytes prefilter
+                    // Only do this for ASCII-safe classes to avoid complexity
+                    if !class.negated {
+                        let mut first_bytes = Vec::new();
+
+                        // Add single chars
+                        for &ch in &class.chars {
+                            if ch.is_ascii() {
+                                first_bytes.push(ch as u8);
+                            }
+                        }
+
+                        // Add ranges (only ASCII)
+                        for &(start, end) in &class.ranges {
+                            if start.is_ascii() && end.is_ascii() {
+                                for b in (start as u8)..=(end as u8) {
+                                    if !first_bytes.contains(&b) {
+                                        first_bytes.push(b);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Add named classes (common ASCII ones)
+                        for named in &class.named {
+                            match named {
+                                crate::parser::NamedClass::Digit => {
+                                    // Add '0'-'9'
+                                    for b in b'0'..=b'9' {
+                                        if !first_bytes.contains(&b) {
+                                            first_bytes.push(b);
+                                        }
+                                    }
+                                }
+                                crate::parser::NamedClass::Word => {
+                                    // Add 'a'-'z', 'A'-'Z', '0'-'9', '_'
+                                    for b in b'a'..=b'z' {
+                                        if !first_bytes.contains(&b) {
+                                            first_bytes.push(b);
+                                        }
+                                    }
+                                    for b in b'A'..=b'Z' {
+                                        if !first_bytes.contains(&b) {
+                                            first_bytes.push(b);
+                                        }
+                                    }
+                                    for b in b'0'..=b'9' {
+                                        if !first_bytes.contains(&b) {
+                                            first_bytes.push(b);
+                                        }
+                                    }
+                                    if !first_bytes.contains(&b'_') {
+                                        first_bytes.push(b'_');
+                                    }
+                                }
+                                crate::parser::NamedClass::Whitespace => {
+                                    // Add common whitespace: space, tab, newline, carriage return
+                                    for b in [b' ', b'\t', b'\n', b'\r'] {
+                                        if !first_bytes.contains(&b) {
+                                            first_bytes.push(b);
+                                        }
+                                    }
+                                }
+                                _ => {} // Skip other named classes
+                            }
+                        }
+
+                        // Only use if we have a small number of bytes (to keep prefilter efficient)
+                        if !first_bytes.is_empty() && first_bytes.len() <= 10 {
+                            return Self::make_multi_byte_prefilter(&first_bytes, case_insensitive);
+                        }
+                    }
+
                     break;
                 }
                 State::FuzzyLiteral { pattern_index, .. } => {
