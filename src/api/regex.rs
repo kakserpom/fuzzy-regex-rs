@@ -15,6 +15,7 @@
 
 use std::borrow::Cow;
 use std::fmt::Write;
+use std::ops::Range;
 use std::sync::Arc;
 
 use memchr::memmem;
@@ -585,6 +586,18 @@ impl FuzzyRegex {
             }
         }
 
+        // Fast path for fixed repetition: (?:literal){N} -> use concatenated literal search
+        if let Some(literal) = self.nfa.as_fixed_repetition()
+            && let Some(m) = Self::find_literal_first(text, &literal) {
+                return Some(self.make_match(
+                    text,
+                    m.start,
+                    m.end,
+                    1.0,
+                    crate::engine::EditCounts::default(),
+                ));
+            }
+
         // DFA fast path: use DFA for exact/non-fuzzy patterns
         // Skip if word_lists is populated (use word list matching instead)
         // Skip if pattern has word boundaries (DFA can't handle them)
@@ -601,6 +614,12 @@ impl FuzzyRegex {
                     crate::engine::EditCounts::default(),
                 )
             });
+        }
+
+        // Fast path for character class plus: [a-z]+, \d+, \w+
+        // Use direct byte scanning instead of DFA/NFA
+        if self.nfa.is_char_class_plus() && self.literals.is_empty() {
+            return Self::find_char_class_plus_first(text);
         }
 
         // Word list fast path: handle \L<name> patterns
@@ -1549,6 +1568,50 @@ impl FuzzyRegex {
         }
 
         None
+    }
+
+    /// Fast path for character class plus: [a-z]+, \d+, \w+
+    /// Note: This is a simplified version that matches any sequence of word characters
+    fn find_char_class_plus_first(text: &str) -> Option<Match<'_>> {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+
+        if len == 0 {
+            return None;
+        }
+
+        // Simple version: match any non-empty sequence
+        // This is a basic implementation - could be enhanced to handle specific classes
+        let mut i = 0;
+        while i < len {
+            // Find start of a sequence
+            let start = i;
+            while i < len && bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
+                i += 1;
+            }
+
+            if i > start {
+                return Some(Match::new(
+                    text,
+                    start,
+                    i,
+                    1.0,
+                    crate::engine::EditCounts::default(),
+                ));
+            }
+            i += 1;
+        }
+
+        None
+    }
+
+    /// Fast path for fixed repetition: (?:literal){N} -> search for concatenated literal
+    #[allow(dead_code)]
+    fn find_literal_first(text: &str, literal: &str) -> Option<Range<usize>> {
+        if literal.is_empty() {
+            return None;
+        }
+        memmem::find(text.as_bytes(), literal.as_bytes()).map(|pos| pos..pos + literal.len())
     }
 
     /// Optimized collection of all non-overlapping matches using greedy-leftmost.

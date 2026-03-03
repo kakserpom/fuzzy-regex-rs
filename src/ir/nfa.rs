@@ -415,6 +415,138 @@ impl Nfa {
         }
     }
 
+    /// Check if this NFA is a fixed repetition of exact literal: (?:literal){N}
+    /// Returns `Some(concatenated_literal)` if detected, None otherwise.
+    /// Only optimized for simple bounded literal repetitions: (?:literal){N}
+    /// Returns `Some(concatenated_literal)` if detected, None otherwise.
+    /// E.g., (?:abc){3} -> "abcabcabc"
+    #[must_use]
+    pub fn as_fixed_repetition(&self) -> Option<String> {
+        // Only handle very simple NFAs (exact bounded repetitions)
+        let state_count = self.states.len();
+        if !(3..=20).contains(&state_count) {
+            return None;
+        }
+
+        // Use iterative DFS with explicit stack
+        let mut stack: Vec<(StateId, String, usize)> = vec![(self.start, String::new(), 0)];
+        let mut visited = vec![false; state_count];
+        let max_count = 5; // Only handle small counts
+
+        while let Some((state_id, literal, count)) = stack.pop() {
+            if state_id >= state_count {
+                continue;
+            }
+
+            // Limit iterations
+            if stack.len() > 100 {
+                return None;
+            }
+
+            let visited_idx = state_count.min(state_id * (max_count + 1) + count);
+            if visited_idx >= visited.len() || visited[visited_idx] {
+                continue;
+            }
+            visited[visited_idx] = true;
+
+            match &self.states[state_id] {
+                State::Accept => {
+                    if count > 0 && !literal.is_empty() {
+                        return Some(literal.repeat(count));
+                    }
+                }
+                State::Epsilon { targets } => {
+                    for &target in targets {
+                        stack.push((target, literal.clone(), count));
+                    }
+                }
+                State::Char { class, next } => {
+                    // Only handle single character literals (not ranges)
+                    if let Some(ch) = class.to_first_char() {
+                        let mut new_literal = literal.clone();
+                        new_literal.push(ch);
+                        stack.push((*next, new_literal, count));
+                    } else {
+                        return None; // Not a simple literal
+                    }
+                }
+                State::Split { branches, greedy } => {
+                    if *greedy && branches.len() == 2 && count < max_count {
+                        // Branch 0: continue repetition, Branch 1: exit
+                        // Push exit first (lower priority), then continue
+                        stack.push((branches[1], literal.clone(), 0));
+                        stack.push((branches[0], literal.clone(), count + 1));
+                    } else {
+                        return None; // Not a simple repetition
+                    }
+                }
+                _ => return None, // Complex state
+            }
+        }
+
+        None
+    }
+
+    /// Check if this NFA is a character class plus: [charset]+
+    /// Returns Some(()) if detected for fast path.
+    /// Returns false for complex NFAs to avoid stack overflow.
+    #[must_use]
+    pub fn is_char_class_plus(&self) -> bool {
+        // Skip for complex NFAs to avoid stack overflow
+        if self.states.len() > 50 {
+            return false;
+        }
+
+        let mut visited = vec![false; self.states.len()];
+        self.check_char_class_plus(self.start, &mut visited, false, 0)
+    }
+
+    fn check_char_class_plus(
+        &self,
+        state_id: StateId,
+        visited: &mut [bool],
+        seen_class: bool,
+        depth: usize,
+    ) -> bool {
+        const MAX_DEPTH: usize = 50;
+        if depth > MAX_DEPTH {
+            return false;
+        }
+
+        if state_id >= self.states.len() {
+            return false;
+        }
+
+        if visited[state_id] {
+            return false;
+        }
+        visited[state_id] = true;
+
+        if state_id == 0 {
+            return seen_class;
+        }
+
+        match &self.states[state_id] {
+            State::Accept => seen_class,
+            State::Epsilon { targets } => targets
+                .iter()
+                .any(|&t| self.check_char_class_plus(t, visited, seen_class, depth + 1)),
+            State::Char { class: _, next } => {
+                self.check_char_class_plus(*next, visited, true, depth + 1)
+            }
+            State::Split { branches, greedy } => {
+                if *greedy && branches.len() >= 2 {
+                    branches
+                        .iter()
+                        .any(|&b| self.check_char_class_plus(b, visited, seen_class, depth + 1))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Check if this NFA contains any recursive patterns.
     /// Used to determine whether to use backtracking engine.
     #[must_use]

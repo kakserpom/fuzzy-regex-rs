@@ -318,6 +318,30 @@ impl HirClass {
 
         if self.negated { !in_class } else { in_class }
     }
+
+    /// Get the first character from this class if it's a single character.
+    /// Returns None if class is complex (ranges, negated, or named classes).
+    #[must_use]
+    pub fn to_first_char(&self) -> Option<char> {
+        if self.negated {
+            return None;
+        }
+        if !self.named.is_empty() {
+            return None;
+        }
+        if self.ranges.len() > 1 {
+            return None;
+        }
+        if self.ranges.len() == 1 {
+            let (start, end) = self.ranges[0];
+            if start == end {
+                return Some(start);
+            }
+            return None;
+        }
+        // Single character or empty
+        self.chars.first().copied()
+    }
 }
 
 impl From<&CharClass> for HirClass {
