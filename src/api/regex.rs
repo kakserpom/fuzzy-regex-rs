@@ -440,7 +440,9 @@ impl FuzzyRegex {
 
         // Ultra-fast path for simple exact alternation: (?:a|b|c)
         // Use multiple memchr searches - faster than going through all the checks
-        if self.literals.len() >= 2
+        // Only for alternation (not wildcard) - check is_simple_alternation
+        if self.nfa.is_simple_alternation()
+            && self.literals.len() >= 2
             && self.literals.len() <= 5
             && self.nfa.states.len() <= 30
             && !self.config.case_insensitive
