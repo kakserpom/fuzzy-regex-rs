@@ -48,6 +48,23 @@ fn main() {
 }
 ```
 
+### 4. Use Greedy Suffix Patterns
+
+```rust
+fn main() {
+    // Good: .*SUFFIX is optimized with reverse search
+    let _ = fuzzy_regex::FuzzyRegex::new(".*test").unwrap();
+    let _ = fuzzy_regex::FuzzyRegex::new(".*test~1").unwrap();
+    
+    // Also works with anchors
+    let _ = fuzzy_regex::FuzzyRegex::new("^.*test$").unwrap();
+    
+    println!("Done");
+}
+```
+
+Patterns like `.*test` automatically use reverse search to find the suffix first, then match everything before it. This is O(n) instead of O(n²).
+
 ## Builder Options
 
 ### 1. Set Similarity Threshold

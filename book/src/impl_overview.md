@@ -8,13 +8,22 @@ How fuzzy-regex works internally.
 ┌─────────────────────────────────────────────┐
 │              FuzzyRegex                      │
 │         (Public API Layer)                   │
+│                                              │
+│  ┌────────────────────────────────────────┐  │
+│  │        Fast Path Optimizations         │  │
+│  │  • Pure greedy .* → instant match     │  │
+│  │  • .*SUFFIX → reverse search          │  │
+│  │  • Word boundaries → direct search    │  │
+│  └────────────────────────────────────────┘  │
 └──────────────────┬──────────────────────────┘
-                   │
-        ┌──────────┴──────────┐
-        ▼                     ▼
+                  │
+         ┌────────┴──────────┐
+         ▼                     ▼
 ┌───────────────┐   ┌─────────────────┐
 │     DFA       │   │   NFA Engine   │
 │  (Fast Path)  │   │  (Full Engine) │
+│ + Capturing   │   │                │
+│    Groups     │   │                │
 └───────┬───────┘   └────────┬────────┘
         │                    │
         └────────┬───────────┘
@@ -23,8 +32,8 @@ How fuzzy-regex works internally.
         │  Fuzzy Bridge  │
         └────────┬────────┘
                  │
-     ┌───────────┴───────────┐
-     ▼                       ▼
+      ┌───────────┴───────────┐
+      ▼                       ▼
 ┌──────────┐         ┌──────────┐
 │  Bitap   │         │   D-L    │
 │ Matcher  │         │   NFA    │
@@ -43,11 +52,21 @@ How fuzzy-regex works internally.
 - Optimizes patterns
 - Handles fuzzy matching compilation
 
-### 3. Matching Engines
+### 3. Fast Path Optimizations
+
+Before going to the main engines, FuzzyRegex checks for special patterns:
+
+- **Pure greedy dot-star**: `.*`, `^.*$`, `.*$` return instantly
+- **Greedy prefix with suffix**: `.*test` uses reverse search (O(n) vs O(n²))
+- **Word boundaries**: Direct literal search with boundary checks
+- **DFA compatibility**: Patterns with capturing groups now use DFA
+
+### 4. Matching Engines
 
 #### DFA (Deterministic Finite Automaton)
 - Fast path for exact/non-fuzzy patterns
 - No backtracking
+- Supports capturing groups
 - Limited feature support
 
 #### NFA (Non-deterministic Finite Automaton)
@@ -65,7 +84,7 @@ How fuzzy-regex works internally.
 - Supports all edit types
 - Used for longer patterns
 
-### 4. Fuzzy Bridge
+### 5. Fuzzy Bridge
 - Connects NFA to fuzzy matchers
 - Extracts literals for pre-filtering
 - Coordinates multiple matchers
