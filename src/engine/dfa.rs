@@ -389,23 +389,12 @@ impl Dfa {
                         for named in &class.named {
                             match named {
                                 crate::parser::NamedClass::Digit => {
-                                    // Add '0'-'9'
+                                    // Add '0'-'9' (ASCII only for prefilter efficiency)
                                     for b in b'0'..=b'9' {
                                         if !first_bytes.contains(&b) {
                                             first_bytes.push(b);
                                         }
                                     }
-                                    // Add common Unicode digit first bytes
-                                    Self::add_utf8_leading_bytes(
-                                        '\u{0660}',
-                                        '\u{0669}',
-                                        &mut first_bytes,
-                                    );
-                                    Self::add_utf8_leading_bytes(
-                                        '\u{0966}',
-                                        '\u{096F}',
-                                        &mut first_bytes,
-                                    );
                                 }
                                 crate::parser::NamedClass::Word => {
                                     // Add 'a'-'z', 'A'-'Z', '0'-'9', '_'
