@@ -24,6 +24,7 @@ use super::builder::{FuzzyRegexBuilder, HandlerMap, RegexConfig};
 type SmartStr = String;
 use super::match_result::{CaptureMatches, Captures, Match, Matches, Replacer, Split};
 use crate::compiler::build_nfa;
+use crate::engine::backtrack::{BacktrackConfig, BacktrackMatcher};
 use crate::engine::hash::FxHashMap;
 use crate::engine::{Dfa, FuzzyBridge, MatchResult, Matcher, MatcherConfig, Prefilter};
 use crate::error::Result;
@@ -397,6 +398,11 @@ impl FuzzyRegex {
     /// In ENHANCEMATCH mode, improves the fit of the found match.
     #[inline]
     pub fn find<'t>(&self, text: &'t str) -> Option<Match<'t>> {
+        // Use backtracking engine for recursive patterns
+        if self.nfa.has_recursion() {
+            return self.find_with_backtrack(text);
+        }
+
         // BESTMATCH, ENHANCEMATCH, or POSIX mode: use matcher.find() which has special logic
         if self.config.match_flags.best_match
             || self.config.match_flags.enhance_match
@@ -2007,6 +2013,24 @@ impl FuzzyRegex {
             self.prefilter.clone(),
             &self.handlers,
         )
+    }
+
+    /// Find using backtracking engine (for recursive patterns).
+    fn find_with_backtrack<'t>(&self, text: &'t str) -> Option<Match<'t>> {
+        let config = BacktrackConfig {
+            prefer_shortest: self.has_lazy,
+            threshold: self.config.similarity_threshold,
+            unanchored: self.is_unanchored(),
+        };
+
+        let matcher = BacktrackMatcher::new(
+            &self.nfa,
+            self.fuzzy_bridge.as_ref(),
+            self.capture_count,
+            config,
+        );
+
+        matcher.find(text).map(|m| self.convert_match(text, m))
     }
 
     /// Convert internal match result to public Match type.
