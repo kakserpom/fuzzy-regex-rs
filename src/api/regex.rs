@@ -438,48 +438,8 @@ impl FuzzyRegex {
             }
         }
 
-        // Ultra-fast path for simple exact alternation: (?:a|b|c)
-        // Use multiple memchr searches - faster than going through all the checks
-        // Only for alternation (not wildcard) - check is_simple_alternation
-        if self.nfa.is_simple_alternation()
-            && self.literals.len() >= 2
-            && self.literals.len() <= 5
-            && self.nfa.states.len() <= 30
-            && !self.config.case_insensitive
-            && self.word_lists.is_empty()
-            && self.capture_count == 0
-            && !self.anchored
-            && !self.ends_with_end_anchor
-        {
-            let all_exact = self.literals.iter().all(|lit| {
-                lit.limits.is_none() && lit.min_edits.is_none() && lit.edit_chars.is_none()
-            });
-
-            if all_exact {
-                // Find earliest match among all alternatives
-                let mut best_start = usize::MAX;
-                let mut best_end = 0;
-                for lit in &self.literals {
-                    if let Some(pos) = memmem::find(text.as_bytes(), lit.text.as_bytes())
-                        && (pos < best_start
-                            || (pos == best_start && pos + lit.text.len() > best_end))
-                    {
-                        best_start = pos;
-                        best_end = pos + lit.text.len();
-                    }
-                }
-                if best_start != usize::MAX {
-                    return Some(Match::new(
-                        text,
-                        best_start,
-                        best_end,
-                        1.0,
-                        crate::engine::EditCounts::default(),
-                    ));
-                }
-                return None;
-            }
-        }
+        // Note: Alternation fast path disabled - alternations need first-branch-wins semantics
+        // which is complex to implement correctly with memchr
 
         // BESTMATCH, ENHANCEMATCH, or POSIX mode: use matcher.find() which has special logic
         if self.config.match_flags.best_match
