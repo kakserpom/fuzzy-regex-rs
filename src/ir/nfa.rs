@@ -442,9 +442,9 @@ impl Nfa {
     /// E.g., (?:abc){3} -> "abcabcabc"
     #[must_use]
     pub fn as_fixed_repetition(&self) -> Option<String> {
-        // Only handle very simple NFAs (exact bounded repetitions)
+        // Only handle simple NFAs (exact bounded repetitions)
         let state_count = self.states.len();
-        if !(3..=20).contains(&state_count) {
+        if !(3..=50).contains(&state_count) {
             return None;
         }
 

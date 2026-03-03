@@ -621,7 +621,9 @@ impl FuzzyRegex {
         }
 
         // Fast path for fixed repetition: (?:literal){N} -> use concatenated literal search
+        // Only for small concatenations to avoid huge strings
         if let Some(literal) = self.nfa.as_fixed_repetition()
+            && literal.len() <= 50 // Don't create huge strings
             && let Some(m) = Self::find_literal_first(text, &literal)
         {
             return Some(self.make_match(
