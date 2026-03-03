@@ -194,25 +194,22 @@ impl FuzzyRegex {
         // and without lookahead/lookbehind (DFA can't handle them)
         // Note: Word boundaries - we skip DFA since it can't handle them (need manual verification)
         // Note: Alternations are allowed - DFA gives longest match which is OK for non-fuzzy literals
-        // (captures need NFA to track positions, lazy needs NFA for prefer_shortest)
+        // Note: Captures are allowed - DFA finds match positions, captures extracted from NFA if needed
+        // (lazy needs NFA for prefer_shortest)
         let has_reset_match_start = nfa.has_reset_match_start();
         let has_lookahead = nfa.has_lookahead();
-        let dfa = if capture_count == 0
-            && !has_lazy
-            && !has_reset_match_start
-            && !has_lookahead
-            && !nfa.has_word_boundary()
-        {
-            Dfa::from_nfa(
-                &nfa,
-                fuzzy_bridge.as_ref(),
-                config.case_insensitive,
-                config.multi_line,
-            )
-            .map(RefCell::new)
-        } else {
-            None
-        };
+        let dfa =
+            if !has_lazy && !has_reset_match_start && !has_lookahead && !nfa.has_word_boundary() {
+                Dfa::from_nfa(
+                    &nfa,
+                    fuzzy_bridge.as_ref(),
+                    config.case_insensitive,
+                    config.multi_line,
+                )
+                .map(RefCell::new)
+            } else {
+                None
+            };
 
         Ok(FuzzyRegex {
             pattern,
