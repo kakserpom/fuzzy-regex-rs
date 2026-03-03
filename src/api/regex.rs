@@ -14,11 +14,15 @@
 // Note: dead_code is a valid lint but clippy::dead_code isn't a separate allow
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::fmt::Write;
 use std::ops::Range;
 use std::sync::Arc;
 
 use memchr::memmem;
+
+#[allow(unused_imports)]
+use aho_corasick::AhoCorasick;
 
 use super::builder::{FuzzyRegexBuilder, HandlerMap, RegexConfig};
 
@@ -33,7 +37,6 @@ use crate::ir::nfa::State;
 use crate::ir::{Hir, LiteralPattern, Nfa, lower_with_unicode};
 use crate::parser::ast::NamedClass;
 use crate::parser::{Anchor, Ast, parse_with_flags};
-use std::cell::RefCell;
 
 /// A compiled fuzzy regular expression.
 ///
@@ -438,8 +441,8 @@ impl FuzzyRegex {
             }
         }
 
-        // Note: Alternation fast path disabled - alternations need first-branch-wins semantics
-        // which is complex to implement correctly with memchr
+        // Note: Alternation fast path - aho-corasick is added as dependency but not yet used
+        // The complexity of first-branch-wins semantics needs careful implementation
 
         // BESTMATCH, ENHANCEMATCH, or POSIX mode: use matcher.find() which has special logic
         if self.config.match_flags.best_match

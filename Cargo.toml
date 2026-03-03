@@ -22,6 +22,7 @@ unicode-segmentation = "1.12"
 thiserror = "2.0"
 memchr = "2.8"
 mimalloc = { version = "0.1", default-features = false, optional = true }
+aho-corasick = "1.1"
 
 [dev-dependencies]
 criterion = "0.8.2"
