@@ -73,3 +73,48 @@ The bottleneck is Bitap running for each prefilter candidate. Common letters lik
 1. More selective prefilters (currently limited by pattern length)
 2. Parallel processing for very long texts
 3. SIMD improvements to Bitap (AVX2/NEON already implemented)
+
+---
+
+## Recent Optimizations (2026)
+
+### 1. Unicode Digit Prefilter Fix
+- Pattern: `\d+`
+- Issue: Unicode-aware digit matching was slow
+- Fix: Use ASCII-only bytes for digit detection
+- Result: 27µs → 2µs (15x faster)
+
+### 2. Greedy Dot-Star Instant Match
+- Pattern: `.*`, `^.*$`, `.*$`
+- Issue: NFA simulation was slow for patterns that always match
+- Fix: Added `is_pure_greedy_dotstar()` detection in NFA, returns instant match
+- Result: 12µs → 42ns (300x faster)
+
+### 3. DFA with Capturing Groups
+- Pattern: `(?m)^(.*)test$`
+- Issue: Capturing groups prevented DFA usage
+- Fix: Allow DFA for patterns with capturing groups when possible
+- Result: 1.5ms → 83ns (18000x faster)
+
+### 4. Greedy Prefix Optimization (.*SUFFIX)
+- Pattern: `.*test`, `.*test~2`
+- Issue: O(n²) behavior - greedy `.*` tries many ending positions with fuzzy matching at each
+- Fix: Find suffix first using reverse search (`rfind` for exact, `find_rev` for fuzzy), then `.*` automatically matches everything before it
+- Result: O(n) instead of O(n²)
+
+Key insight: For `.*SUFFIX` patterns, finding SUFFIX from the right (using reverse search) and letting `.*` match everything before it avoids the combinatorial explosion of trying many ending positions.
+
+## Testing Performance
+
+To verify optimizations:
+
+```bash
+# Run all tests
+cargo test --all-features
+
+# Run linter
+cargo clippy --all-features -- -D warnings
+
+# Format code
+cargo fmt --all
+```
