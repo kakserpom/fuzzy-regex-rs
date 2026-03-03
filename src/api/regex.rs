@@ -194,16 +194,11 @@ impl FuzzyRegex {
         // and without lookahead/lookbehind (DFA can't handle them)
         // and without lookahead/lookbehind (DFA can't handle them)
         // Note: Word boundaries are allowed - we'll check them after finding matches
+        // Note: Alternations are allowed - DFA gives longest match which is OK for non-fuzzy literals
         // (captures need NFA to track positions, lazy needs NFA for prefer_shortest)
         let has_reset_match_start = nfa.has_reset_match_start();
-        let has_alternation = nfa.is_simple_alternation();
         let has_lookahead = nfa.has_lookahead();
-        let dfa = if capture_count == 0
-            && !has_lazy
-            && !has_reset_match_start
-            && !has_alternation
-            && !has_lookahead
-        {
+        let dfa = if capture_count == 0 && !has_lazy && !has_reset_match_start && !has_lookahead {
             Dfa::from_nfa(
                 &nfa,
                 fuzzy_bridge.as_ref(),
