@@ -468,27 +468,26 @@ impl FuzzyRegex {
                         .map(|lit| lit.text.as_str())
                         .collect::<Vec<_>>();
 
-                    if patterns.len() >= 2 {
-                        if let Ok(ac) = AhoCorasick::builder()
+                    if patterns.len() >= 2
+                        && let Ok(ac) = AhoCorasick::builder()
                             .match_kind(aho_corasick::MatchKind::LeftmostFirst)
                             .build(&patterns)
-                        {
-                            if let Some(m) = ac.find(text) {
-                                let pattern_idx = m.pattern().as_usize();
-                                if pattern_idx < self.literals.len() {
-                                    let lit = &self.literals[pattern_idx];
-                                    let end = m.start() + lit.text.len();
-                                    return Some(Match::new(
-                                        text,
-                                        m.start(),
-                                        end,
-                                        1.0,
-                                        crate::engine::EditCounts::default(),
-                                    ));
-                                }
+                    {
+                        if let Some(m) = ac.find(text) {
+                            let pattern_idx = m.pattern().as_usize();
+                            if pattern_idx < self.literals.len() {
+                                let lit = &self.literals[pattern_idx];
+                                let end = m.start() + lit.text.len();
+                                return Some(Match::new(
+                                    text,
+                                    m.start(),
+                                    end,
+                                    1.0,
+                                    crate::engine::EditCounts::default(),
+                                ));
                             }
-                            return None;
                         }
+                        return None;
                     }
                 }
             }
