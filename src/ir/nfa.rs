@@ -308,6 +308,18 @@ impl Nfa {
         })
     }
 
+    /// Check if this NFA contains non-word boundary anchors (\B).
+    #[must_use]
+    pub fn has_not_word_boundary(&self) -> bool {
+        self.states.iter().any(|state| {
+            if let State::Anchor { kind, .. } = state {
+                matches!(kind, Anchor::NotWordBoundary)
+            } else {
+                false
+            }
+        })
+    }
+
     /// Check if this NFA contains word boundary anchors (not non-word boundaries).
     /// Used to determine if we can use the literal word boundary fast path.
     #[must_use]

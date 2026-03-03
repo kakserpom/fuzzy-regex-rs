@@ -581,13 +581,14 @@ impl Dfa {
                 | State::CaptureStart { .. }
                 | State::CaptureEnd { .. } => {}
 
-                // Only Start and End anchors are supported by DFA
-                // Word boundaries require NFA matching
+                // Word boundaries are allowed - we'll check them after finding matches
                 State::Anchor { kind, .. } => {
                     use crate::parser::ast::Anchor;
                     match kind {
-                        Anchor::Start | Anchor::End => {}
-                        Anchor::WordBoundary | Anchor::NotWordBoundary => return false,
+                        Anchor::Start
+                        | Anchor::End
+                        | Anchor::WordBoundary
+                        | Anchor::NotWordBoundary => {}
                     }
                 }
 
