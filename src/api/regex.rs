@@ -14,6 +14,7 @@
 // Note: dead_code is a valid lint but clippy::dead_code isn't a separate allow
 
 use std::borrow::Cow;
+use std::fmt::Write;
 use std::sync::Arc;
 
 use memchr::memmem;
@@ -427,6 +428,80 @@ impl FuzzyRegex {
                 1.0,
                 crate::engine::EditCounts::default(),
             ));
+        }
+
+        // Fast path for greedy prefix patterns: .*SUFFIX
+        // For greedy .*, the match is simply: find the suffix, then .* matches everything before it
+        // This works for both literal and fuzzy suffixes
+        // This avoids O(n²) behavior where greedy .* tries many ending positions with fuzzy matching
+        if self.nfa.is_greedy_prefix_with_suffix() {
+            // For non-fuzzy literals: use rfind for O(n) reverse search
+            if !self.literals.is_empty()
+                && let Some(literal) = self.literals.first()
+                && literal.limits.is_none()
+                && literal.min_edits.is_none()
+            {
+                // Exact literal - use rfind for fast last-match (O(n))
+                let pattern_text = if self.config.case_insensitive {
+                    literal.text.to_lowercase()
+                } else {
+                    literal.text.clone()
+                };
+
+                let search_text = if self.config.case_insensitive {
+                    text.to_lowercase()
+                } else {
+                    text.to_string()
+                };
+
+                if let Some(pos) = search_text.rfind(&pattern_text) {
+                    return Some(Match::new(
+                        text,
+                        0,
+                        pos + pattern_text.len(),
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
+                }
+                return None;
+            }
+
+            // For fuzzy literals: use find_rev to find rightmost match
+            // We need to compile just the suffix pattern and search in reverse
+            if !self.literals.is_empty()
+                && let Some(literal) = self.literals.first()
+            {
+                // Build a pattern for just the suffix with its fuzzy limits
+                let mut suffix_pattern = literal.text.clone();
+                if let Some(limits) = &literal.limits
+                    && let Some(edits) = limits.get_edits()
+                {
+                    suffix_pattern.push('~');
+                    suffix_pattern.push_str(&edits.to_string());
+                }
+                if let Some(min_edits) = literal.min_edits {
+                    write!(suffix_pattern, "{{{{{min_edits}}}}}").ok();
+                }
+
+                // Compile the suffix pattern with same config
+                if let Ok(suffix_re) = FuzzyRegexBuilder::new(&suffix_pattern)
+                    .case_insensitive(self.config.case_insensitive)
+                    .build()
+                {
+                    // Use find_rev to find the rightmost match of suffix
+                    if let Some(m) = suffix_re.find_rev(text) {
+                        // Greedy .* matches everything before the suffix
+                        return Some(Match::new(
+                            text,
+                            0,
+                            m.end(),
+                            m.similarity(),
+                            m.edits().clone(),
+                        ));
+                    }
+                    return None;
+                }
+            }
         }
 
         // Fast path for non-fuzzy word-bounded literals: use exact literal search + boundary check

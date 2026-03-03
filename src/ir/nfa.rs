@@ -550,6 +550,168 @@ impl Nfa {
         }
     }
 
+    /// Check if this NFA is a greedy prefix pattern: `.*SUFFIX`
+    ///
+    /// Returns true if the pattern is:
+    /// - Optional start anchor (^)
+    /// - Greedy .* (any character zero or more times)
+    /// - Suffix pattern (literal or fuzzy literal)
+    ///
+    /// This enables an optimization where we can find the suffix first (using reverse search),
+    /// then .* automatically matches everything before it. This avoids O(n²) behavior
+    /// where greedy .* tries many ending positions with fuzzy matching at each.
+    #[must_use]
+    pub fn is_greedy_prefix_with_suffix(&self) -> bool {
+        // Quick check: must have at least one Split state (for the *)
+        let has_split = self
+            .states
+            .iter()
+            .any(|s| matches!(s, State::Split { greedy: true, .. }));
+        if !has_split {
+            return false;
+        }
+
+        // Check that the pattern starts with .* followed by suffix (not alternation)
+        // Pattern must be: ^? . (any char) * (greedy) SUFFIX
+        self.check_greedy_dotstar_prefix(self.start)
+    }
+
+    /// Check if pattern starts with greedy .* followed by suffix
+    fn check_greedy_dotstar_prefix(&self, state_id: StateId) -> bool {
+        if state_id >= self.states.len() {
+            return false;
+        }
+
+        if state_id == 0 {
+            return false; // Reached Accept without finding suffix
+        }
+
+        match &self.states[state_id] {
+            State::Epsilon { targets } => {
+                // Follow epsilon transitions to find the real start of pattern
+                targets
+                    .iter()
+                    .any(|&target| self.check_greedy_dotstar_prefix(target))
+            }
+            State::Anchor {
+                kind: crate::parser::Anchor::Start,
+                next,
+            } => self.check_greedy_dotstar_prefix(*next),
+            State::Char { class, next } => {
+                // Check if this is `.` (any character)
+                if class.named.iter().any(|n| {
+                    matches!(
+                        n,
+                        crate::parser::NamedClass::Any
+                            | crate::parser::NamedClass::AnyExceptNewline
+                    )
+                }) && !class.negated
+                {
+                    // Found `.` - now check for * (Split) after it
+                    self.check_greedy_star_after_dot(*next)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Check for greedy * after the dot
+    fn check_greedy_star_after_dot(&self, state_id: StateId) -> bool {
+        if state_id >= self.states.len() {
+            return false;
+        }
+
+        if state_id == 0 {
+            return false; // Reached Accept without finding suffix
+        }
+
+        match &self.states[state_id] {
+            State::Epsilon { targets } => targets
+                .iter()
+                .any(|&target| self.check_greedy_star_after_dot(target)),
+            State::Split { branches, greedy } if *greedy && branches.len() >= 2 => {
+                // Found greedy * - now check that one branch leads to suffix (not just Accept)
+                // branches[0] = loop back to continue consuming
+                // branches[1] = skip * and go to suffix
+                self.check_suffix_after_star(branches[1])
+            }
+            _ => false,
+        }
+    }
+
+    /// Check that after the * we have a suffix pattern that leads to Accept
+    fn check_suffix_after_star(&self, state_id: StateId) -> bool {
+        if state_id >= self.states.len() {
+            return false;
+        }
+
+        if state_id == 0 {
+            return true; // Empty match after * is valid (.* can match empty)
+        }
+
+        match &self.states[state_id] {
+            State::Accept => true, // Reached Accept - suffix was empty
+            State::Epsilon { targets } => {
+                for &target in targets {
+                    if self.check_suffix_after_star(target) {
+                        return true;
+                    }
+                }
+                false
+            }
+            // FuzzyLiteral is a valid suffix
+            State::FuzzyLiteral { next, .. } => {
+                // After FuzzyLiteral, must reach Accept
+                self.check_reaches_accept(*next)
+            }
+            // Char (non-dot) is also a valid suffix (exact literal chars)
+            State::Char { next, .. } => self.check_reaches_accept(*next),
+            _ => false,
+        }
+    }
+
+    /// Check if we can reach Accept from this state
+    fn check_reaches_accept(&self, state_id: StateId) -> bool {
+        if state_id >= self.states.len() {
+            return false;
+        }
+
+        if state_id == 0 {
+            return true; // Reached Accept
+        }
+
+        match &self.states[state_id] {
+            State::Accept => true,
+            State::Epsilon { targets } => {
+                for &target in targets {
+                    if self.check_reaches_accept(target) {
+                        return true;
+                    }
+                }
+                false
+            }
+            State::Char { next, .. } | State::FuzzyLiteral { next, .. } => {
+                self.check_reaches_accept(*next)
+            }
+            State::Split { branches, greedy } => {
+                // For greedy split, all branches must reach Accept for valid suffix
+                if *greedy {
+                    for &branch in branches {
+                        if !self.check_reaches_accept(branch) {
+                            return false;
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Extract the first character class that must match for this NFA.
     ///
     /// This is used for quick rejection - if the first character doesn't match,
