@@ -404,6 +404,40 @@ impl FuzzyRegex {
             return self.find_with_backtrack(text);
         }
 
+        // Ultra-fast path for simple exact literals: use memchr directly
+        // This is worth ~800ns savings for simple patterns
+        // Only enable for: single literal, small NFA, no special config
+        if self.literals.len() == 1
+            && self.nfa.states.len() <= 15
+            && !self.config.case_insensitive
+            && self.word_lists.is_empty()
+            && self.capture_count == 0
+        {
+            let literal = &self.literals[0];
+            if literal.limits.is_none()
+                && literal.min_edits.is_none()
+                && literal.edit_chars.is_none()
+                && !self.anchored
+                && !self.ends_with_end_anchor
+                && !self.nfa.has_word_boundary()
+                && !self.nfa.has_lookahead()
+                && !self.nfa.has_lookbehind()
+                // Only for simple literal patterns, not character classes
+                && !self.nfa.has_char_classes()
+            {
+                if let Some(pos) = memmem::find(text.as_bytes(), literal.text.as_bytes()) {
+                    return Some(Match::new(
+                        text,
+                        pos,
+                        pos + literal.text.len(),
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
+                }
+                return None;
+            }
+        }
+
         // BESTMATCH, ENHANCEMATCH, or POSIX mode: use matcher.find() which has special logic
         if self.config.match_flags.best_match
             || self.config.match_flags.enhance_match
@@ -588,15 +622,16 @@ impl FuzzyRegex {
 
         // Fast path for fixed repetition: (?:literal){N} -> use concatenated literal search
         if let Some(literal) = self.nfa.as_fixed_repetition()
-            && let Some(m) = Self::find_literal_first(text, &literal) {
-                return Some(self.make_match(
-                    text,
-                    m.start,
-                    m.end,
-                    1.0,
-                    crate::engine::EditCounts::default(),
-                ));
-            }
+            && let Some(m) = Self::find_literal_first(text, &literal)
+        {
+            return Some(self.make_match(
+                text,
+                m.start,
+                m.end,
+                1.0,
+                crate::engine::EditCounts::default(),
+            ));
+        }
 
         // DFA fast path: use DFA for exact/non-fuzzy patterns
         // Skip if word_lists is populated (use word list matching instead)

@@ -296,12 +296,32 @@ impl Nfa {
             .any(|state| matches!(state, State::Lookahead { .. }))
     }
 
+    /// Check if this NFA contains lookbehind assertions.
+    #[must_use]
+    pub fn has_lookbehind(&self) -> bool {
+        self.states
+            .iter()
+            .any(|state| matches!(state, State::Lookbehind { .. }))
+    }
+
     /// Check if this NFA contains word boundary anchors.
     #[must_use]
     pub fn has_word_boundary(&self) -> bool {
         self.states.iter().any(|state| {
             if let State::Anchor { kind, .. } = state {
                 matches!(kind, Anchor::WordBoundary | Anchor::NotWordBoundary)
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Check if this NFA contains character classes (like \d, \w, [a-z]).
+    #[must_use]
+    pub fn has_char_classes(&self) -> bool {
+        self.states.iter().any(|state| {
+            if let State::Char { class, .. } = state {
+                !class.ranges.is_empty() || !class.named.is_empty() || !class.chars.is_empty()
             } else {
                 false
             }
