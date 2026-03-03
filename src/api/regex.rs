@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use memchr::memmem;
 
-#[allow(unused_imports)]
+#[cfg(feature = "fuzzy-aho-corasick")]
 use aho_corasick::AhoCorasick;
 
 use super::builder::{FuzzyRegexBuilder, HandlerMap, RegexConfig};
@@ -438,6 +438,59 @@ impl FuzzyRegex {
                     ));
                 }
                 return None;
+            }
+        }
+
+        // Fuzzy Aho-Corasick fast path for EXACT alternations: (?:a|b|c)
+        // Uses Aho-Corasick to find candidates quickly
+        // Note: Fuzzy alternations like (?:a|b|c)~1 are handled by the normal fuzzy bridge
+        #[cfg(feature = "fuzzy-aho-corasick")]
+        {
+            if self.nfa.is_simple_alternation()
+                && self.literals.len() >= 2
+                && self.literals.len() <= 20
+                && !self.config.case_insensitive
+                && self.word_lists.is_empty()
+                && self.capture_count == 0
+                && !self.anchored
+                && !self.ends_with_end_anchor
+            {
+                // Only use for EXACT (non-fuzzy) alternations
+                let all_exact = self.literals.iter().all(|lit| {
+                    lit.limits.is_none() && lit.min_edits.is_none() && lit.edit_chars.is_none()
+                });
+
+                if all_exact {
+                    let patterns: Vec<&str> = self
+                        .literals
+                        .iter()
+                        .filter(|lit| !lit.text.is_empty())
+                        .map(|lit| lit.text.as_str())
+                        .collect::<Vec<_>>();
+
+                    if patterns.len() >= 2 {
+                        if let Ok(ac) = AhoCorasick::builder()
+                            .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+                            .build(&patterns)
+                        {
+                            if let Some(m) = ac.find(text) {
+                                let pattern_idx = m.pattern().as_usize();
+                                if pattern_idx < self.literals.len() {
+                                    let lit = &self.literals[pattern_idx];
+                                    let end = m.start() + lit.text.len();
+                                    return Some(Match::new(
+                                        text,
+                                        m.start(),
+                                        end,
+                                        1.0,
+                                        crate::engine::EditCounts::default(),
+                                    ));
+                                }
+                            }
+                            return None;
+                        }
+                    }
+                }
             }
         }
 
