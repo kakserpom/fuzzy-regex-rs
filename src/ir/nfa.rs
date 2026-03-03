@@ -333,6 +333,88 @@ impl Nfa {
         })
     }
 
+    /// Check if this NFA is a word-bounded character class pattern like \b\w+\b.
+    /// This enables a fast path that scans for word boundaries and character class.
+    #[must_use]
+    pub fn is_word_bounded_class(&self) -> bool {
+        // Must have word boundary
+        if !self.states.iter().any(|state| {
+            if let State::Anchor { kind, .. } = state {
+                matches!(kind, Anchor::WordBoundary)
+            } else {
+                false
+            }
+        }) {
+            return false;
+        }
+
+        // Must have Split (for + quantifier)
+        let has_split = self
+            .states
+            .iter()
+            .any(|s| matches!(s, State::Split { greedy: true, .. }));
+        if !has_split {
+            return false;
+        }
+
+        // Check for word boundary -> char class -> + -> word boundary
+        let mut visited = vec![false; self.states.len()];
+        self.check_word_bounded_class(self.start, &mut visited, false, false)
+    }
+
+    fn check_word_bounded_class(
+        &self,
+        state_id: StateId,
+        visited: &mut [bool],
+        seen_start_boundary: bool,
+        seen_class: bool,
+    ) -> bool {
+        if state_id >= self.states.len() {
+            return false;
+        }
+
+        if visited[state_id] {
+            return false;
+        }
+        visited[state_id] = true;
+
+        if state_id == 0 {
+            // Reached accept - valid pattern
+            return seen_start_boundary && seen_class;
+        }
+
+        match &self.states[state_id] {
+            State::Epsilon { targets } => targets.iter().any(|&t| {
+                self.check_word_bounded_class(t, visited, seen_start_boundary, seen_class)
+            }),
+            State::Anchor {
+                kind: Anchor::WordBoundary,
+                next,
+            } => {
+                if !seen_start_boundary {
+                    self.check_word_bounded_class(*next, visited, true, seen_class)
+                } else if !seen_class {
+                    false
+                } else {
+                    self.check_word_bounded_class(*next, visited, seen_start_boundary, seen_class)
+                }
+            }
+            State::Char { class: _, next } => {
+                self.check_word_bounded_class(*next, visited, seen_start_boundary, true)
+            }
+            State::Split { branches, greedy } => {
+                if *greedy && branches.len() >= 2 {
+                    branches.iter().any(|&b| {
+                        self.check_word_bounded_class(b, visited, seen_start_boundary, seen_class)
+                    })
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Check if this NFA contains any recursive patterns.
     /// Used to determine whether to use backtracking engine.
     #[must_use]

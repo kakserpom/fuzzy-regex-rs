@@ -27,7 +27,9 @@ use crate::compiler::build_nfa;
 use crate::engine::hash::FxHashMap;
 use crate::engine::{Dfa, FuzzyBridge, MatchResult, Matcher, MatcherConfig, Prefilter};
 use crate::error::Result;
+use crate::ir::nfa::State;
 use crate::ir::{Hir, LiteralPattern, Nfa, lower_with_unicode};
+use crate::parser::ast::NamedClass;
 use crate::parser::{Anchor, Ast, parse_with_flags};
 use std::cell::RefCell;
 
@@ -504,6 +506,46 @@ impl FuzzyRegex {
             }
         }
 
+        // Fast path for prefix-suffix patterns: PREFIX.*SUFFIX
+        // Find prefix from left, suffix from right, check ordering
+        // This avoids O(n²) behavior with greedy .*
+        if self.literals.len() >= 2 && self.nfa.is_greedy_prefix_with_suffix() {
+            // Get first two literals as prefix and suffix
+            let prefix_text = &self.literals[0].text;
+            let suffix_text = &self.literals[1].text;
+
+            // Both must be exact (no fuzzy) for this optimization
+            if self.literals[0].limits.is_none()
+                && self.literals[1].limits.is_none()
+                && self.literals[0].min_edits.is_none()
+                && self.literals[1].min_edits.is_none()
+            {
+                let search_text = if self.config.case_insensitive {
+                    text.to_lowercase()
+                } else {
+                    text.to_string()
+                };
+
+                // Find prefix from left
+                if let Some(prefix_pos) = search_text.find(prefix_text) {
+                    // Find suffix from right (after prefix)
+                    let suffix_search = &search_text[prefix_pos + prefix_text.len()..];
+                    if let Some(suffix_offset) = suffix_search.rfind(suffix_text) {
+                        let suffix_pos = prefix_pos + prefix_text.len() + suffix_offset;
+                        let end_pos = suffix_pos + suffix_text.len();
+                        return Some(Match::new(
+                            text,
+                            prefix_pos,
+                            end_pos,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+                }
+                return None;
+            }
+        }
+
         // Fast path for non-fuzzy word-bounded literals: use exact literal search + boundary check
         // This handles \bword\b, \bword, word\b patterns (but NOT \Bword\B)
         // IMPORTANT: Must come before DFA path since DFA doesn't handle word boundaries efficiently
@@ -514,6 +556,27 @@ impl FuzzyRegex {
         {
             // Non-fuzzy pattern - use fast exact search
             return Self::find_word_bounded_exact(text, &literal.text);
+        }
+
+        // Fast path for word-bounded character class: \b\w+\b only
+        // Note: This only handles \w (word chars), not \d or other classes
+        if self.nfa.is_word_bounded_class() && self.literals.is_empty() {
+            // Check if it's specifically \w+ (not \d+ or other)
+            // For now, only apply to avoid breaking \b\d+\b
+            let is_word_class = self.nfa.states.iter().any(|s| {
+                if let State::Char { class, .. } = s {
+                    class
+                        .named
+                        .iter()
+                        .any(|n| matches!(n, NamedClass::Any | NamedClass::Word))
+                } else {
+                    false
+                }
+            });
+
+            if is_word_class {
+                return Self::find_word_bounded_class_first(text);
+            }
         }
 
         // DFA fast path: use DFA for exact/non-fuzzy patterns
@@ -1334,6 +1397,12 @@ impl FuzzyRegex {
         matches
     }
 
+    /// Check if a byte is a word character (ASCII alphanumeric or underscore).
+    #[inline]
+    fn is_word_char(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_'
+    }
+
     /// Check if there's a word boundary at the given position.
     fn is_word_boundary_at(text: &str, pos: usize) -> bool {
         let bytes = text.as_bytes();
@@ -1420,6 +1489,60 @@ impl FuzzyRegex {
         }
 
         matches
+    }
+
+    /// Fast path for word-bounded character class: \b\w+\b, \b\d+\b, etc.
+    /// Scans text for word-to-non-word transitions and matches character sequences.
+    fn find_word_bounded_class_first(text: &str) -> Option<Match<'_>> {
+        let text_bytes = text.as_bytes();
+        let len = text_bytes.len();
+
+        if len == 0 {
+            return None;
+        }
+
+        // Scan for word boundaries and match word characters
+        let mut i = 0;
+        while i < len {
+            // Check for word boundary at position i
+            let is_word_start = if i == 0 {
+                Self::is_word_char(text_bytes[i])
+            } else {
+                Self::is_word_char(text_bytes[i]) && !Self::is_word_char(text_bytes[i - 1])
+            };
+
+            if is_word_start {
+                // Found start of word - now find end
+                let mut j = i;
+                while j < len && Self::is_word_char(text_bytes[j]) {
+                    j += 1;
+                }
+
+                // Check for word boundary at position j (end of word)
+                let is_word_end = if j < len {
+                    !Self::is_word_char(text_bytes[j])
+                } else {
+                    // End of text is a word boundary if last char is word char
+                    j > i && Self::is_word_char(text_bytes[j - 1])
+                };
+
+                if is_word_end && j > i {
+                    return Some(Match::new(
+                        text,
+                        i,
+                        j,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
+                }
+
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+
+        None
     }
 
     /// Optimized collection of all non-overlapping matches using greedy-leftmost.
