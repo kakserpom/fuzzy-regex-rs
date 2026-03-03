@@ -192,13 +192,17 @@ impl FuzzyRegex {
         // without ResetMatchStart (\K which needs NFA to track match start reset),
         // without alternations (DFA returns longest match, but alternations need first-branch-wins)
         // and without lookahead/lookbehind (DFA can't handle them)
-        // and without lookahead/lookbehind (DFA can't handle them)
-        // Note: Word boundaries are allowed - we'll check them after finding matches
+        // Note: Word boundaries - we skip DFA since it can't handle them (need manual verification)
         // Note: Alternations are allowed - DFA gives longest match which is OK for non-fuzzy literals
         // (captures need NFA to track positions, lazy needs NFA for prefer_shortest)
         let has_reset_match_start = nfa.has_reset_match_start();
         let has_lookahead = nfa.has_lookahead();
-        let dfa = if capture_count == 0 && !has_lazy && !has_reset_match_start && !has_lookahead {
+        let dfa = if capture_count == 0
+            && !has_lazy
+            && !has_reset_match_start
+            && !has_lookahead
+            && !nfa.has_word_boundary()
+        {
             Dfa::from_nfa(
                 &nfa,
                 fuzzy_bridge.as_ref(),
@@ -411,56 +415,12 @@ impl FuzzyRegex {
 
         // DFA fast path: use DFA for exact/non-fuzzy patterns
         // Skip if word_lists is populated (use word list matching instead)
-        // For word-bounded patterns like \b\w+\b, we can still use DFA and verify boundaries
+        // Skip if pattern has word boundaries (DFA can't handle them)
         if let Some(ref dfa_cell) = self.dfa
             && self.word_lists.is_empty()
         {
             let mut dfa = dfa_cell.borrow_mut();
-            let dfa_match = dfa.find(text);
-
-            // If pattern has word boundaries, verify them
-            if dfa_match.is_some() && self.nfa.has_word_boundary() {
-                if let Some(m) = dfa_match {
-                    // Check \b (word boundary) - true if boundary exists
-                    let start_is_wb = Self::is_word_boundary_at(text, m.start);
-                    let end_is_wb = Self::is_word_boundary_at(text, m.end);
-
-                    // Check \B (non-word boundary) - true if NO boundary
-                    let start_is_not_wb = !start_is_wb;
-                    let end_is_not_wb = !end_is_wb;
-
-                    // Determine if this is a positive or negative boundary pattern
-                    let has_positive_wb = self.nfa.has_literal_word_boundary();
-                    let has_negative_wb = self.nfa.has_not_word_boundary();
-
-                    let valid = if has_positive_wb && has_negative_wb {
-                        // Mixed: check both \b at start and \B at end (or vice versa)
-                        (start_is_wb && end_is_not_wb) || (start_is_not_wb && end_is_wb)
-                    } else if has_positive_wb {
-                        // \bword\b or \bword: require word boundaries
-                        start_is_wb && end_is_wb
-                    } else if has_negative_wb {
-                        // \Bword\B: require NO word boundaries
-                        start_is_not_wb && end_is_not_wb
-                    } else {
-                        false // Shouldn't happen
-                    };
-
-                    if valid {
-                        return Some(self.make_match(
-                            text,
-                            m.start,
-                            m.end,
-                            1.0,
-                            crate::engine::EditCounts::default(),
-                        ));
-                    }
-                }
-                return None;
-            }
-
-            // No word boundaries - return DFA result directly
-            return dfa_match.map(|m| {
+            return dfa.find(text).map(|m| {
                 self.make_match(
                     text,
                     m.start,
