@@ -353,7 +353,25 @@ impl Dfa {
                             }
                         }
 
-                        // Add ranges (only ASCII)
+                        // Add single characters (ASCII and non-ASCII)
+                        for &ch in &class.chars {
+                            if ch.is_ascii() {
+                                let b = ch as u8;
+                                if !first_bytes.contains(&b) {
+                                    first_bytes.push(b);
+                                }
+                            } else {
+                                // For non-ASCII chars, add UTF-8 leading byte
+                                let mut buf = [0u8; 4];
+                                let encoded = ch.encode_utf8(&mut buf);
+                                let first_byte = encoded.as_bytes()[0];
+                                if !first_bytes.contains(&first_byte) {
+                                    first_bytes.push(first_byte);
+                                }
+                            }
+                        }
+
+                        // Add ranges (ASCII and non-ASCII)
                         for &(start, end) in &class.ranges {
                             if start.is_ascii() && end.is_ascii() {
                                 for b in (start as u8)..=(end as u8) {
@@ -361,6 +379,9 @@ impl Dfa {
                                         first_bytes.push(b);
                                     }
                                 }
+                            } else {
+                                // For non-ASCII ranges, add UTF-8 leading bytes
+                                Self::add_utf8_leading_bytes(start, end, &mut first_bytes);
                             }
                         }
 
@@ -374,6 +395,17 @@ impl Dfa {
                                             first_bytes.push(b);
                                         }
                                     }
+                                    // Add common Unicode digit first bytes
+                                    Self::add_utf8_leading_bytes(
+                                        '\u{0660}',
+                                        '\u{0669}',
+                                        &mut first_bytes,
+                                    );
+                                    Self::add_utf8_leading_bytes(
+                                        '\u{0966}',
+                                        '\u{096F}',
+                                        &mut first_bytes,
+                                    );
                                 }
                                 crate::parser::NamedClass::Word => {
                                     // Add 'a'-'z', 'A'-'Z', '0'-'9', '_'
@@ -395,16 +427,49 @@ impl Dfa {
                                     if !first_bytes.contains(&b'_') {
                                         first_bytes.push(b'_');
                                     }
+                                    // Add common Unicode word char first bytes
+                                    Self::add_utf8_leading_bytes(
+                                        '\u{00C0}',
+                                        '\u{024F}',
+                                        &mut first_bytes,
+                                    );
+                                    Self::add_utf8_leading_bytes(
+                                        '\u{0400}',
+                                        '\u{04FF}',
+                                        &mut first_bytes,
+                                    );
+                                    Self::add_utf8_leading_bytes(
+                                        '\u{0900}',
+                                        '\u{097F}',
+                                        &mut first_bytes,
+                                    );
                                 }
                                 crate::parser::NamedClass::Whitespace => {
-                                    // Add common whitespace: space, tab, newline, carriage return
-                                    for b in [b' ', b'\t', b'\n', b'\r'] {
+                                    // Add ASCII whitespace
+                                    for &b in b" \t\n\r" {
                                         if !first_bytes.contains(&b) {
                                             first_bytes.push(b);
                                         }
                                     }
+                                    // Add common Unicode whitespace first bytes
+                                    Self::add_utf8_leading_bytes(
+                                        '\u{0085}',
+                                        '\u{0085}',
+                                        &mut first_bytes,
+                                    );
+                                    Self::add_utf8_leading_bytes(
+                                        '\u{00A0}',
+                                        '\u{00A0}',
+                                        &mut first_bytes,
+                                    );
+                                    Self::add_utf8_leading_bytes(
+                                        '\u{2000}',
+                                        '\u{200A}',
+                                        &mut first_bytes,
+                                    );
                                 }
-                                _ => {} // Skip other named classes
+                                // Skip other named classes
+                                _ => {}
                             }
                         }
 
@@ -529,6 +594,28 @@ impl Dfa {
         }
     }
 
+    /// Add UTF-8 leading bytes for a Unicode range to the prefilter.
+    /// This handles 2-byte, 3-byte, and 4-byte UTF-8 encodings.
+    fn add_utf8_leading_bytes(start: char, end: char, bytes: &mut Vec<u8>) {
+        let start_u32 = start as u32;
+        let end_u32 = end as u32;
+        let step = (end_u32 - start_u32).clamp(1, 16);
+        let mut code = start_u32;
+        while code <= end_u32 {
+            let ch = char::from_u32(code).unwrap_or(start);
+            let mut buf = [0u8; 4];
+            let encoded = ch.encode_utf8(&mut buf);
+            let first_byte = encoded.as_bytes()[0];
+            if !bytes.contains(&first_byte) {
+                bytes.push(first_byte);
+            }
+            code = code.saturating_add(step);
+            if code > end_u32 && code > start_u32 + step {
+                break;
+            }
+        }
+    }
+
     /// Create a prefilter for multiple first bytes.
     fn make_multi_byte_prefilter(bytes: &[u8], case_insensitive: bool) -> DfaPrefilter {
         if bytes.is_empty() {
@@ -581,14 +668,13 @@ impl Dfa {
                 | State::CaptureStart { .. }
                 | State::CaptureEnd { .. } => {}
 
-                // Word boundaries are allowed - we'll check them after finding matches
+                // Only Start and End anchors are supported by DFA
+                // Word boundaries require NFA matching
                 State::Anchor { kind, .. } => {
                     use crate::parser::ast::Anchor;
                     match kind {
-                        Anchor::Start
-                        | Anchor::End
-                        | Anchor::WordBoundary
-                        | Anchor::NotWordBoundary => {}
+                        Anchor::Start | Anchor::End => {}
+                        Anchor::WordBoundary | Anchor::NotWordBoundary => return false,
                     }
                 }
 
