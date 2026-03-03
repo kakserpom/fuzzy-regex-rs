@@ -294,6 +294,11 @@ impl FuzzyRegex {
                 .is_some_and(|b| b.pattern_count() == 1)
     }
 
+    /// Check if this is a pure greedy dot-star pattern (e.g., `.*` or `.*$`).
+    pub fn is_pure_greedy_dotstar(&self) -> bool {
+        self.nfa.is_pure_greedy_dotstar()
+    }
+
     /// Set a named word list for \L<name> patterns.
     ///
     /// # Example
@@ -399,6 +404,32 @@ impl FuzzyRegex {
         {
             let matcher = self.create_matcher(self.is_unanchored());
             return matcher.find(text).map(|m| self.convert_match(text, m));
+        }
+
+        // Fast path for pure greedy dot-star: .*, ^.*$, .*$
+        // These patterns always match (greedy .* consumes everything)
+        // Note: This optimization doesn't work with (?m) multiline because
+        // ^ and $ match at line boundaries, so ^.*$ would match each line.
+        // However, (?s) dot_all is fine - . still matches everything.
+        if self.nfa.is_pure_greedy_dotstar() && !self.config.multi_line {
+            if text.is_empty() {
+                // For empty text, return empty match at position 0
+                return Some(Match::new(
+                    text,
+                    0,
+                    0,
+                    1.0,
+                    crate::engine::EditCounts::default(),
+                ));
+            }
+            // Return match spanning entire text
+            return Some(Match::new(
+                text,
+                0,
+                text.len(),
+                1.0,
+                crate::engine::EditCounts::default(),
+            ));
         }
 
         // Fast path for non-fuzzy word-bounded literals: use exact literal search + boundary check

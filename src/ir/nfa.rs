@@ -442,6 +442,114 @@ impl Nfa {
         }
     }
 
+    /// Check if this NFA is a pure greedy dot-star pattern (e.g., `.*` or `.*$`).
+    ///
+    /// Returns true if the pattern consists only of:
+    /// - Optional start anchor (^)
+    /// - Greedy .* (any character zero or more times)
+    /// - Optional end anchor ($)
+    ///
+    /// This enables an optimization where we can immediately return a match
+    /// without scanning the text.
+    #[must_use]
+    pub fn is_pure_greedy_dotstar(&self) -> bool {
+        // Quick check: must have at least one Split state (for the *)
+        let has_split = self.states.iter().any(|s| matches!(s, State::Split { .. }));
+        if !has_split {
+            return false;
+        }
+
+        let mut visited = vec![false; self.states.len()];
+        self.check_pure_greedy_dotstar(self.start, &mut visited, false, false)
+    }
+
+    fn check_pure_greedy_dotstar(
+        &self,
+        state_id: StateId,
+        visited: &mut [bool],
+        seen_dotstar: bool,
+        seen_end_anchor: bool,
+    ) -> bool {
+        if state_id >= self.states.len() {
+            return false;
+        }
+
+        if state_id == 0 {
+            return true; // Reached Accept - pattern matched
+        }
+
+        if visited[state_id] {
+            // Cycle detected - for greedy dotstar, this is expected
+            // If we've seen the dotstar, it's valid (looping)
+            return seen_dotstar;
+        }
+        visited[state_id] = true;
+
+        match &self.states[state_id] {
+            State::Accept => true,
+            State::Epsilon { targets } => {
+                for &target in targets {
+                    if !self.check_pure_greedy_dotstar(
+                        target,
+                        visited,
+                        seen_dotstar,
+                        seen_end_anchor,
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            }
+            State::Anchor { kind, next } => match kind {
+                crate::parser::Anchor::Start => {
+                    self.check_pure_greedy_dotstar(*next, visited, seen_dotstar, seen_end_anchor)
+                }
+                crate::parser::Anchor::End => {
+                    // End anchor - if we've seen it, we're done
+                    // If seen_dotstar is false but we reach End, that's also valid (empty .*)
+                    if seen_end_anchor {
+                        return true;
+                    }
+                    // Continue from next state to find Accept
+                    self.check_pure_greedy_dotstar(*next, visited, seen_dotstar, true)
+                }
+                _ => false,
+            },
+            State::Char { class, next } => {
+                if class.named.iter().any(|n| {
+                    matches!(
+                        n,
+                        crate::parser::NamedClass::Any
+                            | crate::parser::NamedClass::AnyExceptNewline
+                    )
+                }) && !class.negated
+                {
+                    self.check_pure_greedy_dotstar(*next, visited, true, seen_end_anchor)
+                } else {
+                    false
+                }
+            }
+            State::Split { branches, greedy } => {
+                if *greedy {
+                    for &branch in branches {
+                        if !self.check_pure_greedy_dotstar(
+                            branch,
+                            visited,
+                            seen_dotstar,
+                            seen_end_anchor,
+                        ) {
+                            return false;
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Extract the first character class that must match for this NFA.
     ///
     /// This is used for quick rejection - if the first character doesn't match,
