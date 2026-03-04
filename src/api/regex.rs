@@ -87,7 +87,6 @@ pub struct FuzzyRegex {
     is_greedy_prefix_with_suffix: bool,
     is_word_bounded_class: bool,
     is_char_class_plus: bool,
-    fixed_repetition: Option<String>,
     has_literal_word_boundary: bool,
     /// Additional cached flags for fast path checks
     is_simple_alternation: bool,
@@ -243,7 +242,6 @@ impl FuzzyRegex {
         let is_greedy_prefix_with_suffix = nfa.is_greedy_prefix_with_suffix();
         let is_word_bounded_class = nfa.is_word_bounded_class();
         let is_char_class_plus = nfa.is_char_class_plus();
-        let fixed_repetition = nfa.as_fixed_repetition();
         let has_literal_word_boundary = nfa.has_literal_word_boundary();
         let is_simple_alternation = nfa.is_simple_alternation();
         let has_recursion = nfa.has_recursion();
@@ -333,7 +331,6 @@ impl FuzzyRegex {
             is_greedy_prefix_with_suffix,
             is_word_bounded_class,
             is_char_class_plus,
-            fixed_repetition,
             has_literal_word_boundary,
             is_simple_alternation,
             has_recursion,
@@ -818,21 +815,6 @@ impl FuzzyRegex {
                 // Found word-bounded exact count pattern
                 return Self::find_word_bounded_class_exact(text, word_char_count);
             }
-        }
-
-        // Fast path for fixed repetition: (?:literal){N} -> use concatenated literal search
-        // Only for small concatenations to avoid huge strings
-        if let Some(ref literal) = self.fixed_repetition
-            && literal.len() <= 50
-            && let Some(m) = Self::find_literal_first(text, literal)
-        {
-            return Some(self.make_match(
-                text,
-                m.start,
-                m.end,
-                1.0,
-                crate::engine::EditCounts::default(),
-            ));
         }
 
         // DFA fast path: use DFA for exact/non-fuzzy patterns
