@@ -93,8 +93,12 @@ pub struct FuzzyRegex {
     has_recursion: bool,
     /// Pre-computed: can use memchr fast path for exact literal matching
     can_use_memchr_fast_path: bool,
+    /// Pre-computed: can use repetition fast path (?:literal){N} with identical literals
+    can_use_repetition_fast_path: bool,
     /// Pre-computed: cached literal for fast path (if applicable)
     fast_path_literal: Option<*const str>,
+    /// Pre-computed: cached repeated literal for repetition fast path
+    fast_path_repeated_literal: Option<String>,
     /// Named word lists for \L<name> patterns.
     /// Map from list name to vector of words.
     word_lists: FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
@@ -275,6 +279,44 @@ impl FuzzyRegex {
             None
         };
 
+        // Pre-compute repetition fast path: (?:literal){N} with identical non-fuzzy literals
+        // This is checked at runtime for simple patterns
+        let (can_use_repetition_fast_path, fast_path_repeated_literal) = if literals.len() >= 2
+            && capture_count == 0
+            && !nfa
+                .states
+                .iter()
+                .any(|s| matches!(s, State::Lookahead { .. } | State::Lookbehind { .. }))
+        {
+            if let Some(first) = literals.first() {
+                let first_text = &first.text;
+                if first_text.len() >= 2 {
+                    let all_same = literals.iter().all(|l| {
+                        l.text == *first_text
+                            && l.limits.is_none()
+                            && l.min_edits.is_none()
+                            && l.edit_chars.is_none()
+                    });
+                    if all_same {
+                        let repeated = first_text.repeat(literals.len());
+                        if repeated.len() <= 100 {
+                            (true, Some(repeated))
+                        } else {
+                            (false, None)
+                        }
+                    } else {
+                        (false, None)
+                    }
+                } else {
+                    (false, None)
+                }
+            } else {
+                (false, None)
+            }
+        } else {
+            (false, None)
+        };
+
         // Build Aho-Corasick for fast exact alternation matching
         // Only for simple alternations like (?:a|b|c) with 2-20 literal branches
         #[cfg(feature = "fuzzy-aho-corasick")]
@@ -335,7 +377,9 @@ impl FuzzyRegex {
             is_simple_alternation,
             has_recursion,
             can_use_memchr_fast_path,
+            can_use_repetition_fast_path,
             fast_path_literal,
+            fast_path_repeated_literal,
             word_lists: FxHashMap::default(),
             handlers: config.handlers,
         })
@@ -535,34 +579,22 @@ impl FuzzyRegex {
         }
 
         // Fast path for multiple identical non-fuzzy literals: (?:quick){2}, (?:abc){3}
-        // Check if all literals are identical with no fuzzy limits - use concatenated search
-        // Only for substantial literals (>= 2 chars) to avoid false positives like "-" or "."
-        if self.literals.len() >= 2 && self.capture_count == 0 && !self.has_recursion {
-            let first_text = self.literals.first().map(|l| &l.text);
-            if let Some(first_text) = first_text {
-                // Only apply to substantial literals (>= 2 chars) to avoid false positives
-                // like "-" or "." which are just separators in patterns like \d{4}-\d{2}
-                if first_text.len() >= 2
-                    && self.literals.iter().all(|l| {
-                        l.text == *first_text && l.limits.is_none() && l.min_edits.is_none()
-                    })
-                {
-                    let repeated = first_text.repeat(self.literals.len());
-                    if repeated.len() <= 100 {
-                        if let Some(pos) = memmem::find(text.as_bytes(), repeated.as_bytes()) {
-                            return Some(Match::new(
-                                text,
-                                pos,
-                                pos + repeated.len(),
-                                1.0,
-                                crate::engine::EditCounts::default(),
-                            ));
-                        }
-                        // For non-match: we can return early since this is exact matching
-                        return None;
-                    }
-                }
-            }
+        // Uses pre-computed values for maximum performance
+        if self.can_use_repetition_fast_path
+            && let Some(ref repeated) = self.fast_path_repeated_literal
+            && let Some(pos) = memmem::find(text.as_bytes(), repeated.as_bytes())
+        {
+            return Some(Match::new(
+                text,
+                pos,
+                pos + repeated.len(),
+                1.0,
+                crate::engine::EditCounts::default(),
+            ));
+        }
+        // Early return for non-match in repetition fast path
+        if self.can_use_repetition_fast_path {
+            return None;
         }
 
         // Fuzzy Aho-Corasick fast path for EXACT alternations: (?:a|b|c)
