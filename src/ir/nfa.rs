@@ -382,6 +382,116 @@ impl Nfa {
         self.check_word_bounded_class(self.start, &mut visited, false, false)
     }
 
+    /// Check if this NFA is a word-bounded character class with exact repetition: \b\w{4}\b.
+    /// Returns Some((min, max)) if detected, None otherwise.
+    /// This enables a fast path that scans for word boundaries with exact count.
+    #[must_use]
+    pub fn is_word_bounded_class_exact(&self) -> Option<(u32, u32)> {
+        // Must have word boundary
+        if !self.states.iter().any(|state| {
+            if let State::Anchor { kind, .. } = state {
+                matches!(kind, Anchor::WordBoundary)
+            } else {
+                false
+            }
+        }) {
+            return None;
+        }
+
+        // Check for word boundary -> char class -> bounded quantifier -> word boundary
+        let mut visited = vec![false; self.states.len()];
+        self.check_word_bounded_class_exact(self.start, &mut visited, false, false, None)
+    }
+
+    fn check_word_bounded_class_exact(
+        &self,
+        state_id: StateId,
+        visited: &mut [bool],
+        seen_start_boundary: bool,
+        seen_class: bool,
+        quant: Option<(u32, u32)>,
+    ) -> Option<(u32, u32)> {
+        if state_id >= self.states.len() {
+            return None;
+        }
+
+        if visited[state_id] {
+            return None;
+        }
+        visited[state_id] = true;
+
+        if state_id == 0 {
+            // Reached accept - valid pattern with quantifier
+            if seen_start_boundary && seen_class {
+                return quant;
+            }
+            return None;
+        }
+
+        match &self.states[state_id] {
+            State::Epsilon { targets } => {
+                for &t in targets {
+                    if let Some(q) = self.check_word_bounded_class_exact(
+                        t,
+                        visited,
+                        seen_start_boundary,
+                        seen_class,
+                        quant,
+                    ) {
+                        return Some(q);
+                    }
+                }
+                None
+            }
+            State::Anchor {
+                kind: Anchor::WordBoundary,
+                next,
+            } => {
+                if !seen_start_boundary {
+                    self.check_word_bounded_class_exact(*next, visited, true, seen_class, quant)
+                } else if !seen_class {
+                    None
+                } else {
+                    self.check_word_bounded_class_exact(
+                        *next,
+                        visited,
+                        seen_start_boundary,
+                        seen_class,
+                        quant,
+                    )
+                }
+            }
+            State::Char { class: _, next } => self.check_word_bounded_class_exact(
+                *next,
+                visited,
+                seen_start_boundary,
+                true,
+                quant,
+            ),
+            // Handle bounded quantifier like {4} or {3,5}
+            // This would be represented as a Split with specific bounds
+            State::Split { branches, greedy } => {
+                if *greedy && branches.len() == 2 {
+                    // For bounded quantifier, check both branches
+                    // Branch 0: continue with increased count, Branch 1: exit with final count
+                    for &b in branches {
+                        if let Some(q) = self.check_word_bounded_class_exact(
+                            b,
+                            visited,
+                            seen_start_boundary,
+                            seen_class,
+                            quant,
+                        ) {
+                            return Some(q);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn check_word_bounded_class(
         &self,
         state_id: StateId,

@@ -89,9 +89,14 @@ pub struct FuzzyRegex {
     is_char_class_plus: bool,
     fixed_repetition: Option<String>,
     has_literal_word_boundary: bool,
+    /// Word-bounded class with exact repetition: \b\w{4}\b -> Some((4,4))
+    word_bounded_class_exact: Option<(u32, u32)>,
     /// Additional cached flags for fast path checks
     is_simple_alternation: bool,
     has_recursion: bool,
+    has_word_boundary: bool,
+    has_lookahead: bool,
+    has_lookbehind: bool,
     /// Pre-computed: can use memchr fast path for exact literal matching
     can_use_memchr_fast_path: bool,
     /// Pre-computed: cached literal for fast path (if applicable)
@@ -242,6 +247,7 @@ impl FuzzyRegex {
         let is_pure_greedy_dotstar = nfa.is_pure_greedy_dotstar();
         let is_greedy_prefix_with_suffix = nfa.is_greedy_prefix_with_suffix();
         let is_word_bounded_class = nfa.is_word_bounded_class();
+        let word_bounded_class_exact = nfa.is_word_bounded_class_exact();
         let is_char_class_plus = nfa.is_char_class_plus();
         let fixed_repetition = nfa.as_fixed_repetition();
         let has_literal_word_boundary = nfa.has_literal_word_boundary();
@@ -335,11 +341,15 @@ impl FuzzyRegex {
             is_pure_greedy_dotstar,
             is_greedy_prefix_with_suffix,
             is_word_bounded_class,
+            word_bounded_class_exact,
             is_char_class_plus,
             fixed_repetition,
             has_literal_word_boundary,
             is_simple_alternation,
             has_recursion,
+            has_word_boundary,
+            has_lookahead,
+            has_lookbehind,
             can_use_memchr_fast_path,
             fast_path_literal,
             word_lists: FxHashMap::default(),
@@ -599,6 +609,40 @@ impl FuzzyRegex {
                 1.0,
                 crate::engine::EditCounts::default(),
             ));
+        }
+
+        // Fast path for end-anchored exact literals: PATTERN$
+        // Use rfind for O(n) reverse search
+        if self.ends_with_end_anchor
+            && !self.config.multi_line
+            && self.literals.len() == 1
+            && self.capture_count == 0
+            && !self.has_recursion
+            && !self.config.case_insensitive
+        {
+            let literal = &self.literals[0];
+            if literal.limits.is_none()
+                && literal.min_edits.is_none()
+                && literal.edit_chars.is_none()
+            {
+                let pattern_text = &literal.text;
+
+                // Use rfind to find the last occurrence
+                if let Some(pos) = text.rfind(pattern_text) {
+                    // Verify the match ends at the text end (for $ anchor)
+                    let end_pos = pos + pattern_text.len();
+                    if end_pos == text.len() {
+                        return Some(Match::new(
+                            text,
+                            pos,
+                            end_pos,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+                }
+                return None;
+            }
         }
 
         // Fast path for greedy prefix patterns: .*SUFFIX
@@ -1724,6 +1768,63 @@ impl FuzzyRegex {
                         1.0,
                         crate::engine::EditCounts::default(),
                     ));
+                }
+
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+
+        None
+    }
+
+    /// Fast path for word-bounded character class with exact length: \b\w{4}\b
+    /// Scans text for words of exactly the given length.
+    fn find_word_bounded_class_exact(text: &str, word_len: usize) -> Option<Match<'_>> {
+        let text_bytes = text.as_bytes();
+        let len = text_bytes.len();
+
+        if len == 0 || word_len == 0 {
+            return None;
+        }
+
+        // Scan for word boundaries and match words of exact length
+        let mut i = 0;
+        while i < len {
+            // Check for word boundary at position i
+            let is_word_start = if i == 0 {
+                Self::is_word_char(text_bytes[i])
+            } else {
+                Self::is_word_char(text_bytes[i]) && !Self::is_word_char(text_bytes[i - 1])
+            };
+
+            if is_word_start {
+                // Found start of word - check if it has exactly word_len characters
+                let mut j = i;
+                while j < len && Self::is_word_char(text_bytes[j]) {
+                    j += 1;
+                }
+
+                let word_length = j - i;
+                if word_length == word_len {
+                    // Check for word boundary at position j
+                    let is_word_end = if j < len {
+                        !Self::is_word_char(text_bytes[j])
+                    } else {
+                        // End of text is a word boundary
+                        true
+                    };
+
+                    if is_word_end {
+                        return Some(Match::new(
+                            text,
+                            i,
+                            j,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
                 }
 
                 i = j;
