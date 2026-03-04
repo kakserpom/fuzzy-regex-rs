@@ -89,14 +89,9 @@ pub struct FuzzyRegex {
     is_char_class_plus: bool,
     fixed_repetition: Option<String>,
     has_literal_word_boundary: bool,
-    /// Word-bounded class with exact repetition: \b\w{4}\b -> Some((4,4))
-    word_bounded_class_exact: Option<(u32, u32)>,
     /// Additional cached flags for fast path checks
     is_simple_alternation: bool,
     has_recursion: bool,
-    has_word_boundary: bool,
-    has_lookahead: bool,
-    has_lookbehind: bool,
     /// Pre-computed: can use memchr fast path for exact literal matching
     can_use_memchr_fast_path: bool,
     /// Pre-computed: cached literal for fast path (if applicable)
@@ -247,15 +242,11 @@ impl FuzzyRegex {
         let is_pure_greedy_dotstar = nfa.is_pure_greedy_dotstar();
         let is_greedy_prefix_with_suffix = nfa.is_greedy_prefix_with_suffix();
         let is_word_bounded_class = nfa.is_word_bounded_class();
-        let word_bounded_class_exact = nfa.is_word_bounded_class_exact();
         let is_char_class_plus = nfa.is_char_class_plus();
         let fixed_repetition = nfa.as_fixed_repetition();
         let has_literal_word_boundary = nfa.has_literal_word_boundary();
         let is_simple_alternation = nfa.is_simple_alternation();
         let has_recursion = nfa.has_recursion();
-        let has_word_boundary = nfa.has_word_boundary();
-        let has_lookahead = nfa.has_lookahead();
-        let has_lookbehind = nfa.has_lookbehind();
         let has_char_classes = nfa.has_char_classes();
         let nfa_states_len = nfa.states.len();
 
@@ -273,9 +264,9 @@ impl FuzzyRegex {
                     && lit.edit_chars.is_none()
                     && !anchored
                     && !ends_with_end_anchor
-                    && !has_word_boundary
-                    && !has_lookahead
-                    && !has_lookbehind
+                    && !nfa.has_word_boundary()
+                    && !nfa.has_lookahead()
+                    && !nfa.has_lookbehind()
                     && !has_char_classes
             };
 
@@ -341,15 +332,11 @@ impl FuzzyRegex {
             is_pure_greedy_dotstar,
             is_greedy_prefix_with_suffix,
             is_word_bounded_class,
-            word_bounded_class_exact,
             is_char_class_plus,
             fixed_repetition,
             has_literal_word_boundary,
             is_simple_alternation,
             has_recursion,
-            has_word_boundary,
-            has_lookahead,
-            has_lookbehind,
             can_use_memchr_fast_path,
             fast_path_literal,
             word_lists: FxHashMap::default(),
@@ -789,6 +776,47 @@ impl FuzzyRegex {
 
             if is_word_class {
                 return Self::find_word_bounded_class_first(text);
+            }
+        }
+
+        // Fast path for word-bounded character class with exact repetition: \b\w{4}\b
+        // The NFA unrolls exact count repetitions into sequential Char states
+        // Detect: word boundary -> N sequential word chars -> word boundary
+        if self.nfa.states.len() <= 15 && !self.has_recursion && self.literals.is_empty() {
+            let word_char_count = self
+                .nfa
+                .states
+                .iter()
+                .filter(|s| {
+                    if let State::Char { class, .. } = s {
+                        class
+                            .named
+                            .iter()
+                            .any(|n| matches!(n, NamedClass::Word | NamedClass::Any))
+                    } else {
+                        false
+                    }
+                })
+                .count();
+
+            // Check for word boundary at start and end
+            let has_start_boundary = self.nfa.states.iter().any(|s| {
+                matches!(s, State::Anchor { kind: Anchor::WordBoundary, next }
+                    if *next != 0 && matches!(self.nfa.states.get(*next), Some(State::Char { .. })))
+            });
+            let has_end_boundary = self.nfa.states.iter().any(|s| {
+                matches!(
+                    s,
+                    State::Anchor {
+                        kind: Anchor::WordBoundary,
+                        next: 0
+                    }
+                )
+            });
+
+            if (2..=10).contains(&word_char_count) && has_start_boundary && has_end_boundary {
+                // Found word-bounded exact count pattern
+                return Self::find_word_bounded_class_exact(text, word_char_count);
             }
         }
 
