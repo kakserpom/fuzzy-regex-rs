@@ -91,11 +91,11 @@ pub struct FuzzyRegex {
     has_literal_word_boundary: bool,
     /// Additional cached flags for fast path checks
     is_simple_alternation: bool,
-    has_word_boundary: bool,
-    has_lookahead: bool,
-    has_lookbehind: bool,
-    has_char_classes: bool,
-    nfa_states_len: usize,
+    has_recursion: bool,
+    /// Pre-computed: can use memchr fast path for exact literal matching
+    can_use_memchr_fast_path: bool,
+    /// Pre-computed: cached literal for fast path (if applicable)
+    fast_path_literal: Option<*const str>,
     /// Named word lists for \L<name> patterns.
     /// Map from list name to vector of words.
     word_lists: FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
@@ -246,11 +246,39 @@ impl FuzzyRegex {
         let fixed_repetition = nfa.as_fixed_repetition();
         let has_literal_word_boundary = nfa.has_literal_word_boundary();
         let is_simple_alternation = nfa.is_simple_alternation();
+        let has_recursion = nfa.has_recursion();
         let has_word_boundary = nfa.has_word_boundary();
         let has_lookahead = nfa.has_lookahead();
         let has_lookbehind = nfa.has_lookbehind();
         let has_char_classes = nfa.has_char_classes();
         let nfa_states_len = nfa.states.len();
+
+        // Pre-compute whether we can use the memchr fast path
+        // word_lists is always empty at this point (set later via set_word_list)
+        let can_use_memchr_fast_path = literals.len() == 1
+            && nfa_states_len <= 15
+            && !config.case_insensitive
+            && config.handlers.is_empty()
+            && capture_count == 0
+            && {
+                let lit = &literals[0];
+                lit.limits.is_none()
+                    && lit.min_edits.is_none()
+                    && lit.edit_chars.is_none()
+                    && !anchored
+                    && !ends_with_end_anchor
+                    && !has_word_boundary
+                    && !has_lookahead
+                    && !has_lookbehind
+                    && !has_char_classes
+            };
+
+        #[allow(clippy::ref_as_ptr)]
+        let fast_path_literal = if can_use_memchr_fast_path {
+            Some(literals[0].text.as_str() as *const str)
+        } else {
+            None
+        };
 
         // Build Aho-Corasick for fast exact alternation matching
         // Only for simple alternations like (?:a|b|c) with 2-20 literal branches
@@ -311,11 +339,9 @@ impl FuzzyRegex {
             fixed_repetition,
             has_literal_word_boundary,
             is_simple_alternation,
-            has_word_boundary,
-            has_lookahead,
-            has_lookbehind,
-            has_char_classes,
-            nfa_states_len,
+            has_recursion,
+            can_use_memchr_fast_path,
+            fast_path_literal,
             word_lists: FxHashMap::default(),
             handlers: config.handlers,
         })
@@ -483,45 +509,35 @@ impl FuzzyRegex {
     /// Find the first match in the text.
     /// In BESTMATCH mode, returns the match with fewest errors.
     /// In ENHANCEMATCH mode, improves the fit of the found match.
+    ///
+    /// # Panics
+    ///
+    /// Never panics (all fast paths are pre-validated at construction time).
     #[inline]
     pub fn find<'t>(&self, text: &'t str) -> Option<Match<'t>> {
         // Use backtracking engine for recursive patterns
-        if self.nfa.has_recursion() {
+        if self.has_recursion {
             return self.find_with_backtrack(text);
         }
 
         // Ultra-fast path for simple exact literals: use memchr directly
-        // This is worth ~800ns savings for simple patterns
-        // Only enable for: single literal, small NFA, no special config
-        if self.literals.len() == 1
-            && self.nfa_states_len <= 15
-            && !self.config.case_insensitive
-            && self.word_lists.is_empty()
-            && self.capture_count == 0
-        {
-            let literal = &self.literals[0];
-            if literal.limits.is_none()
-                && literal.min_edits.is_none()
-                && literal.edit_chars.is_none()
-                && !self.anchored
-                && !self.ends_with_end_anchor
-                && !self.has_word_boundary
-                && !self.has_lookahead
-                && !self.has_lookbehind
-                // Only for simple literal patterns, not character classes
-                && !self.has_char_classes
-            {
-                if let Some(pos) = memmem::find(text.as_bytes(), literal.text.as_bytes()) {
-                    return Some(Match::new(
-                        text,
-                        pos,
-                        pos + literal.text.len(),
-                        1.0,
-                        crate::engine::EditCounts::default(),
-                    ));
-                }
-                return None;
+        // Pre-computed at construction time to avoid runtime branches
+        // SAFETY: fast_path_literal is only set when can_use_memchr_fast_path is true,
+        // and the pointer points to a valid String in the literals vector which lives
+        // as long as the FuzzyRegex instance.
+        if self.can_use_memchr_fast_path {
+            #[allow(clippy::ref_as_ptr)]
+            let literal = unsafe { &*self.fast_path_literal.unwrap() };
+            if let Some(pos) = memmem::find(text.as_bytes(), literal.as_bytes()) {
+                return Some(Match::new(
+                    text,
+                    pos,
+                    pos + literal.len(),
+                    1.0,
+                    crate::engine::EditCounts::default(),
+                ));
             }
+            return None;
         }
 
         // Fuzzy Aho-Corasick fast path for EXACT alternations: (?:a|b|c)
