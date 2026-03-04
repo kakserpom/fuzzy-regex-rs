@@ -860,6 +860,23 @@ impl FuzzyRegex {
             return Self::find_char_class_plus_first(text, self.has_lazy);
         }
 
+        // Check for lazy char class plus: \d+?, \w+?, [a-z]+?
+        // The is_char_class_plus only detects greedy, so we check manually for lazy
+        // Note: must check named/ranges only (not chars) to avoid matching literal characters
+        if self.has_lazy && self.literals.is_empty() && self.nfa.states.len() == 3 {
+            let has_char_class = self.nfa.states.iter().any(|s| {
+                matches!(s, State::Char { class, .. }
+                    if !class.named.is_empty() || !class.ranges.is_empty())
+            });
+            let has_split = self.nfa.states.iter().any(|s| {
+                matches!(s, State::Split { greedy: false, branches, .. }
+                    if branches.len() == 2)
+            });
+            if has_char_class && has_split {
+                return Self::find_char_class_plus_first(text, true);
+            }
+        }
+
         // Word list fast path: handle \L<name> patterns
         if !self.word_lists.is_empty() {
             return self.find_word_list_first(text, self.config.similarity_threshold);
