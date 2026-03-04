@@ -823,7 +823,7 @@ impl FuzzyRegex {
         // Fast path for fixed repetition: (?:literal){N} -> use concatenated literal search
         // Only for small concatenations to avoid huge strings
         if let Some(ref literal) = self.fixed_repetition
-            && literal.len() <= 50 // Don't create huge strings
+            && literal.len() <= 50
             && let Some(m) = Self::find_literal_first(text, literal)
         {
             return Some(self.make_match(
@@ -854,9 +854,10 @@ impl FuzzyRegex {
         }
 
         // Fast path for character class plus: [a-z]+, \d+, \w+
+        // Also handles lazy versions: [a-z]+?, \d+?, \w+?
         // Use direct byte scanning instead of DFA/NFA
         if self.is_char_class_plus && self.literals.is_empty() {
-            return Self::find_char_class_plus_first(text);
+            return Self::find_char_class_plus_first(text, self.has_lazy);
         }
 
         // Word list fast path: handle \L<name> patterns
@@ -1866,7 +1867,8 @@ impl FuzzyRegex {
 
     /// Fast path for character class plus: [a-z]+, \d+, \w+
     /// Note: This is a simplified version that matches any sequence of word characters
-    fn find_char_class_plus_first(text: &str) -> Option<Match<'_>> {
+    /// If `lazy` is true, matches minimum length (for +?)
+    fn find_char_class_plus_first(text: &str, lazy: bool) -> Option<Match<'_>> {
         let bytes = text.as_bytes();
         let len = bytes.len();
 
@@ -1874,13 +1876,20 @@ impl FuzzyRegex {
             return None;
         }
 
-        // Simple version: match any non-empty sequence
-        // This is a basic implementation - could be enhanced to handle specific classes
         let mut i = 0;
         while i < len {
-            // Find start of a sequence
             let start = i;
-            while i < len && bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' {
+            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                if lazy && i > start {
+                    // For lazy quantifier, return after first match
+                    return Some(Match::new(
+                        text,
+                        start,
+                        i,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
+                }
                 i += 1;
             }
 
