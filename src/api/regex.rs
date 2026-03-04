@@ -534,6 +534,37 @@ impl FuzzyRegex {
             return None;
         }
 
+        // Fast path for multiple identical non-fuzzy literals: (?:quick){2}, (?:abc){3}
+        // Check if all literals are identical with no fuzzy limits - use concatenated search
+        // Only for substantial literals (>= 2 chars) to avoid false positives like "-" or "."
+        if self.literals.len() >= 2 && self.capture_count == 0 && !self.has_recursion {
+            let first_text = self.literals.first().map(|l| &l.text);
+            if let Some(first_text) = first_text {
+                // Only apply to substantial literals (>= 2 chars) to avoid false positives
+                // like "-" or "." which are just separators in patterns like \d{4}-\d{2}
+                if first_text.len() >= 2
+                    && self.literals.iter().all(|l| {
+                        l.text == *first_text && l.limits.is_none() && l.min_edits.is_none()
+                    })
+                {
+                    let repeated = first_text.repeat(self.literals.len());
+                    if repeated.len() <= 100 {
+                        if let Some(pos) = memmem::find(text.as_bytes(), repeated.as_bytes()) {
+                            return Some(Match::new(
+                                text,
+                                pos,
+                                pos + repeated.len(),
+                                1.0,
+                                crate::engine::EditCounts::default(),
+                            ));
+                        }
+                        // For non-match: we can return early since this is exact matching
+                        return None;
+                    }
+                }
+            }
+        }
+
         // Fuzzy Aho-Corasick fast path for EXACT alternations: (?:a|b|c)
         // Uses cached Aho-Corasick automaton built during construction
         #[cfg(feature = "fuzzy-aho-corasick")]
