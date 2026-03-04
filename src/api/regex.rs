@@ -78,6 +78,24 @@ pub struct FuzzyRegex {
     /// DFA for fast exact matching (if pattern is DFA-compatible).
     /// `RefCell` allows mutation during matching for lazy DFA construction.
     dfa: Option<RefCell<Dfa>>,
+    /// Aho-Corasick for fast alternation matching.
+    #[cfg(feature = "fuzzy-aho-corasick")]
+    aho_corasick: Option<AhoCorasick>,
+    /// Cached strategy flags computed at compile time.
+    is_simple_fuzzy_only: bool,
+    is_pure_greedy_dotstar: bool,
+    is_greedy_prefix_with_suffix: bool,
+    is_word_bounded_class: bool,
+    is_char_class_plus: bool,
+    fixed_repetition: Option<String>,
+    has_literal_word_boundary: bool,
+    /// Additional cached flags for fast path checks
+    is_simple_alternation: bool,
+    has_word_boundary: bool,
+    has_lookahead: bool,
+    has_lookbehind: bool,
+    has_char_classes: bool,
+    nfa_states_len: usize,
     /// Named word lists for \L<name> patterns.
     /// Map from list name to vector of words.
     word_lists: FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
@@ -219,6 +237,56 @@ impl FuzzyRegex {
                 None
             };
 
+        // Precompute strategy flags at compile time
+        let is_simple_fuzzy_only = nfa.is_simple_fuzzy_only();
+        let is_pure_greedy_dotstar = nfa.is_pure_greedy_dotstar();
+        let is_greedy_prefix_with_suffix = nfa.is_greedy_prefix_with_suffix();
+        let is_word_bounded_class = nfa.is_word_bounded_class();
+        let is_char_class_plus = nfa.is_char_class_plus();
+        let fixed_repetition = nfa.as_fixed_repetition();
+        let has_literal_word_boundary = nfa.has_literal_word_boundary();
+        let is_simple_alternation = nfa.is_simple_alternation();
+        let has_word_boundary = nfa.has_word_boundary();
+        let has_lookahead = nfa.has_lookahead();
+        let has_lookbehind = nfa.has_lookbehind();
+        let has_char_classes = nfa.has_char_classes();
+        let nfa_states_len = nfa.states.len();
+
+        // Build Aho-Corasick for fast exact alternation matching
+        // Only for simple alternations like (?:a|b|c) with 2-20 literal branches
+        #[cfg(feature = "fuzzy-aho-corasick")]
+        let aho_corasick = if is_simple_alternation
+            && literals.len() >= 2
+            && literals.len() <= 20
+            && !config.case_insensitive
+            && capture_count == 0
+            && !anchored
+            && !ends_with_end_anchor
+        {
+            let all_exact = literals.iter().all(|lit| {
+                lit.limits.is_none() && lit.min_edits.is_none() && lit.edit_chars.is_none()
+            });
+            if all_exact {
+                let patterns: Vec<&str> = literals
+                    .iter()
+                    .filter(|lit| !lit.text.is_empty())
+                    .map(|lit| lit.text.as_str())
+                    .collect::<Vec<_>>();
+                if patterns.len() >= 2 {
+                    AhoCorasick::builder()
+                        .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+                        .build(&patterns)
+                        .ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(FuzzyRegex {
             pattern,
             nfa,
@@ -233,6 +301,21 @@ impl FuzzyRegex {
             ends_with_end_anchor,
             max_match_length,
             dfa,
+            #[cfg(feature = "fuzzy-aho-corasick")]
+            aho_corasick,
+            is_simple_fuzzy_only,
+            is_pure_greedy_dotstar,
+            is_greedy_prefix_with_suffix,
+            is_word_bounded_class,
+            is_char_class_plus,
+            fixed_repetition,
+            has_literal_word_boundary,
+            is_simple_alternation,
+            has_word_boundary,
+            has_lookahead,
+            has_lookbehind,
+            has_char_classes,
+            nfa_states_len,
             word_lists: FxHashMap::default(),
             handlers: config.handlers,
         })
@@ -292,7 +375,7 @@ impl FuzzyRegex {
     /// Simple patterns can skip NFA simulation for faster matching.
     #[must_use]
     pub fn is_simple_fuzzy(&self) -> bool {
-        self.nfa.is_simple_fuzzy_only()
+        self.is_simple_fuzzy_only
             && self
                 .fuzzy_bridge
                 .as_ref()
@@ -301,7 +384,7 @@ impl FuzzyRegex {
 
     /// Check if this is a pure greedy dot-star pattern (e.g., `.*` or `.*$`).
     pub fn is_pure_greedy_dotstar(&self) -> bool {
-        self.nfa.is_pure_greedy_dotstar()
+        self.is_pure_greedy_dotstar
     }
 
     /// Set a named word list for \L<name> patterns.
@@ -411,7 +494,7 @@ impl FuzzyRegex {
         // This is worth ~800ns savings for simple patterns
         // Only enable for: single literal, small NFA, no special config
         if self.literals.len() == 1
-            && self.nfa.states.len() <= 15
+            && self.nfa_states_len <= 15
             && !self.config.case_insensitive
             && self.word_lists.is_empty()
             && self.capture_count == 0
@@ -422,11 +505,11 @@ impl FuzzyRegex {
                 && literal.edit_chars.is_none()
                 && !self.anchored
                 && !self.ends_with_end_anchor
-                && !self.nfa.has_word_boundary()
-                && !self.nfa.has_lookahead()
-                && !self.nfa.has_lookbehind()
+                && !self.has_word_boundary
+                && !self.has_lookahead
+                && !self.has_lookbehind
                 // Only for simple literal patterns, not character classes
-                && !self.nfa.has_char_classes()
+                && !self.has_char_classes
             {
                 if let Some(pos) = memmem::find(text.as_bytes(), literal.text.as_bytes()) {
                     return Some(Match::new(
@@ -442,54 +525,25 @@ impl FuzzyRegex {
         }
 
         // Fuzzy Aho-Corasick fast path for EXACT alternations: (?:a|b|c)
-        // Uses Aho-Corasick to find candidates quickly
-        // Note: Fuzzy alternations like (?:a|b|c)~1 are handled by the normal fuzzy bridge
+        // Uses cached Aho-Corasick automaton built during construction
         #[cfg(feature = "fuzzy-aho-corasick")]
         {
-            if self.nfa.is_simple_alternation()
-                && self.literals.len() >= 2
-                && self.literals.len() <= 20
-                && !self.config.case_insensitive
-                && self.word_lists.is_empty()
-                && self.capture_count == 0
-                && !self.anchored
-                && !self.ends_with_end_anchor
-            {
-                // Only use for EXACT (non-fuzzy) alternations
-                let all_exact = self.literals.iter().all(|lit| {
-                    lit.limits.is_none() && lit.min_edits.is_none() && lit.edit_chars.is_none()
-                });
-
-                if all_exact {
-                    let patterns: Vec<&str> = self
-                        .literals
-                        .iter()
-                        .filter(|lit| !lit.text.is_empty())
-                        .map(|lit| lit.text.as_str())
-                        .collect::<Vec<_>>();
-
-                    if patterns.len() >= 2
-                        && let Ok(ac) = AhoCorasick::builder()
-                            .match_kind(aho_corasick::MatchKind::LeftmostFirst)
-                            .build(&patterns)
-                    {
-                        if let Some(m) = ac.find(text) {
-                            let pattern_idx = m.pattern().as_usize();
-                            if pattern_idx < self.literals.len() {
-                                let lit = &self.literals[pattern_idx];
-                                let end = m.start() + lit.text.len();
-                                return Some(Match::new(
-                                    text,
-                                    m.start(),
-                                    end,
-                                    1.0,
-                                    crate::engine::EditCounts::default(),
-                                ));
-                            }
-                        }
-                        return None;
+            if let Some(ref ac) = self.aho_corasick {
+                if let Some(m) = ac.find(text) {
+                    let pattern_idx = m.pattern().as_usize();
+                    if pattern_idx < self.literals.len() {
+                        let lit = &self.literals[pattern_idx];
+                        let end = m.start() + lit.text.len();
+                        return Some(Match::new(
+                            text,
+                            m.start(),
+                            end,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
                     }
                 }
+                return None;
             }
         }
 
@@ -510,7 +564,7 @@ impl FuzzyRegex {
         // Note: This optimization doesn't work with (?m) multiline because
         // ^ and $ match at line boundaries, so ^.*$ would match each line.
         // However, (?s) dot_all is fine - . still matches everything.
-        if self.nfa.is_pure_greedy_dotstar() && !self.config.multi_line {
+        if self.is_pure_greedy_dotstar && !self.config.multi_line {
             if text.is_empty() {
                 // For empty text, return empty match at position 0
                 return Some(Match::new(
@@ -535,7 +589,7 @@ impl FuzzyRegex {
         // For greedy .*, the match is simply: find the suffix, then .* matches everything before it
         // This works for both literal and fuzzy suffixes
         // This avoids O(n²) behavior where greedy .* tries many ending positions with fuzzy matching
-        if self.nfa.is_greedy_prefix_with_suffix() {
+        if self.is_greedy_prefix_with_suffix {
             // For non-fuzzy literals: use rfind for O(n) reverse search
             if !self.literals.is_empty()
                 && let Some(literal) = self.literals.first()
@@ -608,7 +662,7 @@ impl FuzzyRegex {
         // Fast path for prefix-suffix patterns: PREFIX.*SUFFIX
         // Find prefix from left, suffix from right, check ordering
         // This avoids O(n²) behavior with greedy .*
-        if self.literals.len() >= 2 && self.nfa.is_greedy_prefix_with_suffix() {
+        if self.literals.len() >= 2 && self.is_greedy_prefix_with_suffix {
             // Get first two literals as prefix and suffix
             let prefix_text = &self.literals[0].text;
             let suffix_text = &self.literals[1].text;
@@ -648,7 +702,7 @@ impl FuzzyRegex {
         // Fast path for non-fuzzy word-bounded literals: use exact literal search + boundary check
         // This handles \bword\b, \bword, word\b patterns (but NOT \Bword\B)
         // IMPORTANT: Must come before DFA path since DFA doesn't handle word boundaries efficiently
-        if self.nfa.has_literal_word_boundary()
+        if self.has_literal_word_boundary
             && self.literals.len() == 1
             && let Some(literal) = self.literals.first()
             && literal.limits.is_none()
@@ -659,7 +713,7 @@ impl FuzzyRegex {
 
         // Fast path for word-bounded character class: \b\w+\b only
         // Note: This only handles \w (word chars), not \d or other classes
-        if self.nfa.is_word_bounded_class() && self.literals.is_empty() {
+        if self.is_word_bounded_class && self.literals.is_empty() {
             // Check if it's specifically \w+ (not \d+ or other)
             // For now, only apply to avoid breaking \b\d+\b
             let is_word_class = self.nfa.states.iter().any(|s| {
@@ -680,9 +734,9 @@ impl FuzzyRegex {
 
         // Fast path for fixed repetition: (?:literal){N} -> use concatenated literal search
         // Only for small concatenations to avoid huge strings
-        if let Some(literal) = self.nfa.as_fixed_repetition()
+        if let Some(ref literal) = self.fixed_repetition
             && literal.len() <= 50 // Don't create huge strings
-            && let Some(m) = Self::find_literal_first(text, &literal)
+            && let Some(m) = Self::find_literal_first(text, literal)
         {
             return Some(self.make_match(
                 text,
@@ -713,7 +767,7 @@ impl FuzzyRegex {
 
         // Fast path for character class plus: [a-z]+, \d+, \w+
         // Use direct byte scanning instead of DFA/NFA
-        if self.nfa.is_char_class_plus() && self.literals.is_empty() {
+        if self.is_char_class_plus && self.literals.is_empty() {
             return Self::find_char_class_plus_first(text);
         }
 
@@ -750,7 +804,7 @@ impl FuzzyRegex {
         // Fast path for simple alternation: use Matcher::find directly
         // This avoids the overhead of find_iter -> find_all
         // Only for exact alternations (no fuzzy edits) - fuzzy alternations need special handling
-        if self.nfa.is_simple_alternation()
+        if self.is_simple_alternation
             && !self.config.match_flags.best_match
             && !self.config.match_flags.enhance_match
             && !self.config.match_flags.posix
@@ -1304,7 +1358,7 @@ impl FuzzyRegex {
         }
 
         // Optimization for word-bounded literals like \bword\b, \bword, word\b (but NOT \Bword\B)
-        if self.nfa.has_literal_word_boundary() && self.literals.len() == 1 {
+        if self.has_literal_word_boundary && self.literals.len() == 1 {
             if let Some(literal) = self.literals.first()
                 && literal.limits.is_none()
             {
