@@ -87,6 +87,7 @@ pub struct FuzzyRegex {
     is_greedy_prefix_with_suffix: bool,
     is_word_bounded_class: bool,
     is_char_class_plus: bool,
+    is_class_plus_with_literal: bool,
     has_literal_word_boundary: bool,
     /// Additional cached flags for fast path checks
     is_simple_alternation: bool,
@@ -246,6 +247,7 @@ impl FuzzyRegex {
         let is_greedy_prefix_with_suffix = nfa.is_greedy_prefix_with_suffix();
         let is_word_bounded_class = nfa.is_word_bounded_class();
         let is_char_class_plus = nfa.is_char_class_plus();
+        let is_class_plus_with_literal = nfa.is_class_plus_with_literal();
         let has_literal_word_boundary = nfa.has_literal_word_boundary();
         let is_simple_alternation = nfa.is_simple_alternation();
         let has_recursion = nfa.has_recursion();
@@ -373,6 +375,7 @@ impl FuzzyRegex {
             is_greedy_prefix_with_suffix,
             is_word_bounded_class,
             is_char_class_plus,
+            is_class_plus_with_literal,
             has_literal_word_boundary,
             is_simple_alternation,
             has_recursion,
@@ -886,8 +889,10 @@ impl FuzzyRegex {
         // DFA fast path: use DFA for exact/non-fuzzy patterns
         // Skip if word_lists is populated (use word list matching instead)
         // Skip if pattern has word boundaries (DFA can't handle them)
+        // Skip if pattern is class+literal (use specialized fast path instead)
         if let Some(ref dfa_cell) = self.dfa
             && self.word_lists.is_empty()
+            && !self.is_class_plus_with_literal
         {
             let mut dfa = dfa_cell.borrow_mut();
             return dfa.find(text).map(|m| {
@@ -906,6 +911,24 @@ impl FuzzyRegex {
         // Use direct byte scanning instead of DFA/NFA
         if self.is_char_class_plus && self.literals.is_empty() {
             return Self::find_char_class_plus_first(text, self.has_lazy);
+        }
+
+        // Fast path for character class + literal: \w+@, \d+\., \S+pattern
+        // Find literal first with memchr, then extend backwards with character class
+        // This is much faster than DFA/NFA for these patterns
+        if self.is_class_plus_with_literal
+            && !self.has_recursion
+            && self.literals.len() == 1
+            && self.capture_count == 0
+            && !self.config.case_insensitive
+        {
+            let literal = &self.literals[0];
+            if literal.limits.is_none()
+                && literal.min_edits.is_none()
+                && literal.edit_chars.is_none()
+            {
+                return Self::find_class_plus_with_literal_first(text, &literal.text);
+            }
         }
 
         // Check for lazy char class plus: \d+?, \w+?, [a-z]+?
@@ -1980,6 +2003,79 @@ impl FuzzyRegex {
             return None;
         }
         memmem::find(text.as_bytes(), literal.as_bytes()).map(|pos| pos..pos + literal.len())
+    }
+
+    /// Fast path for character class + literal: \w+@, \d+\., \S+pattern
+    /// Find the literal first with memchr, then extend backwards with the character class.
+    /// Also extends forward if there's another character class after the literal (like \w+@\w+).
+    /// This is much faster than NFA/DFA for patterns like email-like matches.
+    fn find_class_plus_with_literal_first<'a>(text: &'a str, literal: &str) -> Option<Match<'a>> {
+        if text.is_empty() || literal.is_empty() {
+            return None;
+        }
+
+        let bytes = text.as_bytes();
+        let literal_bytes = literal.as_bytes();
+        let literal_first_byte = literal_bytes[0];
+
+        // Use memchr to find the first occurrence of the literal's first character
+        // This is much faster than running the full NFA
+        let mut i = 0;
+        while i < bytes.len() {
+            // Find next occurrence of the literal's first byte
+            if let Some(pos) = memchr::memchr(literal_first_byte, &bytes[i..]) {
+                let start_pos = i + pos;
+
+                // Check if the full literal matches at this position
+                if start_pos + literal_bytes.len() <= bytes.len()
+                    && &bytes[start_pos..start_pos + literal_bytes.len()] == literal_bytes
+                {
+                    // Found literal - now extend backwards to find class+ match
+                    let class_end = start_pos;
+
+                    // Extend backwards while we have class characters (\w: alphanumeric or underscore)
+                    let mut class_start = class_end;
+                    while class_start > 0 {
+                        let prev_byte = bytes[class_start - 1];
+                        if prev_byte.is_ascii_alphanumeric() || prev_byte == b'_' {
+                            class_start -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Extend forward after the literal with word characters (\w+)
+                    let literal_after_pos = start_pos + literal_bytes.len();
+                    let mut after_end = literal_after_pos;
+                    while after_end < bytes.len() {
+                        let next_byte = bytes[after_end];
+                        if next_byte.is_ascii_alphanumeric() || next_byte == b'_' {
+                            after_end += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Found a valid match (class+ followed by literal, optionally followed by class+)
+                    if class_start < class_end {
+                        return Some(Match::new(
+                            text,
+                            class_start,
+                            after_end,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+                }
+
+                // Move past this position
+                i = start_pos + 1;
+            } else {
+                break;
+            }
+        }
+
+        None
     }
 
     /// Optimized collection of all non-overlapping matches using greedy-leftmost.

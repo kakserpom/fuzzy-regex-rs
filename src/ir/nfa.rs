@@ -677,6 +677,34 @@ impl Nfa {
         }
     }
 
+    /// Check if this NFA is a character class plus followed by literal: \w+@, \d+\., \S+pattern
+    /// This enables a fast path: find the literal first with memchr, then extend backwards with the class.
+    /// Only matches patterns that have BOTH a named character class AND a `FuzzyLiteral` state.
+    #[must_use]
+    pub fn is_class_plus_with_literal(&self) -> bool {
+        if self.states.len() > 30 {
+            return false;
+        }
+
+        // Must have Split (for +) and Char states with named classes
+        let has_split = self.states.iter().any(
+            |s| matches!(s, State::Split { greedy: true, branches, .. } if branches.len() >= 2),
+        );
+        let has_named_char = self
+            .states
+            .iter()
+            .any(|s| matches!(s, State::Char { class, .. } if !class.named.is_empty()));
+
+        // Also check for FuzzyLiteral state - this is what represents the literal part
+        let has_fuzzy_literal = self
+            .states
+            .iter()
+            .any(|s| matches!(s, State::FuzzyLiteral { .. }));
+
+        // Must have Split, named char class, AND a FuzzyLiteral (the literal part)
+        has_split && has_named_char && has_fuzzy_literal
+    }
+
     /// Check if this NFA contains any recursive patterns.
     /// Used to determine whether to use backtracking engine.
     #[must_use]
