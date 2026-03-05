@@ -580,20 +580,23 @@ impl FuzzyRegex {
 
         // Fast path for multiple identical non-fuzzy literals: (?:quick){2}, (?:abc){3}
         // Uses pre-computed values for maximum performance
+        // NOTE: This fast path handles exact count {N} patterns only
+        // For {N,} or {N,M} patterns, we skip this fast path and let the normal
+        // NFA/DFA handle it correctly
         if self.can_use_repetition_fast_path
+            && self.literals.len() <= 3
             && let Some(ref repeated) = self.fast_path_repeated_literal
-            && let Some(pos) = memmem::find(text.as_bytes(), repeated.as_bytes())
         {
-            return Some(Match::new(
-                text,
-                pos,
-                pos + repeated.len(),
-                1.0,
-                crate::engine::EditCounts::default(),
-            ));
-        }
-        // Early return for non-match in repetition fast path
-        if self.can_use_repetition_fast_path {
+            // Only handle exact count {N} where literals.len() = N
+            if let Some(pos) = memmem::find(text.as_bytes(), repeated.as_bytes()) {
+                return Some(Match::new(
+                    text,
+                    pos,
+                    pos + repeated.len(),
+                    1.0,
+                    crate::engine::EditCounts::default(),
+                ));
+            }
             return None;
         }
 
