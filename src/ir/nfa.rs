@@ -677,6 +677,28 @@ impl Nfa {
         }
     }
 
+    /// Get the type of character class used in a char class plus pattern.
+    /// Returns Some("digit"), Some("word"), Some("whitespace"), or None for custom ranges.
+    #[must_use]
+    pub fn get_char_class_type(&self) -> Option<&'static str> {
+        for state in &self.states {
+            if let State::Char { class, .. } = state {
+                for named in &class.named {
+                    match named {
+                        crate::parser::NamedClass::Digit => return Some("digit"),
+                        crate::parser::NamedClass::Word => return Some("word"),
+                        crate::parser::NamedClass::Whitespace => return Some("whitespace"),
+                        crate::parser::NamedClass::NotDigit => return Some("not_digit"),
+                        crate::parser::NamedClass::NotWord => return Some("not_word"),
+                        crate::parser::NamedClass::NotWhitespace => return Some("not_whitespace"),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Check if this NFA is a character class plus followed by literal: \w+@, \d+\., \S+pattern enables a fast path
     /// This: find the literal first with memchr, then extend backwards with the class.
     /// Only matches patterns that have BOTH a named character class AND a `FuzzyLiteral` state.

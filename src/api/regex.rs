@@ -913,7 +913,8 @@ impl FuzzyRegex {
         // Also handles lazy versions: [a-z]+?, \d+?, \w+?
         // Use direct byte scanning instead of DFA/NFA
         if self.is_char_class_plus && self.literals.is_empty() {
-            return Self::find_char_class_plus_first(text, self.has_lazy);
+            let class_type = self.nfa.get_char_class_type();
+            return Self::find_char_class_plus_first(text, self.has_lazy, class_type);
         }
 
         // Fast path for character class + literal: \w+@, \d+\., \S+pattern
@@ -988,7 +989,11 @@ impl FuzzyRegex {
                     if branches.len() == 2)
             });
             if has_char_class && has_split {
-                return Self::find_char_class_plus_first(text, true);
+                return Self::find_char_class_plus_first(
+                    text,
+                    true,
+                    self.nfa.get_char_class_type(),
+                );
             }
         }
 
@@ -2004,9 +2009,13 @@ impl FuzzyRegex {
     }
 
     /// Fast path for character class plus: [a-z]+, \d+, \w+
-    /// Note: This is a simplified version that matches any sequence of word characters
     /// If `lazy` is true, matches minimum length (for +?)
-    fn find_char_class_plus_first(text: &str, lazy: bool) -> Option<Match<'_>> {
+    /// `class_type` is the type of character class: "digit", "word", "whitespace", or None for custom ranges
+    fn find_char_class_plus_first<'a>(
+        text: &'a str,
+        lazy: bool,
+        class_type: Option<&'static str>,
+    ) -> Option<Match<'a>> {
         let bytes = text.as_bytes();
         let len = bytes.len();
 
@@ -2014,10 +2023,21 @@ impl FuzzyRegex {
             return None;
         }
 
+        // Determine match function based on class type
+        let matches_class = match class_type {
+            Some("digit") => |b: u8| b.is_ascii_digit(),
+            Some("word") => |b: u8| b.is_ascii_alphanumeric() || b == b'_',
+            Some("whitespace") => |b: u8| b.is_ascii_whitespace(),
+            Some("not_digit") => |b: u8| !b.is_ascii_digit(),
+            Some("not_word") => |b: u8| !b.is_ascii_alphanumeric() && b != b'_',
+            Some("not_whitespace") => |b: u8| !b.is_ascii_whitespace(),
+            _ => |b: u8| b.is_ascii_alphanumeric() || b == b'_', // Default to word class
+        };
+
         let mut i = 0;
         while i < len {
             let start = i;
-            while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+            while i < len && matches_class(bytes[i]) {
                 if lazy && i > start {
                     // For lazy quantifier, return after first match
                     return Some(Match::new(
