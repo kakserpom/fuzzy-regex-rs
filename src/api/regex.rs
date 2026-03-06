@@ -893,11 +893,14 @@ impl FuzzyRegex {
         // Skip if word_lists is populated (use word list matching instead)
         // Skip if pattern has word boundaries (DFA can't handle them)
         // Skip if pattern is class+literal (use specialized fast path instead)
-        if let Some(ref dfa_cell) = self.dfa
+        // Skip if pattern has multiple literals (DFA is slower than NFA for these)
+        let use_dfa = self.dfa.is_some()
             && self.word_lists.is_empty()
             && !self.is_class_plus_with_literal
-        {
-            let mut dfa = dfa_cell.borrow_mut();
+            && self.literals.len() <= 1;
+
+        if use_dfa {
+            let mut dfa = self.dfa.as_ref().unwrap().borrow_mut();
             return dfa.find(text).map(|m| {
                 self.make_match(
                     text,
@@ -946,6 +949,29 @@ impl FuzzyRegex {
             let first_literal = self.literals.first().map_or("", |l| l.text.as_str());
             if first_literal == "-" || first_literal == "." || first_literal == "/" {
                 return Self::find_digit_sequence_with_separator(text, first_literal);
+            }
+        }
+
+        // Fast path for IP addresses: \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}
+        // Skip DFA and use direct memchr-based matching
+        if !self.has_recursion && self.capture_count == 0 && !self.config.case_insensitive {
+            // Check if pattern looks like IP address: dots with digits
+            let is_ip_like =
+                self.literals.len() >= 3 && self.literals.iter().all(|l| l.text == ".");
+
+            if is_ip_like {
+                return Self::find_ip_address(text);
+            }
+        }
+
+        // Fast path for currency/money: $, €, £, etc. followed by digits
+        if !self.has_recursion && self.capture_count == 0 && !self.config.case_insensitive {
+            // Check if pattern starts with a currency symbol
+            if let Some(literal) = self.literals.first() {
+                let currency = &literal.text;
+                if currency.len() == 1 && currency.as_bytes()[0] == b'$' {
+                    return Self::find_currency_amount(text, currency);
+                }
             }
         }
 
@@ -2146,6 +2172,159 @@ impl FuzzyRegex {
                     }
                 }
                 i = pos + 1;
+            } else {
+                break;
+            }
+        }
+
+        None
+    }
+
+    /// Fast path for IP addresses: \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}
+    /// Uses memchr to find dots, then validates IP octets.
+    fn find_ip_address<'a>(text: &'a str) -> Option<Match<'a>> {
+        let bytes = text.as_bytes();
+
+        // Use memchr to find dots - more efficient than checking every byte
+        let mut i = 0;
+        while i < bytes.len() {
+            // Find a dot
+            if let Some(dot_pos) = memchr::memchr(b'.', &bytes[i..]) {
+                let pos = i + dot_pos;
+
+                // Try to parse IP around this dot
+                // Look backwards for up to 3 digits (first octet could be before dot)
+                let mut start = pos;
+                let mut digits_before = 0;
+                while start > 0 && bytes[start - 1].is_ascii_digit() && digits_before < 3 {
+                    start -= 1;
+                    digits_before += 1;
+                }
+
+                if digits_before == 0 {
+                    // No digits before dot, try next position
+                    i = pos + 1;
+                    continue;
+                }
+
+                // Parse forward: this dot, then 1-3 digits, dot, 1-3 digits, dot, 1-3 digits
+                let mut j = pos + 1; // after the dot
+                let mut octet_count = 1; // we have the first octet
+
+                // Parse remaining 3 octets
+                while octet_count < 4 && j < bytes.len() {
+                    // Read digits
+                    let mut val = 0u32;
+                    let mut digits = 0;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() && digits < 3 {
+                        val = val * 10 + (bytes[j] - b'0') as u32;
+                        digits += 1;
+                        j += 1;
+                    }
+
+                    if digits == 0 || val > 255 {
+                        break;
+                    }
+
+                    octet_count += 1;
+
+                    if octet_count == 4 {
+                        // Found valid IP
+                        return Some(Match::new(
+                            text,
+                            start,
+                            j,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+
+                    // Need a dot
+                    if j >= bytes.len() || bytes[j] != b'.' {
+                        break;
+                    }
+                    j += 1;
+                }
+
+                i = pos + 1;
+            } else {
+                break;
+            }
+        }
+
+        None
+    }
+
+    /// Fast path for currency amounts: $1, $99, $1,234.56
+    fn find_currency_amount<'a>(text: &'a str, currency: &str) -> Option<Match<'a>> {
+        let bytes = text.as_bytes();
+        let currency_byte = currency.as_bytes()[0];
+
+        let mut i = 0;
+        while i < bytes.len() {
+            // Find currency symbol
+            if let Some(pos) = memchr::memchr(currency_byte, &bytes[i..]) {
+                let start = i + pos;
+
+                // Parse digits after currency
+                let mut j = start + 1;
+                let mut has_digits = false;
+
+                // Allow optional comma separators
+                while j < bytes.len() {
+                    if bytes[j].is_ascii_digit() {
+                        has_digits = true;
+                        j += 1;
+                    } else if bytes[j] == b','
+                        && j + 1 < bytes.len()
+                        && bytes[j + 1].is_ascii_digit()
+                    {
+                        // Skip comma, continue parsing
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                // Optional decimal part
+                if has_digits && j < bytes.len() && bytes[j] == b'.' {
+                    let decimal_start = j;
+                    j += 1;
+                    let mut decimal_digits = 0;
+                    while j < bytes.len() && bytes[j].is_ascii_digit() {
+                        decimal_digits += 1;
+                        j += 1;
+                    }
+                    // Require at least 2 decimal digits for valid amount
+                    if decimal_digits >= 2 {
+                        return Some(Match::new(
+                            text,
+                            start,
+                            j,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    } else if decimal_digits == 0 {
+                        // No decimal part, just return the integer amount
+                        return Some(Match::new(
+                            text,
+                            start,
+                            decimal_start,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+                } else if has_digits {
+                    return Some(Match::new(
+                        text,
+                        start,
+                        j,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
+                }
+
+                i = start + 1;
             } else {
                 break;
             }
