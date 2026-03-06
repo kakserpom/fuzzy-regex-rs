@@ -690,10 +690,21 @@ impl Nfa {
         let has_split = self.states.iter().any(
             |s| matches!(s, State::Split { greedy: true, branches, .. } if branches.len() >= 2),
         );
-        let has_named_char = self
-            .states
-            .iter()
-            .any(|s| matches!(s, State::Char { class, .. } if !class.named.is_empty()));
+
+        // Check for named character class, but exclude "." (Any/AnyExceptNewline)
+        let has_named_char = self.states.iter().any(|s| {
+            if let State::Char { class, .. } = s {
+                class.named.iter().any(|n| {
+                    !matches!(
+                        n,
+                        crate::parser::NamedClass::Any
+                            | crate::parser::NamedClass::AnyExceptNewline
+                    )
+                })
+            } else {
+                false
+            }
+        });
 
         // Also check for FuzzyLiteral state - this is what represents the literal part
         let has_fuzzy_literal = self

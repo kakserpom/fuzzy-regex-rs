@@ -893,14 +893,11 @@ impl FuzzyRegex {
         // Skip if word_lists is populated (use word list matching instead)
         // Skip if pattern has word boundaries (DFA can't handle them)
         // Skip if pattern is class+literal (use specialized fast path instead)
-        // Skip if pattern has multiple literals (DFA is slower than NFA for these)
-        let use_dfa = self.dfa.is_some()
+        if let Some(dfa) = &self.dfa
             && self.word_lists.is_empty()
             && !self.is_class_plus_with_literal
-            && self.literals.len() <= 1;
-
-        if use_dfa {
-            let mut dfa = self.dfa.as_ref().unwrap().borrow_mut();
+        {
+            let mut dfa = dfa.borrow_mut();
             return dfa.find(text).map(|m| {
                 self.make_match(
                     text,
@@ -920,20 +917,23 @@ impl FuzzyRegex {
         }
 
         // Fast path for character class + literal: \w+@, \d+\., \S+pattern
-        // Find literal first with memchr, then extend backwards with character class
-        // This is much faster than DFA/NFA for these patterns
+        // Also handles patterns with multiple literals like email: [\w.+-]+@[\w.-]+\.\w+
+        // Find literal first with memchr, then extend with character classes
         if self.is_class_plus_with_literal
             && !self.has_recursion
-            && self.literals.len() == 1
+            && !self.literals.is_empty()
             && self.capture_count == 0
             && !self.config.case_insensitive
         {
-            let literal = &self.literals[0];
-            if literal.limits.is_none()
-                && literal.min_edits.is_none()
-                && literal.edit_chars.is_none()
-            {
-                return Self::find_class_plus_with_literal_first(text, &literal.text);
+            // Check all literals have no fuzzy parameters
+            let all_literals_simple = self
+                .literals
+                .iter()
+                .all(|l| l.limits.is_none() && l.min_edits.is_none() && l.edit_chars.is_none());
+
+            if all_literals_simple && self.literals.len() <= 3 {
+                let first_literal = &self.literals[0];
+                return Self::find_class_plus_with_literal_first(text, &first_literal.text);
             }
         }
 
@@ -1798,6 +1798,12 @@ impl FuzzyRegex {
         b.is_ascii_alphanumeric() || b == b'_'
     }
 
+    /// Check if a byte is an email-word character (alphanumeric, underscore, dot, minus, plus).
+    #[inline]
+    fn is_email_word_char(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-' || b == b'+'
+    }
+
     /// Check if there's a word boundary at the given position.
     fn is_word_boundary_at(text: &str, pos: usize) -> bool {
         let bytes = text.as_bytes();
@@ -2062,46 +2068,66 @@ impl FuzzyRegex {
         let literal_bytes = literal.as_bytes();
         let literal_first_byte = literal_bytes[0];
 
-        // Use memchr to find the first occurrence of the literal's first character
-        // This is much faster than running the full NFA
+        // Check if the literal is a common email separator
+        let is_email_like = literal_first_byte == b'@' || literal_first_byte == b'.';
+
+        // Use memchr to find the literal
         let mut i = 0;
         while i < bytes.len() {
-            // Find next occurrence of the literal's first byte
             if let Some(pos) = memchr::memchr(literal_first_byte, &bytes[i..]) {
                 let start_pos = i + pos;
 
-                // Check if the full literal matches at this position
+                // Check if the full literal matches
                 if start_pos + literal_bytes.len() <= bytes.len()
                     && &bytes[start_pos..start_pos + literal_bytes.len()] == literal_bytes
                 {
-                    // Found literal - now extend backwards to find class+ match
-                    let class_end = start_pos;
-
-                    // Extend backwards while we have class characters (\w: alphanumeric or underscore)
-                    let mut class_start = class_end;
+                    // Extend backwards with word characters
+                    let mut class_start = start_pos;
                     while class_start > 0 {
-                        let prev_byte = bytes[class_start - 1];
-                        if prev_byte.is_ascii_alphanumeric() || prev_byte == b'_' {
+                        let prev = bytes[class_start - 1];
+                        if Self::is_email_word_char(prev) {
                             class_start -= 1;
                         } else {
                             break;
                         }
                     }
 
-                    // Extend forward after the literal with word characters (\w+)
-                    let literal_after_pos = start_pos + literal_bytes.len();
-                    let mut after_end = literal_after_pos;
-                    while after_end < bytes.len() {
-                        let next_byte = bytes[after_end];
-                        if next_byte.is_ascii_alphanumeric() || next_byte == b'_' {
+                    // Extend forward
+                    let literal_after = start_pos + literal_bytes.len();
+                    let mut after_end = literal_after;
+
+                    // For email-like patterns, continue extending through more word chars and dots
+                    if is_email_like && after_end < bytes.len() {
+                        // Skip the character right after @ (it's part of next class)
+                        // Then extend through word-like chars
+                        while after_end < bytes.len() {
+                            let next = bytes[after_end];
+                            if Self::is_email_word_char(next) {
+                                after_end += 1;
+                            } else if next == b'.' && after_end + 1 < bytes.len() {
+                                // Could be domain dot - include it and continue
+                                after_end += 1;
+                                // Include the char after dot if it's word-like
+                                if after_end < bytes.len()
+                                    && Self::is_email_word_char(bytes[after_end])
+                                {
+                                    continue;
+                                }
+                                break;
+                            } else {
+                                break;
+                            }
+                        }
+                    } else {
+                        // Simple case: just extend with word chars
+                        while after_end < bytes.len() && Self::is_email_word_char(bytes[after_end])
+                        {
                             after_end += 1;
-                        } else {
-                            break;
                         }
                     }
 
-                    // Found a valid match (class+ followed by literal, optionally followed by class+)
-                    if class_start < class_end {
+                    // Found valid match
+                    if class_start < start_pos && after_end > literal_after {
                         return Some(Match::new(
                             text,
                             class_start,
@@ -2112,7 +2138,6 @@ impl FuzzyRegex {
                     }
                 }
 
-                // Move past this position
                 i = start_pos + 1;
             } else {
                 break;
@@ -2182,7 +2207,7 @@ impl FuzzyRegex {
 
     /// Fast path for IP addresses: \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}
     /// Uses memchr to find dots, then validates IP octets.
-    fn find_ip_address<'a>(text: &'a str) -> Option<Match<'a>> {
+    fn find_ip_address(text: &str) -> Option<Match<'_>> {
         let bytes = text.as_bytes();
 
         // Use memchr to find dots - more efficient than checking every byte

@@ -312,6 +312,21 @@ impl Dfa {
         literal_texts: &[String],
         case_insensitive: bool,
     ) -> DfaPrefilter {
+        // For patterns where the first element is a broad character class (like [\w.+-]+)
+        // followed by a literal, the prefilter becomes ineffective because:
+        // 1. Character class first bytes cover almost everything
+        // 2. Even if we use the literal as prefilter (e.g., @), find_at() fails
+        //    because match starts BEFORE the literal
+        // In these cases, skip the prefilter and use linear scan
+        if !literal_texts.is_empty() && literal_texts[0].len() <= 2 {
+            // Check if NFA starts with a character class that has many possible first bytes
+            let starts_with_broad_class = Self::nfa_starts_with_broad_char_class(nfa);
+            if starts_with_broad_class {
+                // Skip prefilter - it would be ineffective
+                return DfaPrefilter::None;
+            }
+        }
+
         let mut prefix = Vec::new();
         let mut visited = vec![false; nfa.states.len()];
         let mut current = nfa.start;
@@ -522,6 +537,90 @@ impl Dfa {
 
         // For multi-byte prefix, use Literal
         DfaPrefilter::Literal(prefix)
+    }
+
+    /// Check if NFA starts with a character class that has many possible first bytes.
+    /// Returns true if the first character-accepting state is a broad character class
+    /// (more than ~10 possible first bytes), making prefilters ineffective.
+    fn nfa_starts_with_broad_char_class(nfa: &Nfa) -> bool {
+        let mut visited = vec![false; nfa.states.len()];
+        let mut current = nfa.start;
+
+        loop {
+            if visited[current] {
+                return false;
+            }
+            visited[current] = true;
+
+            match &nfa.states[current] {
+                State::Epsilon { targets } if targets.len() == 1 => {
+                    current = targets[0];
+                }
+                State::Anchor { next, .. }
+                | State::CaptureStart { next, .. }
+                | State::CaptureEnd { next, .. }
+                | State::ResetMatchStart { next, .. } => {
+                    current = *next;
+                }
+                State::Char { class, .. } => {
+                    // Count possible first bytes
+                    let mut count = 0;
+                    count += class.chars.len();
+                    for &(start, end) in &class.ranges {
+                        count += (end as usize).saturating_sub(start as usize) + 1;
+                    }
+                    // Add named classes (estimate)
+                    for _ in &class.named {
+                        count += 10; // Word = a-zA-Z0-9_, Digit = 0-9, etc.
+                    }
+
+                    // If more than ~10 possible first bytes, consider it "broad"
+                    return count > 10;
+                }
+                State::Split { branches, .. } => {
+                    // Check if any branch starts with a broad class
+                    return branches.iter().any(|&b| {
+                        Self::nfa_starts_with_broad_char_class_inner(
+                            nfa,
+                            b,
+                            &mut vec![false; nfa.states.len()],
+                        )
+                    });
+                }
+                _ => {
+                    return false;
+                }
+            }
+        }
+    }
+
+    fn nfa_starts_with_broad_char_class_inner(
+        nfa: &Nfa,
+        state_id: StateId,
+        visited: &mut [bool],
+    ) -> bool {
+        if state_id >= visited.len() || visited[state_id] {
+            return false;
+        }
+        visited[state_id] = true;
+
+        match &nfa.states[state_id] {
+            State::Epsilon { targets } => targets
+                .iter()
+                .any(|&t| Self::nfa_starts_with_broad_char_class_inner(nfa, t, visited)),
+            State::Char { class, .. } => {
+                let mut count = 0;
+                count += class.chars.len();
+                for &(start, end) in &class.ranges {
+                    count += (end as usize).saturating_sub(start as usize) + 1;
+                }
+                for _ in &class.named {
+                    count += 10;
+                }
+                count > 10
+            }
+            _ => false,
+        }
     }
 
     /// Collect first bytes from all branches of a Split state.
@@ -840,19 +939,17 @@ impl Dfa {
             } else {
                 self.next_state_impl::<true, false>(state_id, ch)
             }
+        } else if self.exact_mode {
+            self.next_state_impl::<false, true>(state_id, ch)
         } else {
-            if self.exact_mode {
-                self.next_state_impl::<false, true>(state_id, ch)
-            } else {
-                self.next_state_impl::<false, false>(state_id, ch)
-            }
+            self.next_state_impl::<false, false>(state_id, ch)
         }
     }
 
     /// Const generic implementation of `next_state`.
     /// Uses dense ASCII table for fast O(1) lookups on ASCII characters.
-    /// CASE_INSENSITIVE: whether to match case-insensitively
-    /// EXACT_MODE: if true, skip fuzzy literal handling (for pure exact patterns)
+    /// `CASE_INSENSITIVE`: whether to match case-insensitively
+    /// `EXACT_MODE`: if true, skip fuzzy literal handling (for pure exact patterns)
     #[inline(always)]
     fn next_state_impl<const CASE_INSENSITIVE: bool, const EXACT_MODE: bool>(
         &mut self,
