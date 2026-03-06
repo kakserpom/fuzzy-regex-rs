@@ -677,8 +677,8 @@ impl Nfa {
         }
     }
 
-    /// Check if this NFA is a character class plus followed by literal: \w+@, \d+\., \S+pattern
-    /// This enables a fast path: find the literal first with memchr, then extend backwards with the class.
+    /// Check if this NFA is a character class plus followed by literal: \w+@, \d+\., \S+pattern enables a fast path
+    /// This: find the literal first with memchr, then extend backwards with the class.
     /// Only matches patterns that have BOTH a named character class AND a `FuzzyLiteral` state.
     #[must_use]
     pub fn is_class_plus_with_literal(&self) -> bool {
@@ -703,6 +703,51 @@ impl Nfa {
 
         // Must have Split, named char class, AND a FuzzyLiteral (the literal part)
         has_split && has_named_char && has_fuzzy_literal
+    }
+
+    /// Check if this NFA is a digit sequence with separators: \d{4}-\d{2}-\d{2}
+    /// Pattern: N digit chars, separator, N digit chars, separator, N digit chars
+    #[must_use]
+    pub fn is_digit_sequence_with_separator(&self) -> bool {
+        if self.states.len() > 20 {
+            return false;
+        }
+
+        // Count Char states with digit class
+        let digit_chars: Vec<_> = self
+            .states
+            .iter()
+            .filter_map(|s| {
+                if let State::Char { class, next } = s {
+                    // Check if it's a digit class
+                    let is_digit = class
+                        .named
+                        .iter()
+                        .any(|n| matches!(n, crate::parser::NamedClass::Digit))
+                        || class
+                            .ranges
+                            .iter()
+                            .any(|(start, end)| *start >= '0' && *end <= '9');
+                    if is_digit {
+                        return Some(next);
+                    }
+                }
+                None
+            })
+            .collect();
+
+        // Must have at least 2 digit Char states
+        if digit_chars.len() < 2 {
+            return false;
+        }
+
+        // Check for FuzzyLiteral (separator)
+        let has_literal = self
+            .states
+            .iter()
+            .any(|s| matches!(s, State::FuzzyLiteral { .. }));
+
+        digit_chars.len() >= 2 && has_literal
     }
 
     /// Check if this NFA contains any recursive patterns.

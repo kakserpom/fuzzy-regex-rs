@@ -88,6 +88,7 @@ pub struct FuzzyRegex {
     is_word_bounded_class: bool,
     is_char_class_plus: bool,
     is_class_plus_with_literal: bool,
+    is_digit_sequence_with_separator: bool,
     has_literal_word_boundary: bool,
     /// Additional cached flags for fast path checks
     is_simple_alternation: bool,
@@ -248,6 +249,7 @@ impl FuzzyRegex {
         let is_word_bounded_class = nfa.is_word_bounded_class();
         let is_char_class_plus = nfa.is_char_class_plus();
         let is_class_plus_with_literal = nfa.is_class_plus_with_literal();
+        let is_digit_sequence_with_separator = nfa.is_digit_sequence_with_separator();
         let has_literal_word_boundary = nfa.has_literal_word_boundary();
         let is_simple_alternation = nfa.is_simple_alternation();
         let has_recursion = nfa.has_recursion();
@@ -376,6 +378,7 @@ impl FuzzyRegex {
             is_word_bounded_class,
             is_char_class_plus,
             is_class_plus_with_literal,
+            is_digit_sequence_with_separator,
             has_literal_word_boundary,
             is_simple_alternation,
             has_recursion,
@@ -928,6 +931,21 @@ impl FuzzyRegex {
                 && literal.edit_chars.is_none()
             {
                 return Self::find_class_plus_with_literal_first(text, &literal.text);
+            }
+        }
+
+        // Fast path for digit sequences: \d{4}-\d{2}-\d{2}
+        // Only for patterns that are exactly digits and separators (like dates)
+        if self.is_digit_sequence_with_separator
+            && !self.has_recursion
+            && self.capture_count == 0
+            && !self.config.case_insensitive
+            && !self.literals.is_empty()
+        {
+            // Only use this for patterns that start and end with digits
+            let first_literal = self.literals.first().map_or("", |l| l.text.as_str());
+            if first_literal == "-" || first_literal == "." || first_literal == "/" {
+                return Self::find_digit_sequence_with_separator(text, first_literal);
             }
         }
 
@@ -2070,6 +2088,64 @@ impl FuzzyRegex {
 
                 // Move past this position
                 i = start_pos + 1;
+            } else {
+                break;
+            }
+        }
+
+        None
+    }
+
+    /// Fast path for ANY character class + literal: [a-z]+@, [0-9]+#
+    /// Fast path for digit sequences with separator: \d{4}-\d{2}-\d{2}
+    /// Like dates (2024-01-15), phone numbers, etc.
+    fn find_digit_sequence_with_separator<'a>(text: &'a str, separator: &str) -> Option<Match<'a>> {
+        if text.is_empty() || separator.is_empty() {
+            return None;
+        }
+
+        let bytes = text.as_bytes();
+        let sep_bytes = separator.as_bytes();
+        let sep_first = sep_bytes[0];
+
+        let mut i = 0;
+        while i < bytes.len() {
+            // Find digit
+            if let Some(digit_pos) = memchr::memchr(sep_first, &bytes[i..]) {
+                let pos = i + digit_pos;
+
+                // Check if this is really a separator (not a digit)
+                if bytes[pos] == sep_first && (pos == 0 || bytes[pos - 1].is_ascii_digit()) {
+                    // Check we have digits after separator
+                    let after_sep = pos + 1;
+                    if after_sep < bytes.len() && bytes[after_sep].is_ascii_digit() {
+                        // Count digits after separator
+                        let mut digit_count = 0;
+                        let mut j = after_sep;
+                        while j < bytes.len() && bytes[j].is_ascii_digit() {
+                            digit_count += 1;
+                            j += 1;
+                        }
+
+                        // Valid pattern: at least 1 digit after separator
+                        if digit_count >= 1 {
+                            // Extend backwards to get more context
+                            let mut start = pos;
+                            while start > 0 && bytes[start - 1].is_ascii_digit() {
+                                start -= 1;
+                            }
+
+                            return Some(Match::new(
+                                text,
+                                start,
+                                j,
+                                1.0,
+                                crate::engine::EditCounts::default(),
+                            ));
+                        }
+                    }
+                }
+                i = pos + 1;
             } else {
                 break;
             }
