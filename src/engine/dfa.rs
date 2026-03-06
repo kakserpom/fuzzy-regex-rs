@@ -193,6 +193,8 @@ pub struct Dfa {
     char_class_bitmaps: Vec<Option<AsciiClassBitmap>>,
     /// Prefilter for fast candidate position detection.
     prefilter: DfaPrefilter,
+    /// Exact mode: if true, skip fuzzy literal handling (optimization for exact patterns)
+    exact_mode: bool,
 }
 
 /// Result of a DFA match.
@@ -249,6 +251,13 @@ impl Dfa {
         // Extract literal prefix for prefiltering
         let prefilter = Self::extract_prefilter(nfa, &literal_texts, case_insensitive);
 
+        // Determine if we're in exact mode: no FuzzyLiteral states in the NFA at all
+        // When true, we skip fuzzy literal handling entirely for performance
+        let exact_mode = !nfa
+            .states
+            .iter()
+            .any(|s| matches!(s, State::FuzzyLiteral { .. }));
+
         let mut dfa = Dfa {
             nfa: nfa.clone(),
             literal_texts,
@@ -261,6 +270,7 @@ impl Dfa {
             multi_line,
             char_class_bitmaps,
             prefilter,
+            exact_mode,
         };
 
         // Compute epsilon closure of start state
@@ -825,16 +835,26 @@ impl Dfa {
     #[inline(always)]
     fn next_state(&mut self, state_id: DfaStateId, ch: char) -> Option<DfaStateId> {
         if self.case_insensitive {
-            self.next_state_impl::<true>(state_id, ch)
+            if self.exact_mode {
+                self.next_state_impl::<true, true>(state_id, ch)
+            } else {
+                self.next_state_impl::<true, false>(state_id, ch)
+            }
         } else {
-            self.next_state_impl::<false>(state_id, ch)
+            if self.exact_mode {
+                self.next_state_impl::<false, true>(state_id, ch)
+            } else {
+                self.next_state_impl::<false, false>(state_id, ch)
+            }
         }
     }
 
     /// Const generic implementation of `next_state`.
     /// Uses dense ASCII table for fast O(1) lookups on ASCII characters.
+    /// CASE_INSENSITIVE: whether to match case-insensitively
+    /// EXACT_MODE: if true, skip fuzzy literal handling (for pure exact patterns)
     #[inline(always)]
-    fn next_state_impl<const CASE_INSENSITIVE: bool>(
+    fn next_state_impl<const CASE_INSENSITIVE: bool, const EXACT_MODE: bool>(
         &mut self,
         state_id: DfaStateId,
         ch: char,
@@ -912,20 +932,20 @@ impl Dfa {
                     next,
                     ..
                 } => {
-                    // Handle FuzzyLiteral with offset tracking
-                    let offset = ext_state.literal_offset.unwrap_or(0);
-                    if let Some(pattern) = self.literal_texts.get(*pattern_index) {
-                        let pattern_chars: Vec<char> = pattern.chars().collect();
-                        if offset < pattern_chars.len()
-                            && Self::chars_match::<CASE_INSENSITIVE>(ch, pattern_chars[offset])
-                        {
-                            // Character matches - advance offset or move to next state
-                            if offset + 1 == pattern_chars.len() {
-                                // Finished matching the literal - go to next state
-                                self.epsilon_closure(*next, &mut next_set);
-                            } else {
-                                // Still matching - advance offset
-                                next_set.insert(ExtendedState::with_offset(nfa_state, offset + 1));
+                    // Only handle fuzzy literals in non-exact mode
+                    if !EXACT_MODE {
+                        let offset = ext_state.literal_offset.unwrap_or(0);
+                        if let Some(pattern) = self.literal_texts.get(*pattern_index) {
+                            let pattern_chars: Vec<char> = pattern.chars().collect();
+                            if offset < pattern_chars.len()
+                                && Self::chars_match::<CASE_INSENSITIVE>(ch, pattern_chars[offset])
+                            {
+                                if offset + 1 == pattern_chars.len() {
+                                    self.epsilon_closure(*next, &mut next_set);
+                                } else {
+                                    next_set
+                                        .insert(ExtendedState::with_offset(nfa_state, offset + 1));
+                                }
                             }
                         }
                     }
