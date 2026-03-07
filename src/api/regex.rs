@@ -914,11 +914,8 @@ impl FuzzyRegex {
         // Fast path for character class plus: [a-z]+, \d+, \w+
         // Also handles lazy versions: [a-z]+?, \d+?, \w+?
         // Use direct byte scanning instead of DFA/NFA
-        // Only use when similarity_threshold >= 1.0 (exact matching)
-        if self.config.similarity_threshold >= 1.0
-            && self.is_char_class_plus
-            && self.literals.is_empty()
-        {
+        // Only use when default_edits == 0 (exact matching, no fuzzy)
+        if self.config.default_edits == 0 && self.is_char_class_plus && self.literals.is_empty() {
             let class_type = self.nfa.get_char_class_type();
             return Self::find_char_class_plus_first(text, self.has_lazy, class_type);
         }

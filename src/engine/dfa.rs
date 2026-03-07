@@ -230,7 +230,7 @@ impl Dfa {
         bridge: Option<&FuzzyBridge>,
         case_insensitive: bool,
         multi_line: bool,
-        similarity_threshold: f32,
+        _similarity_threshold: f32,
     ) -> Option<Self> {
         // Check if NFA is DFA-compatible
         if !Self::is_dfa_compatible(nfa, bridge) {
@@ -269,9 +269,9 @@ impl Dfa {
             .iter()
             .any(|s| matches!(s, State::FuzzyLiteral { .. }));
 
-        // Only use fast paths when similarity_threshold >= 1.0 (exact matching)
+        // Only use fast paths when default_edits == 0 (exact matching)
         // For fuzzy matching, we need the full DFA to compute similarity
-        let use_fast_paths = similarity_threshold >= 1.0;
+        let use_fast_paths = exact_mode;
 
         // Detect fast path patterns - only for named character classes (\d, \w, \s)
         // Only enable when there's NO fuzzy bridge at all AND exact matching
