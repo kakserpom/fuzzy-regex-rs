@@ -237,6 +237,7 @@ impl FuzzyRegex {
                     fuzzy_bridge.as_ref(),
                     config.case_insensitive,
                     config.multi_line,
+                    config.similarity_threshold,
                 )
                 .map(RefCell::new)
             } else {
@@ -913,11 +914,14 @@ impl FuzzyRegex {
         // Fast path for character class plus: [a-z]+, \d+, \w+
         // Also handles lazy versions: [a-z]+?, \d+?, \w+?
         // Use direct byte scanning instead of DFA/NFA
-        // NOTE: Disabled for now - doesn't work correctly with fuzzy matching
-        // if self.is_char_class_plus && self.literals.is_empty() {
-        //     let class_type = self.nfa.get_char_class_type();
-        //     return Self::find_char_class_plus_first(text, self.has_lazy, class_type);
-        // }
+        // Only use when similarity_threshold >= 1.0 (exact matching)
+        if self.config.similarity_threshold >= 1.0
+            && self.is_char_class_plus
+            && self.literals.is_empty()
+        {
+            let class_type = self.nfa.get_char_class_type();
+            return Self::find_char_class_plus_first(text, self.has_lazy, class_type);
+        }
 
         // Fast path for character class + literal: \w+@, \d+\., \S+pattern
         // Also handles patterns with multiple literals like email: [\w.+-]+@[\w.-]+\.\w+

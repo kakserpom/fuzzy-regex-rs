@@ -223,12 +223,14 @@ impl Dfa {
     /// If `bridge` is provided, exact `FuzzyLiteral` states will be expanded.
     /// If `case_insensitive` is true, matching will be case-insensitive.
     /// If `multi_line` is true, ^ and $ will match at line boundaries.
+    /// If `similarity_threshold` >= 1.0, fast paths can be used (exact matching).
     #[must_use]
     pub fn from_nfa(
         nfa: &Nfa,
         bridge: Option<&FuzzyBridge>,
         case_insensitive: bool,
         multi_line: bool,
+        similarity_threshold: f32,
     ) -> Option<Self> {
         // Check if NFA is DFA-compatible
         if !Self::is_dfa_compatible(nfa, bridge) {
@@ -267,10 +269,19 @@ impl Dfa {
             .iter()
             .any(|s| matches!(s, State::FuzzyLiteral { .. }));
 
+        // Only use fast paths when similarity_threshold >= 1.0 (exact matching)
+        // For fuzzy matching, we need the full DFA to compute similarity
+        let use_fast_paths = similarity_threshold >= 1.0;
+
         // Detect fast path patterns - only for named character classes (\d, \w, \s)
-        // Only enable when there's NO fuzzy bridge at all
-        let fast_path_char_class_type = nfa.get_char_class_type();
-        let fast_path_char_class_plus = bridge.is_none()
+        // Only enable when there's NO fuzzy bridge at all AND exact matching
+        let fast_path_char_class_type = if use_fast_paths {
+            nfa.get_char_class_type()
+        } else {
+            None
+        };
+        let fast_path_char_class_plus = use_fast_paths
+            && bridge.is_none()
             && fast_path_char_class_type.is_some()
             && nfa.is_char_class_plus()
             && nfa.states.len() <= 10;
@@ -278,11 +289,12 @@ impl Dfa {
         // Detect simple literal patterns for fast path
         // Only enable when there's NO fuzzy bridge at all (bridge.is_none())
         // When bridge is Some, even if all literals are exact, we still want to use the full DFA
-        let fast_path_literal = if bridge.is_none() && exact_mode && !fast_path_char_class_plus {
-            Self::detect_simple_literal(nfa)
-        } else {
-            None
-        };
+        let fast_path_literal =
+            if use_fast_paths && bridge.is_none() && exact_mode && !fast_path_char_class_plus {
+                Self::detect_simple_literal(nfa)
+            } else {
+                None
+            };
 
         let mut dfa = Dfa {
             nfa: nfa.clone(),
@@ -1184,18 +1196,17 @@ impl Dfa {
 
     /// Find the first match in the text.
     pub fn find(&mut self, text: &str) -> Option<DfaMatch> {
-        // Fast paths disabled for now - need to handle fuzzy matching properly
-        /*
         // Fast path: character class plus patterns (\d+, \w+, \s+, [a-z]+)
+        // Only use when similarity_threshold >= 1.0 (exact matching)
         if self.fast_path_char_class_plus {
             return self.find_char_class_plus(text);
         }
 
         // Fast path: simple literal pattern
+        // Only use when similarity_threshold >= 1.0 (exact matching)
         if let Some(ref literal) = self.fast_path_literal {
             return self.find_literal(text, literal);
         }
-        */
 
         if self.anchored_start && !self.multi_line {
             // Only try at position 0 (non-multiline anchored pattern)
@@ -1875,7 +1886,7 @@ mod tests {
             FuzzyBridge::new(&literals, None, None, case_insensitive)
         };
 
-        Dfa::from_nfa(&nfa, bridge.as_ref(), case_insensitive, multi_line)
+        Dfa::from_nfa(&nfa, bridge.as_ref(), case_insensitive, multi_line, 1.0)
     }
 
     #[test]
