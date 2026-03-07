@@ -86,6 +86,7 @@ pub struct FuzzyRegex {
     is_pure_greedy_dotstar: bool,
     is_greedy_prefix_with_suffix: bool,
     is_word_bounded_class: bool,
+    #[allow(dead_code)]
     is_char_class_plus: bool,
     is_class_plus_with_literal: bool,
     is_digit_sequence_with_separator: bool,
@@ -912,10 +913,11 @@ impl FuzzyRegex {
         // Fast path for character class plus: [a-z]+, \d+, \w+
         // Also handles lazy versions: [a-z]+?, \d+?, \w+?
         // Use direct byte scanning instead of DFA/NFA
-        if self.is_char_class_plus && self.literals.is_empty() {
-            let class_type = self.nfa.get_char_class_type();
-            return Self::find_char_class_plus_first(text, self.has_lazy, class_type);
-        }
+        // NOTE: Disabled for now - doesn't work correctly with fuzzy matching
+        // if self.is_char_class_plus && self.literals.is_empty() {
+        //     let class_type = self.nfa.get_char_class_type();
+        //     return Self::find_char_class_plus_first(text, self.has_lazy, class_type);
+        // }
 
         // Fast path for character class + literal: \w+@, \d+\., \S+pattern
         // Also handles patterns with multiple literals like email: [\w.+-]+@[\w.-]+\.\w+
@@ -976,6 +978,8 @@ impl FuzzyRegex {
             }
         }
 
+        // NOTE: Disabled for now - doesn't work correctly with fuzzy matching
+        /*
         // Check for lazy char class plus: \d+?, \w+?, [a-z]+?
         // The is_char_class_plus only detects greedy, so we check manually for lazy
         // Note: must check named/ranges only (not chars) to avoid matching literal characters
@@ -996,6 +1000,7 @@ impl FuzzyRegex {
                 );
             }
         }
+        */
 
         // Word list fast path: handle \L<name> patterns
         if !self.word_lists.is_empty() {
@@ -2011,6 +2016,7 @@ impl FuzzyRegex {
     /// Fast path for character class plus: [a-z]+, \d+, \w+
     /// If `lazy` is true, matches minimum length (for +?)
     /// `class_type` is the type of character class: "digit", "word", "whitespace", or None for custom ranges
+    #[allow(dead_code)]
     fn find_char_class_plus_first<'a>(
         text: &'a str,
         lazy: bool,

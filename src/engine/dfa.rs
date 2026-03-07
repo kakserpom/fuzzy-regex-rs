@@ -195,6 +195,15 @@ pub struct Dfa {
     prefilter: DfaPrefilter,
     /// Exact mode: if true, skip fuzzy literal handling (optimization for exact patterns)
     exact_mode: bool,
+    /// Fast path: character class plus pattern (e.g., \d+, \w+, \s+)
+    #[allow(dead_code)]
+    fast_path_char_class_plus: bool,
+    /// Fast path: type of character class for `char_class_plus` pattern
+    #[allow(dead_code)]
+    fast_path_char_class_type: Option<&'static str>,
+    /// Fast path: literal for simple literal matching
+    #[allow(dead_code)]
+    fast_path_literal: Option<String>,
 }
 
 /// Result of a DFA match.
@@ -258,6 +267,23 @@ impl Dfa {
             .iter()
             .any(|s| matches!(s, State::FuzzyLiteral { .. }));
 
+        // Detect fast path patterns - only for named character classes (\d, \w, \s)
+        // Only enable when there's NO fuzzy bridge at all
+        let fast_path_char_class_type = nfa.get_char_class_type();
+        let fast_path_char_class_plus = bridge.is_none()
+            && fast_path_char_class_type.is_some()
+            && nfa.is_char_class_plus()
+            && nfa.states.len() <= 10;
+
+        // Detect simple literal patterns for fast path
+        // Only enable when there's NO fuzzy bridge at all (bridge.is_none())
+        // When bridge is Some, even if all literals are exact, we still want to use the full DFA
+        let fast_path_literal = if bridge.is_none() && exact_mode && !fast_path_char_class_plus {
+            Self::detect_simple_literal(nfa)
+        } else {
+            None
+        };
+
         let mut dfa = Dfa {
             nfa: nfa.clone(),
             literal_texts,
@@ -271,6 +297,9 @@ impl Dfa {
             char_class_bitmaps,
             prefilter,
             exact_mode,
+            fast_path_char_class_plus,
+            fast_path_char_class_type,
+            fast_path_literal,
         };
 
         // Compute epsilon closure of start state
@@ -537,6 +566,53 @@ impl Dfa {
 
         // For multi-byte prefix, use Literal
         DfaPrefilter::Literal(prefix)
+    }
+
+    /// Detect if NFA is a simple literal pattern (no special constructs).
+    /// Returns the literal string if detected, None otherwise.
+    fn detect_simple_literal(nfa: &Nfa) -> Option<String> {
+        // Must be simple NFA (few states)
+        if nfa.states.len() > 20 {
+            return None;
+        }
+
+        // Must have only Char and Accept states (no splits, no anchors, etc.)
+        let mut literal = String::new();
+        let mut current = nfa.start;
+        let mut visited = vec![false; nfa.states.len()];
+
+        while current < nfa.states.len() && !visited[current] {
+            visited[current] = true;
+
+            match &nfa.states[current] {
+                State::Accept => {
+                    // Reached accept state - return the literal
+                    return Some(literal);
+                }
+                State::Char { class, next } => {
+                    // Must have NO named character classes (like \d, \w, \s)
+                    // Must have exactly one char in the class (not a range)
+                    if !class.named.is_empty() || class.ranges.len() != 1 || class.chars.len() != 1
+                    {
+                        return None;
+                    }
+                    let (start, end) = class.ranges[0];
+                    if start != end || !start.is_ascii() {
+                        return None;
+                    }
+                    literal.push(start);
+                    current = *next;
+                }
+                State::Epsilon { targets } if targets.len() == 1 => {
+                    current = targets[0];
+                }
+                _ => {
+                    return None;
+                }
+            }
+        }
+
+        None
     }
 
     /// Check if NFA starts with a character class that has many possible first bytes.
@@ -1108,6 +1184,19 @@ impl Dfa {
 
     /// Find the first match in the text.
     pub fn find(&mut self, text: &str) -> Option<DfaMatch> {
+        // Fast paths disabled for now - need to handle fuzzy matching properly
+        /*
+        // Fast path: character class plus patterns (\d+, \w+, \s+, [a-z]+)
+        if self.fast_path_char_class_plus {
+            return self.find_char_class_plus(text);
+        }
+
+        // Fast path: simple literal pattern
+        if let Some(ref literal) = self.fast_path_literal {
+            return self.find_literal(text, literal);
+        }
+        */
+
         if self.anchored_start && !self.multi_line {
             // Only try at position 0 (non-multiline anchored pattern)
             self.find_at(text, 0)
@@ -1118,6 +1207,72 @@ impl Dfa {
             // Use prefilter to find candidate positions
             self.find_with_prefilter(text)
         }
+    }
+
+    /// Fast path for character classd+, \w plus patterns: \+, \s+, [a-z]+
+    #[allow(dead_code)]
+    fn find_char_class_plus(&self, text: &str) -> Option<DfaMatch> {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+
+        if len == 0 {
+            return None;
+        }
+
+        let matches_class = match self.fast_path_char_class_type {
+            Some("digit") => |b: u8| b.is_ascii_digit(),
+            Some("word") => |b: u8| b.is_ascii_alphanumeric() || b == b'_',
+            Some("whitespace") => |b: u8| b.is_ascii_whitespace(),
+            Some("not_digit") => |b: u8| !b.is_ascii_digit(),
+            Some("not_word") => |b: u8| !b.is_ascii_alphanumeric() && b != b'_',
+            Some("not_whitespace") => |b: u8| !b.is_ascii_whitespace(),
+            _ => |b: u8| b.is_ascii_alphanumeric() || b == b'_',
+        };
+
+        let mut i = 0;
+        while i < len {
+            let start = i;
+            while i < len && matches_class(bytes[i]) {
+                i += 1;
+            }
+
+            if i > start {
+                return Some(DfaMatch { start, end: i });
+            }
+            i += 1;
+        }
+
+        None
+    }
+
+    /// Fast path for simple literal patterns
+    #[allow(dead_code, clippy::unused_self)]
+    fn find_literal(&self, text: &str, literal: &str) -> Option<DfaMatch> {
+        if literal.is_empty() {
+            return Some(DfaMatch { start: 0, end: 0 });
+        }
+
+        let bytes = text.as_bytes();
+        let lit_bytes = literal.as_bytes();
+        let first_byte = lit_bytes[0];
+
+        let mut i = 0;
+        while i <= bytes.len() - lit_bytes.len() {
+            if let Some(pos) = memchr(first_byte, &bytes[i..]) {
+                let start = i + pos;
+                if &bytes[start..start + lit_bytes.len()] == lit_bytes {
+                    return Some(DfaMatch {
+                        start,
+                        end: start + lit_bytes.len(),
+                    });
+                }
+                i = start + 1;
+            } else {
+                break;
+            }
+        }
+
+        None
     }
 
     /// Find match for start-anchored patterns in multiline mode.
