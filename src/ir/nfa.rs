@@ -643,13 +643,13 @@ impl Nfa {
     /// This is used to distinguish \d+ from \d{3}
     fn has_char_class_loop(&self) -> bool {
         for (state_id, state) in self.states.iter().enumerate() {
-            if let State::Split { branches, greedy } = state {
-                if *greedy && branches.len() >= 2 {
-                    // Check if any branch loops back to an earlier state in the path
-                    for &branch in branches {
-                        if self.can_reach_state(branch, state_id) {
-                            return true;
-                        }
+            if let State::Split { branches, greedy } = state
+                && *greedy && branches.len() >= 2
+            {
+                // Check if any branch loops back to an earlier state in the path
+                for &branch in branches {
+                    if self.can_reach_state(branch, state_id) {
+                        return true;
                     }
                 }
             }
@@ -657,7 +657,7 @@ impl Nfa {
         false
     }
 
-    /// Check if from state_id we can reach target_state_id (simple DFS)
+    /// Check if from `state_id` we can reach `target_state_id` (simple DFS)
     fn can_reach_state(&self, state_id: StateId, target_state_id: StateId) -> bool {
         let mut stack = vec![state_id];
         let mut visited = vec![false; self.states.len()];
@@ -675,11 +675,10 @@ impl Nfa {
             match &self.states[s] {
                 State::Epsilon { targets } => stack.extend(targets),
                 State::Split { branches, .. } => stack.extend(branches),
-                State::Char { next, .. } => stack.push(*next),
-                State::CaptureStart { next, .. } | State::CaptureEnd { next, .. } => {
-                    stack.push(*next)
-                }
-                State::Anchor { next, .. } => stack.push(*next),
+                State::Char { next, .. }
+                | State::CaptureStart { next, .. }
+                | State::CaptureEnd { next, .. }
+                | State::Anchor { next, .. } => stack.push(*next),
                 _ => {}
             }
         }
@@ -784,7 +783,6 @@ impl Nfa {
                 State::Epsilon { targets } => stack.extend(targets),
                 State::Char { next, .. } => stack.push(*next),
                 State::Split { branches, .. } => stack.extend(branches),
-                State::Accept => {}
                 _ => {}
             }
         }
@@ -794,7 +792,7 @@ impl Nfa {
 
     /// Get the type of character class used in a char class plus pattern.
     /// Returns Some("digit"), Some("word"), Some("whitespace"), or None for custom ranges.
-    /// Also handles negated classes: \D returns "not_digit", \W returns "not_word", \S returns "not_whitespace"
+    /// Also handles negated classes: \D returns `not_digit`, \W returns `not_word`, \S returns `not_whitespace`
     #[must_use]
     pub fn get_char_class_type(&self) -> Option<&'static str> {
         for state in &self.states {
