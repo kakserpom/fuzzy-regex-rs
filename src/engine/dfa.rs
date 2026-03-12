@@ -1083,18 +1083,19 @@ impl Dfa {
                     // For non-ASCII, use the original class matcher which handles
                     // full Unicode character comparison correctly.
                     let matches = if ch.is_ascii() {
-                        if let Some(bitmap) = &self.char_class_bitmaps[nfa_state] {
-                            if CASE_INSENSITIVE {
-                                bitmap.contains(ch as u8)
-                                    || bitmap.contains((ch as u8).to_ascii_lowercase())
-                                    || bitmap.contains((ch as u8).to_ascii_uppercase())
+                        if nfa_state < self.char_class_bitmaps.len() {
+                            if let Some(bitmap) = &self.char_class_bitmaps[nfa_state] {
+                                let result = bitmap.contains(ch as u8);
+                                if CASE_INSENSITIVE {
+                                    result
+                                        || bitmap.contains((ch as u8).to_ascii_lowercase())
+                                        || bitmap.contains((ch as u8).to_ascii_uppercase())
+                                } else {
+                                    result
+                                }
                             } else {
-                                bitmap.contains(ch as u8)
+                                class.matches(ch)
                             }
-                        } else if CASE_INSENSITIVE {
-                            class.matches(ch)
-                                || class.matches(ch.to_ascii_lowercase())
-                                || class.matches(ch.to_ascii_uppercase())
                         } else {
                             class.matches(ch)
                         }
@@ -1495,7 +1496,7 @@ impl Dfa {
                     state_id = next_id;
                     pos += ch.len_utf8();
 
-                    // Check if this is an accepting state
+                    // Check if this is an accepting state - track it for longest match
                     if self.states[state_id as usize].is_accept {
                         // For end-anchored patterns, check end anchor constraint
                         let end_anchor_ok = Self::is_end_anchor_satisfied::<MULTI_LINE>(bytes, pos);
@@ -1632,9 +1633,68 @@ impl Dfa {
         self.states.len()
     }
 
+    /// Find the shortest match and return its end position.
+    /// Returns None if no match is found.
+    /// This is useful for prefix matching where you want to know how far the match extends.
+    pub fn first_end(&mut self, text: &str) -> Option<usize> {
+        self.find(text).map(|m| m.end)
+    }
+
+    /// Find the longest match starting at position 0 and return its end position.
+    /// Returns None if no match is found.
+    /// This is useful for full-string matching where you want the longest match.
+    pub fn longest_end(&mut self, text: &str) -> Option<usize> {
+        let bytes = text.as_bytes();
+        let mut state_id = self.start;
+        let mut last_accept: Option<usize> = None;
+
+        // Check if start position satisfies start anchor
+        let start_anchor_ok = Self::is_start_anchor_satisfied::<false>(bytes, 0);
+
+        // Check if start state is accepting
+        if self.states[state_id as usize].is_accept
+            && (!self.anchored_start || start_anchor_ok)
+            && !self.anchored_end
+        {
+            last_accept = Some(0);
+        }
+
+        // Run the DFA
+        let mut pos = 0;
+        for ch in text.chars() {
+            let next = self.next_state(state_id, ch);
+
+            match next {
+                Some(next_id) => {
+                    state_id = next_id;
+                    pos += ch.len_utf8();
+
+                    // Track accepting states for longest match
+                    if self.states[state_id as usize].is_accept {
+                        let end_anchor_ok = Self::is_end_anchor_satisfied::<false>(bytes, pos);
+                        if !self.states[state_id as usize].has_end_anchor || end_anchor_ok {
+                            last_accept = Some(pos);
+                        }
+                    }
+                }
+                None => break,
+            }
+        }
+
+        // Check end anchor at final position
+        if self.states[state_id as usize].has_end_anchor {
+            let end_anchor_ok = Self::is_end_anchor_satisfied::<false>(bytes, pos);
+            if end_anchor_ok && self.states[state_id as usize].is_accept {
+                last_accept = Some(pos);
+            }
+        }
+
+        last_accept
+    }
+
     /// Complete the DFA by computing all reachable transitions.
-    /// This is required before minimization.
-    fn complete(&mut self) {
+    /// This is required before minimization or for full DFA precompilation.
+    pub fn complete(&mut self) {
         // Compute all transitions for all states by iterating over ASCII chars
         // We iterate until no new states are discovered
         let mut i = 0;

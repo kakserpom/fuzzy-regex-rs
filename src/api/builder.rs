@@ -100,6 +100,17 @@ pub struct RegexConfig {
     pub greedy_first: bool,
     /// Custom handlers registered for this regex.
     pub handlers: HandlerMap,
+    /// Initial DFA capacity - number of states to pre-allocate.
+    pub initial_dfa_capacity: usize,
+    /// Minimize DFA after construction - reduces memory and improves cache efficiency.
+    /// Adds some build-time cost but can significantly improve matching performance
+    /// for patterns that generate many DFA states.
+    pub minimize_dfa: bool,
+    /// Full DFA compilation - pre-build all reachable states at construction time.
+    /// When false (default), uses lazy DFA that builds states on-demand.
+    /// When true, builds all states upfront for faster matching and thread-safety
+    /// (no runtime locking needed). May increase build time and memory for complex patterns.
+    pub full_dfa: bool,
 }
 
 impl Clone for RegexConfig {
@@ -119,7 +130,10 @@ impl Clone for RegexConfig {
             partial: self.partial,
             timeout: self.timeout,
             greedy_first: self.greedy_first,
-            handlers: self.handlers.clone(), // Note: handlers can't really be cloned properly, this is a shallow copy
+            handlers: self.handlers.clone(),
+            initial_dfa_capacity: self.initial_dfa_capacity,
+            minimize_dfa: self.minimize_dfa,
+            full_dfa: self.full_dfa,
         }
     }
 }
@@ -145,6 +159,9 @@ impl Default for RegexConfig {
             timeout: None,
             greedy_first: false,
             handlers: FxHashMap::default(),
+            initial_dfa_capacity: 2048,
+            minimize_dfa: false,
+            full_dfa: false,
         }
     }
 }
@@ -360,6 +377,63 @@ impl FuzzyRegexBuilder {
         handler: impl Fn(&str, usize) -> HandlerResult + Send + Sync + 'static,
     ) -> Self {
         self.config.handlers.insert(name.into(), Arc::new(handler));
+        self
+    }
+
+    /// Set initial DFA capacity (number of states to pre-allocate).
+    ///
+    /// Default: 2048
+    ///
+    /// Higher values use more memory but reduce reallocations during DFA construction.
+    #[must_use]
+    pub fn initial_dfa_capacity(mut self, capacity: usize) -> Self {
+        self.config.initial_dfa_capacity = capacity;
+        self
+    }
+
+    /// Enable DFA minimization after construction.
+    ///
+    /// This reduces the number of DFA states using Hopcroft's algorithm,
+    /// which can significantly improve matching performance and reduce memory
+    /// at the cost of some additional build time.
+    ///
+    /// Default: false
+    ///
+    /// # Example
+    /// ```
+    /// let re = FuzzyRegexBuilder::new(r"(foo|foofoo|fooo)+")
+    ///     .minimize_dfa(true)
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    #[must_use]
+    pub fn minimize_dfa(mut self, enabled: bool) -> Self {
+        self.config.minimize_dfa = enabled;
+        self
+    }
+
+    /// Enable full DFA compilation.
+    ///
+    /// When enabled, all reachable DFA states are pre-built at construction time
+    /// instead of lazily during matching. This provides:
+    /// - Faster matching (no runtime state construction)
+    /// - Thread-safety without locking (no mutable state needed during matching)
+    /// - Better cache locality
+    ///
+    /// However, it may increase build time and memory usage for complex patterns.
+    ///
+    /// Default: false (uses lazy DFA)
+    ///
+    /// # Example
+    /// ```
+    /// let re = FuzzyRegexBuilder::new(r"\d{3}-\d{4}")
+    ///     .full_dfa(true)
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    #[must_use]
+    pub fn full_dfa(mut self, enabled: bool) -> Self {
+        self.config.full_dfa = enabled;
         self
     }
 

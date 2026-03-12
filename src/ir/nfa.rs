@@ -618,8 +618,9 @@ impl Nfa {
     }
 
     /// Check if this NFA is a character class plus: [charset]+
-    /// Returns Some(()) if detected for fast path.
-    /// Returns false for complex NFAs to avoid stack overflow.
+    /// Returns true only for patterns like \d+, \w+, [a-z]+ (one or more)
+    /// Returns false for exact repetitions like \d{3}, \d{5} (exactly N)
+    /// Returns false for optional patterns like \d?, \d* (zero or one, zero or more)
     #[must_use]
     pub fn is_char_class_plus(&self) -> bool {
         // Skip for complex NFAs to avoid stack overflow
@@ -627,8 +628,62 @@ impl Nfa {
             return false;
         }
 
+        // First, check if there's a Split with a loop in the NFA
+        // This is necessary to distinguish \d+ (which has a loop) from \d{3} (which doesn't)
+        let has_split_with_loop = self.has_char_class_loop();
+        if !has_split_with_loop {
+            return false;
+        }
+
         let mut visited = vec![false; self.states.len()];
         self.check_char_class_plus(self.start, &mut visited, false, 0)
+    }
+
+    /// Check if the NFA has a Split state that creates a loop (for + quantifier)
+    /// This is used to distinguish \d+ from \d{3}
+    fn has_char_class_loop(&self) -> bool {
+        for (state_id, state) in self.states.iter().enumerate() {
+            if let State::Split { branches, greedy } = state {
+                if *greedy && branches.len() >= 2 {
+                    // Check if any branch loops back to an earlier state in the path
+                    for &branch in branches {
+                        if self.can_reach_state(branch, state_id) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Check if from state_id we can reach target_state_id (simple DFS)
+    fn can_reach_state(&self, state_id: StateId, target_state_id: StateId) -> bool {
+        let mut stack = vec![state_id];
+        let mut visited = vec![false; self.states.len()];
+
+        while let Some(s) = stack.pop() {
+            if s >= self.states.len() || visited[s] {
+                continue;
+            }
+            visited[s] = true;
+
+            if s == target_state_id {
+                return true;
+            }
+
+            match &self.states[s] {
+                State::Epsilon { targets } => stack.extend(targets),
+                State::Split { branches, .. } => stack.extend(branches),
+                State::Char { next, .. } => stack.push(*next),
+                State::CaptureStart { next, .. } | State::CaptureEnd { next, .. } => {
+                    stack.push(*next)
+                }
+                State::Anchor { next, .. } => stack.push(*next),
+                _ => {}
+            }
+        }
+        false
     }
 
     fn check_char_class_plus(
@@ -665,10 +720,31 @@ impl Nfa {
                 self.check_char_class_plus(*next, visited, true, depth + 1)
             }
             State::Split { branches, greedy } => {
+                // For \d+ (one or more), there's a Split with a loop back to the Char state.
+                // For \d{3} (exactly 3), there are NO Splits - just chained Char states.
+                // For \d* (zero or more), there's a Split with a loop.
+                //
+                // We must check that there's an ACTUAL LOOP (Split with branch leading back to a visited state).
+                // Without a loop, it's an exact repetition like {3} which should NOT use this fast path.
+
                 if *greedy && branches.len() >= 2 {
-                    branches
-                        .iter()
-                        .any(|&b| self.check_char_class_plus(b, visited, seen_class, depth + 1))
+                    // Check if any branch creates a loop (leads back to a state we've already visited)
+                    // For \d+, one branch leads back to the Char state which we visited earlier in this path
+                    let has_loop = branches.iter().any(|&b| {
+                        // Check if this branch can reach a state we've already visited in the current path
+                        // (not counting states marked as visited in the outer array)
+                        self.can_reach_visited_state(b, state_id, visited)
+                    });
+
+                    // Only return true if there's an actual loop (for + or *)
+                    // If no loop, it's a bounded quantifier like {3} which has different semantics
+                    if has_loop {
+                        branches
+                            .iter()
+                            .any(|&b| self.check_char_class_plus(b, visited, seen_class, depth + 1))
+                    } else {
+                        false
+                    }
                 } else {
                     false
                 }
@@ -677,22 +753,73 @@ impl Nfa {
         }
     }
 
+    /// Check if a state can reach any state that's already been visited in the current traversal.
+    /// This is used to detect loops in the NFA (for + and * quantifiers).
+    fn can_reach_visited_state(
+        &self,
+        state_id: StateId,
+        current: StateId,
+        visited: &[bool],
+    ) -> bool {
+        // Don't include current state in the check (that would be immediate self-loop which isn't the case here)
+        let mut stack = vec![state_id];
+        let mut local_visited = vec![false; self.states.len()];
+
+        while let Some(s) = stack.pop() {
+            if s >= self.states.len() {
+                continue;
+            }
+            if local_visited[s] {
+                continue;
+            }
+            local_visited[s] = true;
+
+            // Check if this state is already visited in the outer traversal (indicating a loop back)
+            if visited[s] && s != current {
+                return true;
+            }
+
+            // Continue exploring
+            match &self.states[s] {
+                State::Epsilon { targets } => stack.extend(targets),
+                State::Char { next, .. } => stack.push(*next),
+                State::Split { branches, .. } => stack.extend(branches),
+                State::Accept => {}
+                _ => {}
+            }
+        }
+
+        false
+    }
+
     /// Get the type of character class used in a char class plus pattern.
     /// Returns Some("digit"), Some("word"), Some("whitespace"), or None for custom ranges.
+    /// Also handles negated classes: \D returns "not_digit", \W returns "not_word", \S returns "not_whitespace"
     #[must_use]
     pub fn get_char_class_type(&self) -> Option<&'static str> {
         for state in &self.states {
             if let State::Char { class, .. } = state {
                 for named in &class.named {
-                    match named {
-                        crate::parser::NamedClass::Digit => return Some("digit"),
-                        crate::parser::NamedClass::Word => return Some("word"),
-                        crate::parser::NamedClass::Whitespace => return Some("whitespace"),
+                    let base_type = match named {
+                        crate::parser::NamedClass::Digit => "digit",
+                        crate::parser::NamedClass::Word => "word",
+                        crate::parser::NamedClass::Whitespace => "whitespace",
                         crate::parser::NamedClass::NotDigit => return Some("not_digit"),
                         crate::parser::NamedClass::NotWord => return Some("not_word"),
                         crate::parser::NamedClass::NotWhitespace => return Some("not_whitespace"),
-                        _ => {}
-                    }
+                        _ => continue,
+                    };
+                    // If the class is negated (e.g., \D = [^\d]), return the "not_" version
+                    return Some(if class.negated {
+                        match base_type {
+                            "digit" => "not_digit",
+                            "word" => "not_word",
+                            "whitespace" => "not_whitespace",
+                            _ => base_type,
+                        }
+                    } else {
+                        base_type
+                    });
                 }
             }
         }

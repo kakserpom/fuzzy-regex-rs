@@ -87,6 +87,10 @@ impl AsciiClassBitmap {
     #[must_use]
     pub fn from_hir_class(class: &HirClass) -> Self {
         let mut bitmap = AsciiClassBitmap::empty();
+
+        // For negated character classes with positive named classes (e.g., \D = [^\d]),
+        // the named class (Digit) is added as-is to the bitmap, and we rely on
+        // bitmap.negated to flip it. This works correctly.
         bitmap.negated = class.negated;
 
         // Add single characters

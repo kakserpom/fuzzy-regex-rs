@@ -230,7 +230,7 @@ impl FuzzyRegex {
         // (lazy needs NFA for prefer_shortest)
         let has_reset_match_start = nfa.has_reset_match_start();
         let has_lookahead = nfa.has_lookahead();
-        let dfa =
+        let mut dfa =
             if !has_lazy && !has_reset_match_start && !has_lookahead && !nfa.has_word_boundary() {
                 Dfa::from_nfa(
                     &nfa,
@@ -239,10 +239,25 @@ impl FuzzyRegex {
                     config.multi_line,
                     config.similarity_threshold,
                 )
-                .map(RefCell::new)
             } else {
                 None
             };
+
+        // Apply DFA optimizations based on config
+        if let Some(ref mut dfa) = dfa {
+            // Minimize DFA if requested
+            if config.minimize_dfa {
+                dfa.minimize();
+            }
+
+            // Full DFA compilation if requested
+            if config.full_dfa {
+                dfa.complete();
+            }
+        }
+
+        // Wrap in RefCell for interior mutability
+        let dfa = dfa.map(RefCell::new);
 
         // Precompute strategy flags at compile time
         let is_simple_fuzzy_only = nfa.is_simple_fuzzy_only();
@@ -1101,6 +1116,53 @@ impl FuzzyRegex {
         }
 
         Ok(result)
+    }
+
+    /// Find the shortest match and return its end position.
+    /// Returns None if no match is found.
+    ///
+    /// This is more efficient than `find()` when you only need the end position,
+    /// as it avoids allocating the full Match object.
+    ///
+    /// Example:
+    /// ```
+    /// let re = FuzzyRegex::new(r"\d+").unwrap();
+    /// assert_eq!(re.first_end("abc123def"), Some(6)); // "123" ends at position 6
+    /// ```
+    pub fn first_end(&self, text: &str) -> Option<usize> {
+        // Use DFA if available (fast path for exact matching)
+        if let Some(ref dfa_cell) = self.dfa {
+            return dfa_cell.borrow_mut().first_end(text);
+        }
+
+        // Fallback to find() and extract end position
+        self.find(text).map(|m| m.end())
+    }
+
+    /// Find the longest match starting at position 0 and return its end position.
+    /// Returns None if no match is found.
+    ///
+    /// This is useful for full-string matching where you want the longest match
+    /// rather than the first match (standard regex behavior).
+    ///
+    /// Example:
+    /// ```
+    /// let re = FuzzyRegex::new(r"a+").unwrap();
+    /// assert_eq!(re.longest_end("aaa"), Some(3)); // All three 'a's matched
+    /// ```
+    pub fn longest_end(&self, text: &str) -> Option<usize> {
+        // Use DFA if available
+        if let Some(ref dfa_cell) = self.dfa {
+            return dfa_cell.borrow_mut().longest_end(text);
+        }
+
+        // Fallback: find all and get longest
+        let mut longest = None;
+        for m in self.find_iter(text) {
+            let end = m.end();
+            longest = Some(end);
+        }
+        longest
     }
 
     /// Find first match against word lists (for \L<name> patterns).
@@ -3214,6 +3276,29 @@ mod tests {
     }
 
     #[test]
+    fn test_first_end() {
+        let re = FuzzyRegex::new(r"\d+").unwrap();
+        assert_eq!(re.first_end("abc123def"), Some(6));
+        assert_eq!(re.first_end("abc"), None);
+
+        let re = FuzzyRegex::new("hello").unwrap();
+        // "say hello world" - "hello" starts at position 4, ends at 9
+        assert_eq!(re.first_end("say hello world"), Some(9));
+    }
+
+    #[test]
+    fn test_longest_end() {
+        let re = FuzzyRegex::new(r"a+").unwrap();
+        assert_eq!(re.longest_end("aaa"), Some(3));
+
+        let re = FuzzyRegex::new(r"\d+").unwrap();
+        assert_eq!(re.longest_end("123abc456def"), Some(3)); // First match wins for non-anchored
+
+        let re = FuzzyRegex::new(r"^a+$").unwrap();
+        assert_eq!(re.longest_end("aaa"), Some(3)); // Anchored - longest from start
+    }
+
+    #[test]
     fn test_char_class() {
         let re = FuzzyRegex::new("[a-z]+").unwrap();
         assert!(re.is_match("hello"));
@@ -5323,10 +5408,6 @@ mod tests {
         let m = re.find(text).unwrap();
         assert_eq!(m.start(), 0);
         assert_eq!(m.end(), 0);
-
-        // Debug: see what find_rev returns
-        let m = re.find_rev(text);
-        eprintln!("find_rev result: {:?}", m.map(|m| (m.start(), m.end())));
 
         // For empty pattern, find_rev should match at end (after last char)
         // since it returns the "last" match, and an empty match exists at every position
