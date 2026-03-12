@@ -401,6 +401,7 @@ impl FuzzyRegexBuilder {
     ///
     /// # Example
     /// ```
+    /// use fuzzy_regex::FuzzyRegexBuilder;
     /// let re = FuzzyRegexBuilder::new(r"(foo|foofoo|fooo)+")
     ///     .minimize_dfa(true)
     ///     .build()
@@ -426,6 +427,7 @@ impl FuzzyRegexBuilder {
     ///
     /// # Example
     /// ```
+    /// use fuzzy_regex::FuzzyRegexBuilder;
     /// let re = FuzzyRegexBuilder::new(r"\d{3}-\d{4}")
     ///     .full_dfa(true)
     ///     .build()

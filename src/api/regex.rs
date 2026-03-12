@@ -1124,8 +1124,9 @@ impl FuzzyRegex {
     /// This is more efficient than `find()` when you only need the end position,
     /// as it avoids allocating the full Match object.
     ///
-    /// Example:
+    /// # Example
     /// ```
+    /// use fuzzy_regex::FuzzyRegex;
     /// let re = FuzzyRegex::new(r"\d+").unwrap();
     /// assert_eq!(re.first_end("abc123def"), Some(6)); // "123" ends at position 6
     /// ```
@@ -1145,8 +1146,9 @@ impl FuzzyRegex {
     /// This is useful for full-string matching where you want the longest match
     /// rather than the first match (standard regex behavior).
     ///
-    /// Example:
+    /// # Example
     /// ```
+    /// use fuzzy_regex::FuzzyRegex;
     /// let re = FuzzyRegex::new(r"a+").unwrap();
     /// assert_eq!(re.longest_end("aaa"), Some(3)); // All three 'a's matched
     /// ```
