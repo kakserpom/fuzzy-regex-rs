@@ -644,7 +644,8 @@ impl Nfa {
     fn has_char_class_loop(&self) -> bool {
         for (state_id, state) in self.states.iter().enumerate() {
             if let State::Split { branches, greedy } = state
-                && *greedy && branches.len() >= 2
+                && *greedy
+                && branches.len() >= 2
             {
                 // Check if any branch loops back to an earlier state in the path
                 for &branch in branches {
