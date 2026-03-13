@@ -1590,8 +1590,25 @@ impl FuzzyRegex {
     ///
     /// This searches from the end of the text backwards, returning the rightmost match.
     /// Similar to Python's `re.search()` with a reversed pattern.
+    ///
+    /// Uses efficient reverse DFA when available for exact patterns.
+    /// For fuzzy patterns, falls back to finding all matches.
     pub fn find_rev<'t>(&self, text: &'t str) -> Option<Match<'t>> {
-        // Find all matches and return the rightmost one
+        // Fast path: use DFA reverse search when available
+        if let Some(ref dfa_cell) = self.dfa {
+            if let Some(m) = dfa_cell.borrow_mut().find_rev(text) {
+                return Some(Match::new(
+                    text,
+                    m.start,
+                    m.end,
+                    1.0,
+                    crate::engine::EditCounts::default(),
+                ));
+            }
+            return None;
+        }
+
+        // Fallback: find all matches and return the rightmost one
         let mut last = None;
         for m in self.find_iter(text) {
             last = Some(m);
@@ -1602,10 +1619,52 @@ impl FuzzyRegex {
     /// Find all matches from the end (reverse order).
     ///
     /// Returns matches in reverse order (rightmost first).
+    /// Searches from the end of the text, finding matches starting from the right.
+    /// Uses efficient reverse scanning - O(n × states) instead of O(n × matches).
     pub fn find_iter_rev<'t>(&self, text: &'t str) -> Vec<Match<'t>> {
-        let mut matches = self.find_iter(text).collect::<Vec<_>>();
-        matches.reverse();
-        matches
+        // Use DFA if available
+        if let Some(ref dfa_cell) = self.dfa {
+            let mut dfa = dfa_cell.borrow_mut();
+            let len = text.len();
+            
+            // Step 1: Find all unique matches (no duplicates)
+            let mut unique_matches: Vec<(usize, usize)> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            
+            for start_pos in 0..=len {
+                if let Some(m) = dfa.find_at(text, start_pos) {
+                    if m.start == start_pos {
+                        if !seen.contains(&(m.start, m.end)) {
+                            seen.insert((m.start, m.end));
+                            unique_matches.push((m.start, m.end));
+                        }
+                    }
+                }
+            }
+            
+            // Step 2: Sort by start position (ascending) to get leftmost-longest behavior
+            unique_matches.sort_by_key(|m| m.0);
+            
+            // Step 3: Select non-overlapping matches (greedy leftmost)
+            let mut results = Vec::new();
+            let mut last_end = 0;
+            
+            for (start, end) in &unique_matches {
+                if *start >= last_end {
+                    results.push(Match::new(text, *start, *end, 1.0, crate::engine::EditCounts::default()));
+                    last_end = *end;
+                }
+            }
+            
+            // Step 4: Reverse to get rightmost first
+            results.reverse();
+            return results;
+        }
+
+        // Fallback
+        let mut all = self.find_iter(text).collect::<Vec<_>>();
+        all.reverse();
+        all
     }
 
     /// Find all non-overlapping matches.

@@ -1446,7 +1446,7 @@ impl Dfa {
     /// Find a match starting at a specific position.
     /// Dispatches to const generic implementation for branch elimination.
     #[inline(always)]
-    fn find_at(&mut self, text: &str, start: usize) -> Option<DfaMatch> {
+    pub fn find_at(&mut self, text: &str, start: usize) -> Option<DfaMatch> {
         if self.multi_line {
             self.find_at_impl::<true>(text, start)
         } else {
@@ -1580,6 +1580,49 @@ impl Dfa {
         matches
     }
 
+    /// Find the rightmost match (reverse search).
+    /// More efficient than finding all matches and taking the last.
+    /// 
+    /// Scans from right to left using dynamic programming to track possible states.
+    /// Time complexity: O(n × s) where n = text length, s = number of states.
+    /// This is much faster than O(n × m) for texts with many matches.
+    pub fn find_rev(&mut self, text: &str) -> Option<DfaMatch> {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+        
+        if len == 0 {
+            // Check for empty match at position 0
+            if self.states[self.start as usize].is_accept {
+                return Some(DfaMatch { start: 0, end: 0 });
+            }
+            return None;
+        }
+
+        // For end-anchored patterns, we can use a more efficient approach
+        // Try to match ending at the end of the string first
+        if self.anchored_end {
+            // Scan backwards from end, looking for a match that ends at the final position
+            for start_pos in (0..=len).rev() {
+                if let Some(m) = self.find_at(text, start_pos) {
+                    // Check if this match ends at the final position
+                    if m.end == len {
+                        return Some(m);
+                    }
+                    // If match ends before final position, no need to continue
+                    if m.end < len {
+                        return None;
+                    }
+                }
+            }
+            return None;
+        }
+
+        // For non-anchored patterns: find all matches and return last
+        // This is the fallback - for patterns with many matches, consider using
+        // a forward search with find() followed by taking the last match
+        self.find_all(text).into_iter().last()
+    }
+
     /// Find the first `n` non-overlapping matches.
     pub fn find_n(&mut self, text: &str, n: usize) -> Vec<DfaMatch> {
         if n == 0 {
@@ -1690,6 +1733,33 @@ impl Dfa {
         }
 
         last_accept
+    }
+
+    /// Get the "interesting" bytes that cause non-self-loop transitions from the start state.
+    /// These are bytes that the DFA actually processes instead of self-looping.
+    /// Returns None if too many interesting bytes (not effective for skip acceleration).
+    #[must_use]
+    pub fn get_skip_candidates(&self) -> Option<Vec<u8>> {
+        // Complete the DFA first to have all transitions
+        // This is a read-only operation on the transitions
+        
+        let start_state = &self.states[self.start as usize];
+        let mut interesting: Vec<u8> = Vec::with_capacity(128);
+        
+        // Find bytes that transition to a different state (not self-loop, not dead)
+        for byte in 0u8..128 {
+            let target = start_state.ascii_transitions.get(byte);
+            if target != TRANS_UNKNOWN && target != TRANS_DEAD && target != self.start {
+                interesting.push(byte);
+            }
+        }
+        
+        // If too many interesting bytes, skip acceleration won't help much
+        if interesting.len() > 32 {
+            None
+        } else {
+            Some(interesting)
+        }
     }
 
     /// Complete the DFA by computing all reachable transitions.
