@@ -1696,7 +1696,7 @@ fn test_cost_constraint_rejects_over_limit() {
     let re = FuzzyRegex::new("(?:hi){c<=1}").unwrap();
     assert!(re.is_match("hi")); // exact, cost=0
     assert!(re.is_match("ho")); // 1 sub, cost=1
-    // "xy" would need 2 substitutions (cost=2), should NOT match
+                                // "xy" would need 2 substitutions (cost=2), should NOT match
     assert!(!re.is_match("xy"));
 }
 
@@ -1800,6 +1800,78 @@ fn test_find_rev_iter() {
     // Should find matches in reverse order (rightmost first)
     // Due to fuzzy matching, results may vary
     assert_eq!(matches.len(), 3);
+}
+
+#[test]
+fn test_find_rev_empty_text() {
+    let re = FuzzyRegex::new("hello").unwrap();
+    assert!(re.find_rev("").is_none());
+}
+
+#[test]
+fn test_find_rev_empty_pattern() {
+    let re = FuzzyRegex::new("").unwrap();
+    let m = re.find_rev("hello").unwrap();
+    assert_eq!(m.start(), 5);
+    assert_eq!(m.end(), 5);
+}
+
+#[test]
+fn test_find_rev_match_at_start() {
+    let re = FuzzyRegex::new("hello").unwrap();
+    let m = re.find_rev("hello world").unwrap();
+    assert_eq!(m.start(), 0);
+    assert_eq!(m.end(), 5);
+}
+
+#[test]
+fn test_find_rev_match_at_end() {
+    let re = FuzzyRegex::new("world").unwrap();
+    let m = re.find_rev("hello world").unwrap();
+    assert_eq!(m.start(), 6);
+    assert_eq!(m.end(), 11);
+}
+
+#[test]
+fn test_find_rev_match_at_end_of_long_text() {
+    let re = FuzzyRegex::new("the").unwrap();
+    let text = "the quick brown fox jumps over the lazy dog. the end the".repeat(100);
+    let m = re.find_rev(&text).unwrap();
+    assert_eq!(m.as_str(), "the");
+    assert_eq!(m.end(), text.len());
+}
+
+#[test]
+fn test_find_rev_multiple_matches() {
+    let re = FuzzyRegex::new("a").unwrap();
+    let m = re.find_rev("aaa").unwrap();
+    assert_eq!(m.start(), 2);
+    assert_eq!(m.end(), 3);
+}
+
+#[test]
+fn test_find_rev_unicode() {
+    let re = FuzzyRegex::new("привет").unwrap();
+    let m = re.find_rev("hello привет world привет").unwrap();
+    assert_eq!(m.as_str(), "привет");
+    assert_eq!(m.start(), 25);
+    assert_eq!(m.end(), 37);
+}
+
+#[test]
+fn test_find_rev_very_long_text() {
+    let re = FuzzyRegex::new("needle").unwrap();
+    let text = "hay ".repeat(100_000) + "needle";
+    let m = re.find_rev(&text).unwrap();
+    assert_eq!(m.as_str(), "needle");
+}
+
+#[test]
+fn test_find_rev_two_char_literal() {
+    let re = FuzzyRegex::new("ab").unwrap();
+    let m = re.find_rev("xx ab yy ab zz ab").unwrap();
+    assert_eq!(m.start(), 15);
+    assert_eq!(m.end(), 17);
 }
 
 // =============================================================================
@@ -2123,7 +2195,7 @@ fn test_cost_exclusive_bound() {
     assert!(re.is_match("ab")); // cost=0
     assert!(re.is_match("ac")); // 1 sub, cost=1
     assert!(re.is_match("cb")); // 1 sub, cost=1
-    // 2 subs would be cost=2, which is < 3
+                                // 2 subs would be cost=2, which is < 3
 }
 
 #[test]

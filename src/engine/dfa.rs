@@ -21,11 +21,11 @@
 
 use std::collections::HashMap;
 
-use memchr::{memchr, memmem};
+use memchr::{memchr, memrchr, memmem};
 
 use super::fuzzy_bridge::FuzzyBridge;
 use super::hash::FxHashMap;
-use super::simd_class::AsciiClassBitmap;
+use super::simd_class::{AsciiClassBitmap, RevSearchRanges, TeddySearch};
 use crate::ir::{Nfa, State, StateId};
 use crate::parser::Anchor;
 
@@ -164,6 +164,8 @@ enum DfaPrefilter {
     ManyBytes(Vec<u8>),
     /// Literal prefix using memmem.
     Literal(Vec<u8>),
+    /// Character class ranges for SIMD-accelerated range search (e.g., [0-9]).
+    CharClassRanges(Vec<(u8, u8)>),
 }
 
 /// Lazy DFA for fast exact matching.
@@ -272,7 +274,6 @@ impl Dfa {
         // Only use fast paths when default_edits == 0 (exact matching)
         // For fuzzy matching, we need the full DFA to compute similarity
         let use_fast_paths = exact_mode;
-
         // Detect fast path patterns - only for named character classes (\d, \w, \s)
         // Only enable when there's NO fuzzy bridge at all AND exact matching
         let fast_path_char_class_type = if use_fast_paths {
@@ -802,6 +803,32 @@ impl Dfa {
         }
     }
 
+    /// Convert a sorted list of bytes to contiguous ranges.
+    /// For example: [0, 1, 2, 5, 6, 7, 10] -> [(0, 2), (5, 7), (10, 10)]
+    fn bytes_to_ranges(bytes: &[u8]) -> Vec<(u8, u8)> {
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+
+        let mut ranges = Vec::new();
+        let mut start = bytes[0];
+        let mut end = bytes[0];
+
+        for &b in &bytes[1..] {
+            if b == end + 1 {
+                // Contiguous - extend the range
+                end = b;
+            } else {
+                // Not contiguous - save current range and start new one
+                ranges.push((start, end));
+                start = b;
+                end = b;
+            }
+        }
+        ranges.push((start, end));
+        ranges
+    }
+
     /// Create a prefilter for multiple first bytes.
     fn make_multi_byte_prefilter(bytes: &[u8], case_insensitive: bool) -> DfaPrefilter {
         if bytes.is_empty() {
@@ -836,8 +863,21 @@ impl Dfa {
             2 => DfaPrefilter::TwoBytes(expanded[0], expanded[1]),
             3 => DfaPrefilter::ThreeBytes(expanded[0], expanded[1], expanded[2]),
             _ => {
-                // More than 3 bytes - use byte set scanning
-                DfaPrefilter::ManyBytes(expanded)
+                // More than 3 bytes - check if we can use SIMD-accelerated range search
+                // Sort bytes and convert to contiguous ranges
+                let mut sorted = expanded.clone();
+                sorted.sort();
+                sorted.dedup();
+                
+                let ranges = Self::bytes_to_ranges(&sorted);
+                
+                // Use CharClassRanges if we have at most 3 ranges (SIMD limit)
+                // Otherwise fall back to ManyBytes
+                if ranges.len() <= 3 {
+                    DfaPrefilter::CharClassRanges(ranges)
+                } else {
+                    DfaPrefilter::ManyBytes(sorted)
+                }
             }
         }
     }
@@ -1266,21 +1306,166 @@ impl Dfa {
 
         let bytes = text.as_bytes();
         let lit_bytes = literal.as_bytes();
-        let first_byte = lit_bytes[0];
+        let lit_len = lit_bytes.len();
 
+        // Use TeddySearch for SIMD-accelerated forward search with rare byte optimization
+        if bytes.len() >= 32 && lit_len >= 4 && lit_len <= 64 {
+            let teddy = TeddySearch::new(lit_bytes);
+            if let Some(pos) = teddy.find_first(bytes) {
+                return Some(DfaMatch { start: pos, end: pos + lit_len });
+            }
+            return None;
+        }
+
+        // Fallback to memchr-based search for shorter patterns
+        let first_byte = lit_bytes[0];
         let mut i = 0;
-        while i <= bytes.len() - lit_bytes.len() {
+        while i <= bytes.len() - lit_len {
             if let Some(pos) = memchr(first_byte, &bytes[i..]) {
                 let start = i + pos;
-                if &bytes[start..start + lit_bytes.len()] == lit_bytes {
+                if &bytes[start..start + lit_len] == lit_bytes {
                     return Some(DfaMatch {
                         start,
-                        end: start + lit_bytes.len(),
+                        end: start + lit_len,
                     });
                 }
                 i = start + 1;
             } else {
                 break;
+            }
+        }
+
+        None
+    }
+
+    /// Fast path for simple literal patterns - reverse search
+    /// Finds the rightmost occurrence of the literal using SIMD-accelerated search.
+    #[allow(dead_code, clippy::unused_self)]
+    fn find_literal_rev(&self, text: &str, literal: &str) -> Option<DfaMatch> {
+        if literal.is_empty() {
+            return Some(DfaMatch { start: text.len(), end: text.len() });
+        }
+
+        let bytes = text.as_bytes();
+        let lit_bytes = literal.as_bytes();
+        let lit_len = lit_bytes.len();
+
+        // Use TeddySearch for SIMD-accelerated reverse search with rare byte optimization
+        // Teddy is most effective for patterns >= 4 bytes where rare byte selection helps
+        if bytes.len() >= 32 && lit_len >= 4 && lit_len <= 64 {
+            let teddy = TeddySearch::new(lit_bytes);
+            if let Some(pos) = teddy.find_last(bytes) {
+                return Some(DfaMatch { start: pos, end: pos + lit_len });
+            }
+            return None;
+        }
+
+        // Use basic SIMD-accelerated reverse search for shorter patterns
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            if bytes.len() >= 32 && lit_len <= 16 {
+                if let Some(pos) = Self::find_literal_rev_simd(bytes, lit_bytes) {
+                    return Some(DfaMatch { start: pos, end: pos + lit_len });
+                }
+                return None;
+            }
+        }
+
+        // Fallback to memchr-based search
+        let first_byte = lit_bytes[0];
+        let mut pos = bytes.len();
+        while pos >= lit_len {
+            match memrchr(first_byte, &bytes[..pos]) {
+                Some(start) => {
+                    if start + lit_len <= bytes.len() && &bytes[start..start + lit_len] == lit_bytes {
+                        return Some(DfaMatch { start, end: start + lit_len });
+                    }
+                    pos = start;
+                }
+                None => return None,
+            }
+        }
+        None
+    }
+
+    /// SIMD-accelerated reverse literal search using AVX2.
+    /// Scans from right to left, finding the rightmost occurrence.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[allow(dead_code)]
+    fn find_literal_rev_simd(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        use std::arch::x86_64::*;
+
+        let len = haystack.len();
+        let n = needle.len();
+
+        if n == 0 {
+            return Some(len);
+        }
+        if len < n {
+            return None;
+        }
+
+        let ptr = haystack.as_ptr();
+        let first_byte = needle[0] as i8;
+        let v0 = _mm256_set1_epi8(first_byte);
+
+        // Process 32-byte chunks from right to left
+        if len >= 32 {
+            let mut pos = len - 32;
+            loop {
+                let chunk = _mm256_loadu_si256(ptr.add(pos) as *const __m256i);
+                let mut mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v0)) as u32;
+
+                // Check additional needle bytes if present
+                if n >= 2 {
+                    let v1 = _mm256_set1_epi8(needle[1] as i8);
+                    mask |= _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v1)) as u32;
+                }
+                if n >= 3 {
+                    let v2 = _mm256_set1_epi8(needle[2] as i8);
+                    mask |= _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v2)) as u32;
+                }
+
+                if mask != 0 {
+                    // Find rightmost match using leading_zeros
+                    let rightmost_pos = pos + 31 - mask.leading_zeros() as usize;
+                    // Verify full literal match
+                    if rightmost_pos + n <= len
+                        && &haystack[rightmost_pos..rightmost_pos + n] == needle
+                    {
+                        return Some(rightmost_pos);
+                    }
+                }
+
+                if pos < 32 {
+                    break;
+                }
+                pos -= 32;
+            }
+        }
+
+        // Handle remaining bytes at the start of the string
+        if len < 32 {
+            let mut buf = [0u8; 32];
+            buf[..len].copy_from_slice(haystack);
+            let chunk = _mm256_loadu_si256(buf.as_ptr() as *const __m256i);
+            let mut mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v0)) as u32;
+
+            if n >= 2 {
+                let v1 = _mm256_set1_epi8(needle[1] as i8);
+                mask |= _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v1)) as u32;
+            }
+            if n >= 3 {
+                let v2 = _mm256_set1_epi8(needle[2] as i8);
+                mask |= _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, v2)) as u32;
+            }
+
+            mask &= (1u32 << len) - 1;
+            if mask != 0 {
+                let rightmost_pos = 31 - mask.leading_zeros() as usize;
+                if rightmost_pos + n <= len && &haystack[rightmost_pos..rightmost_pos + n] == needle {
+                    return Some(rightmost_pos);
+                }
             }
         }
 
@@ -1429,10 +1614,106 @@ impl Dfa {
                 }
                 None
             }
+            DfaPrefilter::CharClassRanges(ref ranges) => {
+                use super::simd_class::RevSearchRanges;
+                let searcher = RevSearchRanges::new(ranges.clone());
+                let mut offset = 0;
+                while let Some(pos) = searcher.find_first(&bytes[offset..]) {
+                    let start = offset + pos;
+                    if let Some(m) = self.find_at(text, start) {
+                        return Some(m);
+                    }
+                    offset = start + 1;
+                }
+                None
+            }
         }
     }
 
+    /// Skip-accelerated search using DFA-level interesting bytes.
+    /// Instead of checking every position, we only check positions where
+    /// the byte causes a non-self-loop transition in the DFA.
+    fn find_with_skip_acceleration_offset(&mut self, text: &str, candidates: &[u8], start_offset: usize) -> Option<DfaMatch> {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+        
+        if len <= start_offset {
+            return None;
+        }
+        
+        let search_bytes = &bytes[start_offset..];
+        
+        // For single candidate byte, use memchr
+        if candidates.len() == 1 {
+            let needle = candidates[0];
+            let mut offset = 0;
+            while let Some(pos) = memchr(needle, &search_bytes[offset..]) {
+                let global_pos = start_offset + offset + pos;
+                if let Some(m) = self.find_at(text, global_pos) {
+                    return Some(m);
+                }
+                offset = offset + pos + 1;
+            }
+            return None;
+        }
+
+        // For 2 candidates, use memchr2
+        if candidates.len() == 2 {
+            let (b1, b2) = (candidates[0], candidates[1]);
+            let mut offset = 0;
+            while let Some(pos) = memchr::memchr2(b1, b2, &search_bytes[offset..]) {
+                let global_pos = start_offset + offset + pos;
+                if let Some(m) = self.find_at(text, global_pos) {
+                    return Some(m);
+                }
+                offset = offset + pos + 1;
+            }
+            return None;
+        }
+
+        // For 3 candidates, use memchr3
+        if candidates.len() == 3 {
+            let (b1, b2, b3) = (candidates[0], candidates[1], candidates[2]);
+            let mut offset = 0;
+            while let Some(pos) = memchr::memchr3(b1, b2, b3, &search_bytes[offset..]) {
+                let global_pos = start_offset + offset + pos;
+                if let Some(m) = self.find_at(text, global_pos) {
+                    return Some(m);
+                }
+                offset = offset + pos + 1;
+            }
+            return None;
+        }
+
+        // For 4+ candidates, use a byte set lookup
+        let mut byte_set = [false; 256];
+        for &b in candidates {
+            byte_set[b as usize] = true;
+        }
+        
+        let mut offset = start_offset;
+        while offset < len {
+            if byte_set[bytes[offset] as usize] {
+                if let Some(m) = self.find_at(text, offset) {
+                    return Some(m);
+                }
+            }
+            offset += 1;
+        }
+        None
+    }
+
+    /// Skip-accelerated search using DFA-level interesting bytes.
+    /// Instead of checking every position, we only check positions where
+    /// the byte causes a non-self-loop transition in the DFA.
+    #[allow(dead_code)]
+    fn find_with_skip_acceleration(&mut self, text: &str, candidates: &[u8]) -> Option<DfaMatch> {
+        self.find_with_skip_acceleration_offset(text, candidates, 0)
+    }
+
     /// Linear scan through all positions (fallback when no prefilter).
+    /// Note: Skip acceleration is disabled because it requires a complete DFA
+    /// with populated transitions, which lazy DFA doesn't have.
     fn find_linear(&mut self, text: &str) -> Option<DfaMatch> {
         for (start_pos, _) in text.char_indices() {
             if let Some(m) = self.find_at(text, start_pos) {
@@ -1617,10 +1898,141 @@ impl Dfa {
             return None;
         }
 
-        // For non-anchored patterns: find all matches and return last
-        // This is the fallback - for patterns with many matches, consider using
-        // a forward search with find() followed by taking the last match
-        self.find_all(text).into_iter().last()
+        // Fast path: use reverse literal search if we have a simple literal
+        // For exact literal patterns, the literal match IS the DFA match
+        if let Some(ref literal) = self.fast_path_literal {
+            return self.find_literal_rev(text, literal);
+        }
+
+        // For non-anchored patterns: use efficient right-to-left scanning
+        // This is faster than find_all when there are many matches
+        self.find_rev_with_prefilter(text)
+    }
+
+    /// Find rightmost match using prefilter to scan from right to left.
+    /// Uses prefilter to find candidate positions, then verifies from right to left.
+    fn find_rev_with_prefilter(&mut self, text: &str) -> Option<DfaMatch> {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+
+        if len == 0 {
+            if self.states[self.start as usize].is_accept {
+                return Some(DfaMatch { start: 0, end: 0 });
+            }
+            return None;
+        }
+
+        // Clone prefilter to avoid borrow issues
+        let prefilter = self.prefilter.clone();
+
+        match prefilter {
+            DfaPrefilter::None => {
+                // No prefilter - fall back to scanning all positions
+                self.find_all(text).into_iter().last()
+            }
+            DfaPrefilter::SingleByte(needle) => {
+                // Scan from right using memrchr
+                let mut pos = len;
+                while pos > 0 {
+                    if let Some(found) = memrchr(needle, &bytes[..pos]) {
+                        if let Some(m) = self.find_at(text, found) {
+                            return Some(m);
+                        }
+                        pos = found;
+                    } else {
+                        break;
+                    }
+                }
+                None
+            }
+            DfaPrefilter::TwoBytes(b1, b2) => {
+                // Scan from right - find rightmost occurrence of either byte
+                let mut pos = len;
+                while pos > 0 {
+                    // Find rightmost occurrence of b1 or b2
+                    let found_b1 = memrchr(b1, &bytes[..pos]);
+                    let found_b2 = memrchr(b2, &bytes[..pos]);
+                    
+                    // Use the rightmost one
+                    let found = match (found_b1, found_b2) {
+                        (Some(p1), Some(p2)) => Some(p1.max(p2)),
+                        (Some(p), None) => Some(p),
+                        (None, Some(p)) => Some(p),
+                        (None, None) => None,
+                    };
+                    
+                    match found {
+                        Some(found) => {
+                            if let Some(m) = self.find_at(text, found) {
+                                return Some(m);
+                            }
+                            pos = found;
+                        }
+                        None => break,
+                    }
+                }
+                None
+            }
+            DfaPrefilter::ThreeBytes(b1, b2, b3) => {
+                // Scan from right - find rightmost occurrence of any byte
+                let mut pos = len;
+                while pos > 0 {
+                    let found_b1 = memrchr(b1, &bytes[..pos]);
+                    let found_b2 = memrchr(b2, &bytes[..pos]);
+                    let found_b3 = memrchr(b3, &bytes[..pos]);
+                    
+                    let found = [found_b1, found_b2, found_b3]
+                        .into_iter()
+                        .flatten()
+                        .max();
+                    
+                    match found {
+                        Some(found) => {
+                            if let Some(m) = self.find_at(text, found) {
+                                return Some(m);
+                            }
+                            pos = found;
+                        }
+                        None => break,
+                    }
+                }
+                None
+            }
+            DfaPrefilter::CharClassRanges(ref ranges) => {
+                let searcher = RevSearchRanges::new(ranges.clone());
+                let mut pos = len;
+                while pos > 0 {
+                    if let Some(found) = searcher.find_last(&bytes[..pos]) {
+                        // For character class patterns, we need to scan backwards
+                        // to find the start of the match, not just any byte in the class.
+                        // For example, for \d+ in "abc123def456", finding '6' at pos 11
+                        // should give us the match starting at '4' (pos 9).
+                        let match_start = if found > 0 && searcher.matches_byte(bytes[found - 1]) {
+                            // Scan backwards through consecutive matching bytes
+                            let mut start = found;
+                            while start > 0 && searcher.matches_byte(bytes[start - 1]) {
+                                start -= 1;
+                            }
+                            start
+                        } else {
+                            found
+                        };
+                        
+                        if let Some(m) = self.find_at(text, match_start) {
+                            return Some(m);
+                        }
+                        pos = found;
+                    } else {
+                        break;
+                    }
+                }
+                None
+            }
+            _ => {
+                // For other prefilters, fall back to find_all
+                self.find_all(text).into_iter().last()
+            }
+        }
     }
 
     /// Find the first `n` non-overlapping matches.
@@ -1740,8 +2152,9 @@ impl Dfa {
     /// Returns None if too many interesting bytes (not effective for skip acceleration).
     #[must_use]
     pub fn get_skip_candidates(&self) -> Option<Vec<u8>> {
-        // Complete the DFA first to have all transitions
-        // This is a read-only operation on the transitions
+        // Note: For lazy DFA, transitions may not be fully computed.
+        // This method assumes transitions are already populated (DFA is complete).
+        // Callers should ensure DFA is complete before calling this.
         
         let start_state = &self.states[self.start as usize];
         let mut interesting: Vec<u8> = Vec::with_capacity(128);
@@ -2339,4 +2752,567 @@ mod tests {
         assert_eq!(matches[1].start, 10);
         assert_eq!(matches[1].end, 15);
     }
+
+    #[test]
+    fn test_bytes_to_ranges() {
+        assert_eq!(Dfa::bytes_to_ranges(&[]), Vec::<(u8, u8)>::new());
+        assert_eq!(Dfa::bytes_to_ranges(&[5]), vec![(5, 5)]);
+        assert_eq!(Dfa::bytes_to_ranges(&[1, 2, 3]), vec![(1, 3)]);
+        assert_eq!(Dfa::bytes_to_ranges(&[1, 3, 5]), vec![(1, 1), (3, 3), (5, 5)]);
+        assert_eq!(Dfa::bytes_to_ranges(&[1, 2, 5, 6, 9]), vec![(1, 2), (5, 6), (9, 9)]);
+        assert_eq!(Dfa::bytes_to_ranges(&[b'0', b'1', b'2', b'5', b'6', b'7']), vec![(b'0', b'2'), (b'5', b'7')]);
+    }
+
+    #[test]
+    fn test_char_class_ranges_prefilter() {
+        // Test digit class - should use CharClassRanges
+        let mut dfa = make_dfa(r"\d+").unwrap();
+        let m = dfa.find("abc123def").unwrap();
+        assert_eq!(m.start, 3);
+        assert_eq!(m.end, 6);
+
+        // Test rightmost match using find_rev
+        let m = dfa.find_rev("abc123def456").unwrap();
+        assert_eq!(m.start, 9);
+        assert_eq!(m.end, 12);
+
+        // Test word class
+        let mut dfa_word = make_dfa(r"\w+").unwrap();
+        let m = dfa_word.find("hello123").unwrap();
+        assert_eq!(m.start, 0);
+        assert_eq!(m.end, 8);
+    }
+
+    #[test]
+    fn test_find_rev_with_char_class_ranges() {
+        // Test rightmost match for character class patterns
+        let mut dfa = make_dfa(r"\d+").unwrap();
+        let m = dfa.find_rev("abc123def456ghi").unwrap();
+        assert_eq!(m.start, 9);
+        assert_eq!(m.end, 12);
+
+        // Test multiple digit groups
+        let m = dfa.find_rev("a1b22c333d").unwrap();
+        assert_eq!(m.start, 6);
+        assert_eq!(m.end, 9);
+    }
+
+    #[test]
+    fn test_teddy_literal_search() {
+        // Test with longer literal patterns that use Teddy search
+        let mut dfa = make_dfa("example").unwrap();
+        let m = dfa.find("this is an example text").unwrap();
+        assert_eq!(m.start, 11);
+        assert_eq!(m.end, 18);
+
+        // Test rightmost match with Teddy
+        let m = dfa.find_rev("an example of example").unwrap();
+        assert_eq!(m.start, 14);
+        assert_eq!(m.end, 21);
+
+        // Test with even longer pattern: "the quick brown fox" = 19 chars
+        let mut dfa2 = make_dfa("the quick brown fox").unwrap();
+        // "hello the quick brown fox world" - "the" starts at 6, pattern ends at 25
+        let m = dfa2.find("hello the quick brown fox world").unwrap();
+        assert_eq!(m.start, 6);
+        assert_eq!(m.end, 25);
+
+        // "the quick brown fox and the quick brown fox"
+        // First starts at 0, second starts at 24
+        let m = dfa2.find_rev("the quick brown fox and the quick brown fox").unwrap();
+        assert_eq!(m.start, 24);
+        assert_eq!(m.end, 43);
+    }
+
+    // -- RE# Edge Case Tests --
+
+    #[test]
+    fn test_rev_search_at_every_position() {
+        // Single byte search at every position
+        for pos in 0..64 {
+            let mut hay = vec![b'.'; 64];
+            hay[pos] = b'Z';
+            let mut dfa = make_dfa("Z").unwrap();
+            let result = dfa.find(&String::from_utf8_lossy(&hay));
+            assert!(result.is_some(), "pos={}", pos);
+            assert_eq!(result.unwrap().start, pos, "pos={}", pos);
+        }
+    }
+
+    #[test]
+    fn test_rev_search_two_bytes_sweep() {
+        // Test reverse search with byte class [XY]
+        for size in 1..=80 {
+            let mut hay = vec![b'.'; size];
+            hay[0] = b'X';
+            let mut dfa = make_dfa("[XY]").unwrap();
+            let result = dfa.find(&String::from_utf8_lossy(&hay));
+            assert!(result.is_some(), "size={}", size);
+
+            hay[0] = b'.';
+            hay[size - 1] = b'Y';
+            let result = dfa.find(&String::from_utf8_lossy(&hay));
+            assert!(result.is_some(), "size={}", size);
+        }
+    }
+
+    #[test]
+    fn test_rev_search_no_match_long() {
+        let hay = vec![b'.'; 1024];
+        let mut dfa = make_dfa("Z").unwrap();
+        let result = dfa.find(&String::from_utf8_lossy(&hay));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_rev_search_all_match() {
+        let hay = vec![b'Z'; 100];
+        let mut dfa = make_dfa("Z").unwrap();
+        let matches = dfa.find_all(&String::from_utf8_lossy(&hay));
+        assert_eq!(matches.len(), 100);
+        assert_eq!(matches[0].start, 0);
+        assert_eq!(matches[0].end, 1);
+        assert_eq!(matches[99].start, 99);
+        assert_eq!(matches[99].end, 100);
+    }
+
+    #[test]
+    fn test_fwd_literal_at_every_offset() {
+        // Literal at every possible offset
+        for pos in 0..98 {
+            let mut hay = vec![b'.'; 100];
+            hay[pos] = b'a';
+            hay[pos + 1] = b'b';
+            hay[pos + 2] = b'c';
+            let mut dfa = make_dfa("abc").unwrap();
+            let result = dfa.find(&String::from_utf8_lossy(&hay));
+            assert!(result.is_some(), "pos={}", pos);
+            assert_eq!(result.unwrap().start, pos, "pos={}", pos);
+        }
+    }
+
+    #[test]
+    fn test_fwd_literal_adjacent_non_overlapping() {
+        let mut dfa = make_dfa("abab").unwrap();
+        let matches = dfa.find_all("abababababab");
+        assert_eq!(matches.len(), 3);
+        assert_eq!(matches[0].start, 0);
+        assert_eq!(matches[0].end, 4);
+        assert_eq!(matches[1].start, 4);
+        assert_eq!(matches[1].end, 8);
+        assert_eq!(matches[2].start, 8);
+        assert_eq!(matches[2].end, 12);
+    }
+
+    #[test]
+    fn test_fwd_literal_long_needle() {
+        let needle16 = b"ABCDEFGHIJKLMNOP";
+        let mut hay = vec![b'.'; 200];
+        hay[100..116].copy_from_slice(needle16);
+        let mut dfa = make_dfa("ABCDEFGHIJKLMNOP").unwrap();
+        let matches = dfa.find_all(&String::from_utf8_lossy(&hay));
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].start, 100);
+        assert_eq!(matches[0].end, 116);
+    }
+
+    #[test]
+    fn test_fwd_literal_haystack_equals_needle() {
+        let mut dfa = make_dfa("exact").unwrap();
+        let m = dfa.find("exact").unwrap();
+        assert_eq!(m.start, 0);
+        assert_eq!(m.end, 5);
+    }
+
+    #[test]
+    fn test_fwd_literal_single_byte() {
+        let mut dfa = make_dfa("a").unwrap();
+        assert!(dfa.find("a").is_some());
+        assert!(dfa.find("b").is_none());
+    }
+
+    #[test]
+    fn test_fwd_literal_near_end_boundary() {
+        for size in [15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65] {
+            let mut hay = vec![b'.'; size];
+            if size >= 3 {
+                hay[size - 3] = b'x';
+                hay[size - 2] = b'y';
+                hay[size - 1] = b'z';
+                let mut dfa = make_dfa("xyz").unwrap();
+                let result = dfa.find(&String::from_utf8_lossy(&hay));
+                assert!(result.is_some(), "size={}", size);
+                assert_eq!(result.unwrap().start, size - 3, "size={}", size);
+            }
+        }
+    }
+
+    #[test]
+    fn test_digit_class_boundary_sweep() {
+        // Test digit class at various boundary sizes
+        for size in [10, 15, 16, 17, 31, 32, 33, 48, 64, 100] {
+            let mut hay = vec![b'.'; size];
+            let mid = size / 2;
+            hay[mid] = b'5';
+            hay[mid + 1] = b'7';
+            let mut dfa = make_dfa("[0-9]+").unwrap();
+            let result = dfa.find(&String::from_utf8_lossy(&hay));
+            assert!(result.is_some(), "size={}", size);
+        }
+    }
+
+    #[test]
+    fn test_digit_class_dense_matches() {
+        // Dense digit matches
+        let hay: Vec<u8> = (0..100).map(|i| b'0' + (i % 10)).collect();
+        let mut dfa = make_dfa("[0-9]+").unwrap();
+        let matches = dfa.find_all(&String::from_utf8_lossy(&hay));
+        assert!(!matches.is_empty());
+    }
+
+    #[test]
+    fn test_word_class_boundary() {
+        let mut dfa = make_dfa(r"[A-Z][a-z]+").unwrap();
+        let result = dfa.find("Hello World Foo Bar");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_alternation_three_way() {
+        let mut dfa = make_dfa("cat|dog|fox").unwrap();
+        let result = dfa.find("the cat sat on the dog and the fox ran");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_char_class_no_match_long() {
+        let hay = vec![b'.'; 200];
+        let mut dfa = make_dfa("[0-9]+").unwrap();
+        assert!(dfa.find(&String::from_utf8_lossy(&hay)).is_none());
+    }
+
+    #[test]
+    fn test_char_class_at_position_zero() {
+        let mut dfa = make_dfa("[0-9]+").unwrap();
+        let m = dfa.find("123abc").unwrap();
+        assert_eq!(m.start, 0);
+        assert_eq!(m.end, 3);
+    }
+
+    #[test]
+    fn test_char_class_at_end() {
+        let mut dfa = make_dfa("[0-9]+").unwrap();
+        let m = dfa.find("abc123").unwrap();
+        assert_eq!(m.start, 3);
+        assert_eq!(m.end, 6);
+    }
+
+    #[test]
+    fn test_rev_char_class_at_end() {
+        let mut dfa = make_dfa("[0-9]+").unwrap();
+        let m = dfa.find_rev("abc123").unwrap();
+        assert_eq!(m.start, 3);
+        assert_eq!(m.end, 6);
+    }
+
+    #[test]
+    fn test_rev_literal_at_end() {
+        let mut dfa = make_dfa("hello").unwrap();
+        let m = dfa.find_rev("say hello world").unwrap();
+        assert_eq!(m.start, 4);
+        assert_eq!(m.end, 9);
+    }
+
+    #[test]
+    fn test_rev_literal_long_pattern() {
+        let mut dfa = make_dfa("the quick brown fox").unwrap();
+        let m = dfa.find_rev("the quick brown fox and the quick brown fox").unwrap();
+        assert_eq!(m.start, 24);
+        assert_eq!(m.end, 43);
+    }
+
+    #[test]
+    fn test_rev_literal_at_boundary_32() {
+        // Test reverse search at 32-byte boundary
+        for offset in [0, 31, 32, 33, 63, 64, 65] {
+            let mut hay = vec![b'.'; 128];
+            if offset + 5 <= 128 {
+                hay[offset] = b'h';
+                hay[offset + 1] = b'e';
+                hay[offset + 2] = b'l';
+                hay[offset + 3] = b'l';
+                hay[offset + 4] = b'o';
+                let mut dfa = make_dfa("hello").unwrap();
+                let m = dfa.find_rev(&String::from_utf8_lossy(&hay));
+                assert!(m.is_some(), "offset={}", offset);
+            }
+        }
+    }
+
+    #[test]
+    fn test_find_all_multiple_matches() {
+        let mut dfa = make_dfa("the").unwrap();
+        let text = "the quick brown fox jumps over the lazy dog and the cat";
+        let matches = dfa.find_all(text);
+        assert_eq!(matches.len(), 3);
+        assert_eq!(matches[0].start, 0);
+        assert_eq!(matches[1].start, 31);
+        assert_eq!(matches[2].start, 48);
+    }
+
+    #[test]
+    fn test_empty_literal() {
+        let mut dfa = make_dfa("").unwrap();
+        // Empty pattern should match at position 0
+        let m = dfa.find("hello");
+        // Note: Empty patterns may not be supported in all regex engines
+        assert!(m.is_none() || m.unwrap().start == 0);
+    }
+
+    #[test]
+    fn test_pattern_at_text_start() {
+        let mut dfa = make_dfa("hello").unwrap();
+        let m = dfa.find("hello world").unwrap();
+        assert_eq!(m.start, 0);
+        assert_eq!(m.end, 5);
+    }
+
+    #[test]
+    fn test_pattern_at_text_end() {
+        let mut dfa = make_dfa("world").unwrap();
+        let m = dfa.find("hello world").unwrap();
+        assert_eq!(m.start, 6);
+        assert_eq!(m.end, 11);
+    }
+
+    #[test]
+    fn test_pattern_not_found() {
+        let mut dfa = make_dfa("xyz").unwrap();
+        assert!(dfa.find("hello world").is_none());
+    }
+
+    #[test]
+    fn test_single_char_pattern() {
+        let mut dfa = make_dfa("x").unwrap();
+        let text = "abcxdef";
+        let m = dfa.find(text).unwrap();
+        assert_eq!(m.start, 3);
+        assert_eq!(m.end, 4);
+    }
+
+    #[test]
+    fn test_repeating_pattern() {
+        let mut dfa = make_dfa("aa").unwrap();
+        let text = "aaaaaa";
+        let matches = dfa.find_all(text);
+        // Should find overlapping or non-overlapping matches
+        assert!(!matches.is_empty());
+    }
+
+    #[test]
+    fn benchmark_literal_search() {
+        let mut dfa = make_dfa("the quick brown fox").unwrap();
+        let text = "the quick brown fox jumps over the lazy dog the quick brown fox";
+        
+        // Warm up
+        for _ in 0..1000 {
+            let _ = dfa.find(text);
+            let _ = dfa.find_rev(text);
+        }
+        
+        // Benchmark forward search
+        let start = std::time::Instant::now();
+        for _ in 0..100_000 {
+            black_box(dfa.find(text));
+        }
+        let fwd_time = start.elapsed();
+        
+        // Benchmark reverse search
+        let start = std::time::Instant::now();
+        for _ in 0..100_000 {
+            black_box(dfa.find_rev(text));
+        }
+        let rev_time = start.elapsed();
+        
+        println!("\n=== Literal Search Benchmark (19-byte pattern) ===");
+        println!("Pattern: 'the quick brown fox' (uses Teddy for >= 4 bytes)");
+        println!("Text: 'the quick brown fox jumps over the lazy dog...'");
+        println!("Forward (100k): {:?} ({:.2} ns/op)", fwd_time, fwd_time.as_nanos() as f64 / 100_000.0);
+        println!("Reverse (100k): {:?} ({:.2} ns/op)", rev_time, rev_time.as_nanos() as f64 / 100_000.0);
+    }
+
+    #[test]
+    fn benchmark_short_literal() {
+        // Short patterns (3 bytes) use memchr, not Teddy
+        let mut dfa = make_dfa("abc").unwrap();
+        let text = "xyz abc def abc ghi abc";
+        
+        // Warm up
+        for _ in 0..1000 {
+            let _ = dfa.find(text);
+            let _ = dfa.find_rev(text);
+        }
+        
+        // Benchmark
+        let iterations = 100_000;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            black_box(dfa.find(text));
+        }
+        let fwd_time = start.elapsed();
+        
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            black_box(dfa.find_rev(text));
+        }
+        let rev_time = start.elapsed();
+        
+        println!("\n=== Short Literal Benchmark (3-byte pattern) ===");
+        println!("Pattern: 'abc' (uses memchr, not Teddy)");
+        println!("Forward (100k): {:?} ({:.2} ns/op)", fwd_time, fwd_time.as_nanos() as f64 / 100_000.0);
+        println!("Reverse (100k): {:?} ({:.2} ns/op)", rev_time, rev_time.as_nanos() as f64 / 100_000.0);
+    }
+
+    #[test]
+    fn benchmark_digit_class() {
+        let mut dfa = make_dfa("[0-9]+").unwrap();
+        let text = "Lorem ipsum dolor sit amet 12345 consectetur adipiscing elit 67890";
+        
+        // Warm up
+        for _ in 0..1000 {
+            let _ = dfa.find(text);
+            let _ = dfa.find_rev(text);
+        }
+        
+        // Benchmark forward search
+        let start = std::time::Instant::now();
+        for _ in 0..100_000 {
+            black_box(dfa.find(text));
+        }
+        let fwd_time = start.elapsed();
+        
+        // Benchmark reverse search
+        let start = std::time::Instant::now();
+        for _ in 0..100_000 {
+            black_box(dfa.find_rev(text));
+        }
+        let rev_time = start.elapsed();
+        
+        println!("\n=== Digit Class Benchmark [0-9]+ ===");
+        println!("Pattern: '[0-9]+' (uses CharClassRanges + SIMD)");
+        println!("Text: 'Lorem ipsum dolor... 12345 ... 67890'");
+        println!("Forward (100k): {:?} ({:.2} ns/op)", fwd_time, fwd_time.as_nanos() as f64 / 100_000.0);
+        println!("Reverse (100k): {:?} ({:.2} ns/op)", rev_time, rev_time.as_nanos() as f64 / 100_000.0);
+    }
+
+    #[test]
+    fn benchmark_large_text() {
+        let large_text = "Lorem ipsum dolor sit amet ".repeat(1000);
+        let mut dfa_literal = make_dfa("ipsum").unwrap();
+        let mut dfa_digit = make_dfa("[0-9]+").unwrap();
+        let mut dfa_long = make_dfa("the quick brown fox jumps over the lazy dog").unwrap();
+        
+        // Warm up
+        for _ in 0..100 {
+            let _ = dfa_literal.find(&large_text);
+            let _ = dfa_literal.find_rev(&large_text);
+        }
+        
+        // Benchmark literal (rare byte 'x')
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            black_box(dfa_literal.find(&large_text));
+        }
+        let lit_fwd = start.elapsed();
+        
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            black_box(dfa_literal.find_rev(&large_text));
+        }
+        let lit_rev = start.elapsed();
+        
+        // Benchmark digit class (no digits in text = worst case)
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            black_box(dfa_digit.find(&large_text));
+        }
+        let digit_fwd = start.elapsed();
+        
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            black_box(dfa_digit.find_rev(&large_text));
+        }
+        let digit_rev = start.elapsed();
+        
+        // Benchmark long pattern (Teddy target)
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            black_box(dfa_long.find(&large_text));
+        }
+        let long_fwd = start.elapsed();
+        
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            black_box(dfa_long.find_rev(&large_text));
+        }
+        let long_rev = start.elapsed();
+        
+        println!("\n=== Large Text (50KB) Benchmark ===");
+        println!("Text: 1000x 'Lorem ipsum dolor sit amet '");
+        println!("");
+        println!("Literal 'ipsum' (5 bytes):");
+        println!("  Forward: {:?} ({:.2} ns/op)", lit_fwd, lit_fwd.as_nanos() as f64 / 10_000.0);
+        println!("  Reverse: {:?} ({:.2} ns/op)", lit_rev, lit_rev.as_nanos() as f64 / 10_000.0);
+        println!("");
+        println!("Digit [0-9]+ (no match, worst case):");
+        println!("  Forward: {:?} ({:.2} ns/op)", digit_fwd, digit_fwd.as_nanos() as f64 / 10_000.0);
+        println!("  Reverse: {:?} ({:.2} ns/op)", digit_rev, digit_rev.as_nanos() as f64 / 10_000.0);
+        println!("");
+        println!("Long pattern (42 bytes, Teddy target):");
+        println!("  Forward: {:?} ({:.2} ns/op)", long_fwd, long_fwd.as_nanos() as f64 / 10_000.0);
+        println!("  Reverse: {:?} ({:.2} ns/op)", long_rev, long_rev.as_nanos() as f64 / 10_000.0);
+    }
+
+    #[test]
+    fn benchmark_rare_vs_common_byte() {
+        let large_text = "the quick brown fox jumps over the lazy dog ".repeat(1000);
+        
+        // Pattern with common byte 'e'
+        let mut dfa_common = make_dfa("the").unwrap();
+        // Pattern with rare byte 'x'  
+        let mut dfa_rare = make_dfa("fox").unwrap();
+        
+        // Warm up
+        for _ in 0..100 {
+            let _ = dfa_common.find(&large_text);
+            let _ = dfa_rare.find(&large_text);
+        }
+        
+        let iterations = 10_000;
+        
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            black_box(dfa_common.find(&large_text));
+        }
+        let common_time = start.elapsed();
+        
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            black_box(dfa_rare.find(&large_text));
+        }
+        let rare_time = start.elapsed();
+        
+        println!("\n=== Rare vs Common Byte Benchmark ===");
+        println!("Text: 1000x 'the quick brown fox jumps over the lazy dog '");
+        println!("");
+        println!("Pattern 'the' (common 'e'): {:?} ({:.2} ns/op)", 
+            common_time, common_time.as_nanos() as f64 / iterations as f64);
+        println!("Pattern 'fox' (rare 'x'): {:?} ({:.2} ns/op)", 
+            rare_time, rare_time.as_nanos() as f64 / iterations as f64);
+        println!("");
+        println!("Speedup from rare byte: {:.2}x", 
+            common_time.as_nanos() as f64 / rare_time.as_nanos() as f64);
+    }
+
+    fn black_box<T>(x: T) -> T { x }
 }

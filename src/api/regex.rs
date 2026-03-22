@@ -1622,7 +1622,7 @@ impl FuzzyRegex {
     /// Searches from the end of the text, finding matches starting from the right.
     /// Uses efficient reverse scanning - O(n × states) instead of O(n × matches).
     pub fn find_iter_rev<'t>(&self, text: &'t str) -> Vec<Match<'t>> {
-        // Use DFA if available
+        // Find all matches using efficient scanning from right
         if let Some(ref dfa_cell) = self.dfa {
             let mut dfa = dfa_cell.borrow_mut();
             let len = text.len();
