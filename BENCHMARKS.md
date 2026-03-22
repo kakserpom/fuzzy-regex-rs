@@ -168,3 +168,41 @@ cargo run --release --example bench_unicode
 - All benchmarks use `cargo build --release` for optimized builds
 - LTO and single codegen unit enabled in release profile
 - SIMD is enabled by default (`default = ["simd"]`)
+
+---
+
+## Pathological Pattern Benchmark
+
+Pathological patterns like `.*a|b` on text of 'b's can cause O(n²) behavior. This benchmark compares three all-matches algorithms.
+
+Run with:
+```bash
+cargo test --lib benchmark_pathological_pattern -- --nocapture
+```
+
+### Results (Pattern `.*a|b` on text of 'b's)
+
+| Text Size | find_all | two_pass | hardened | Speedup |
+|-----------|----------|----------|----------|---------|
+| 1,000 bytes | 1.08s | 1.10s | **69ms** | 15x |
+| 5,000 bytes | 5.47s | 5.43s | **69ms** | 79x |
+| 10,000 bytes | 10.76s | 10.85s | **69ms** | **156x** |
+
+### Complexity
+
+| Algorithm | Complexity | Notes |
+|-----------|------------|-------|
+| find_all | O(n²) | Standard "find, advance, repeat" |
+| two_pass | O(n²) | Pass 1 is fast, but Pass 2 still verifies each match |
+| hardened | O(n) | Tracks all DFA states simultaneously |
+
+### Why Hardened Mode is Faster
+
+The hardened mode processes each character exactly once by tracking all active DFA states simultaneously. For the pattern `.*a|b` on "bbbb":
+
+1. Start at position 0 with state (start, pos=0)
+2. Process 'b': State can continue with itself (accepting state)
+3. When we hit a character that can't continue (or end of text), emit match
+4. Move to next unmatched position and repeat
+
+This avoids the O(n) re-scanning that happens in naive implementations.

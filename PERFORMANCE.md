@@ -83,6 +83,46 @@ fuzzy-regex is significantly faster than regex crate for:
 3. **Aho-Corasick caching**: Automaton built once during construction
 4. **Character class plus detection**: Direct byte scanning for `\d+`, `\w+`, `\s+`
 5. **Word boundary optimization**: Fast word-edge detection
+6. **NEON SIMD for ARM**: Vectorized character class and Teddy search on Apple Silicon
+7. **Two-pass algorithm**: Reverse prefilter + forward verification for all-matches
+8. **Hardened mode**: True O(n) for pathological patterns
+
+## Pathological Pattern Benchmark
+
+Pathological patterns like `.*a|b` on text of all 'b's can cause O(n²) behavior in naive implementations because each match requires re-scanning from its start position.
+
+### Benchmark: Pattern `.*a|b` on text of 'b's
+
+| Text Size | find_all | two_pass | hardened | Speedup |
+|-----------|----------|----------|----------|---------|
+| 1,000 bytes | 1.08s | 1.10s | **69ms** | 15x |
+| 5,000 bytes | 5.47s | 5.43s | **69ms** | 79x |
+| 10,000 bytes | 10.76s | 10.85s | **69ms** | **156x** |
+
+### Complexity Analysis
+
+| Algorithm | Complexity | Notes |
+|-----------|------------|-------|
+| find_all | O(n²) | Standard "find, advance, repeat" |
+| two_pass | O(n²) | Pass 1 is fast, but Pass 2 still verifies each match |
+| hardened | O(n) | Tracks all DFA states simultaneously |
+
+### When to Use Each Algorithm
+
+```rust
+let mut dfa = Dfa::new(pattern).unwrap();
+
+// Default: smart selection based on pattern
+let matches = dfa.find_all(text);
+
+// Explicit two-pass: good when prefilter is effective
+let matches = dfa.find_all_two_pass(text);
+
+// Explicit hardened: critical for pathological patterns
+let matches = dfa.find_all_hardened(text);
+```
+
+See [docs/RE_SHARP_OPTIMIZATIONS.md](docs/RE_SHARP_OPTIMIZATIONS.md) for detailed documentation of all optimizations.
 
 ## Running Benchmarks
 
