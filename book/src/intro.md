@@ -37,10 +37,21 @@ fn main() {
 `fuzzy-regex` is designed for high performance:
 
 - **Bitap Algorithm**: O(n×k) time complexity for patterns ≤64 characters
-- **SIMD Optimizations**: ~2x speedup on supported platforms
+- **SIMD Optimizations**: ~2-10x speedup on supported platforms (AVX2, NEON)
+- **Hardened Mode**: Guaranteed O(n) worst-case for pathological patterns
 - **Streaming**: Process gigabytes of data without loading into memory
 
 Typical throughput: **1.4-2.0 Gbps** for streaming fuzzy matching on modern hardware.
+
+### Pathological Pattern Protection
+
+Some regex patterns can cause O(n²) behavior in naive implementations. `fuzzy-regex` includes hardened mode that guarantees O(n) performance even for patterns like `.*a|b`:
+
+```rust
+let re = FuzzyRegex::new(".*a|b").unwrap();
+// Guaranteed O(n) even on pathological patterns
+let matches = re.find_all_hardened(text);
+```
 
 ## Ecosystem
 
