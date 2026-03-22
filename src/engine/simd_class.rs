@@ -1,5 +1,7 @@
 // Suppress pedantic lints for SIMD code
 #![allow(clippy::wildcard_imports)]
+// Allow unsafe function calls in this module (required for SIMD intrinsics)
+#![allow(unsafe_op_in_unsafe_fn)]
 
 //! SIMD-accelerated character class matching.
 //!
@@ -226,7 +228,11 @@ impl AsciiClassBitmap {
             self.matches_non_ascii
         };
 
-        if self.negated { !in_bitmap } else { in_bitmap }
+        if self.negated {
+            !in_bitmap
+        } else {
+            in_bitmap
+        }
     }
 
     /// Check if a character is in the class.
@@ -237,7 +243,11 @@ impl AsciiClassBitmap {
             self.contains(ch as u8)
         } else {
             let in_class = self.matches_non_ascii;
-            if self.negated { !in_class } else { in_class }
+            if self.negated {
+                !in_class
+            } else {
+                in_class
+            }
         }
     }
 
