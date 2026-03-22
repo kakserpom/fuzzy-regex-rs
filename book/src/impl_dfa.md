@@ -97,3 +97,60 @@ Cache DFA for reuse:
 ```rust
 // Reuse compiled DFA across searches
 ```
+
+## All-Matches Algorithms
+
+The DFA supports multiple algorithms for finding all matches.
+
+### Three-Pass (Default)
+
+The standard approach: find a match, advance, repeat.
+
+```rust
+let matches = dfa.find_all(text);
+// Time: O(n²) worst case for pathological patterns
+```
+
+### Two-Pass Algorithm
+
+Uses a reverse prefilter to find candidates efficiently:
+
+1. **Pass 1**: Scan right-to-left, finding candidate positions
+2. **Pass 2**: Verify matches at each candidate
+
+```rust
+let matches = dfa.find_all_two_pass(text);
+// Prefilter reduces candidates in Pass 1
+// Still O(n²) worst case in Pass 2
+```
+
+### Hardened Mode (O(n))
+
+Tracks all active DFA states simultaneously:
+
+1. Maintain set of (state, start_position) pairs
+2. Process each character once, updating all states
+3. When no continuation possible, emit match
+4. Continue from next position
+
+```rust
+let matches = dfa.find_all_hardened(text);
+// Guaranteed O(n) - each character processed once
+```
+
+### Prefilter Types
+
+| Type | Description |
+|------|-------------|
+| SingleByte | `memrchr` for one byte |
+| TwoBytes | `memrchr` for two bytes |
+| ThreeBytes | `memrchr` for three bytes |
+| Teddy | SIMD-accelerated multi-byte |
+
+### When to Use
+
+| Scenario | Recommended |
+|----------|--------------|
+| Few matches, well-behaved pattern | Default |
+| Prefilter effective | Two-pass |
+| Pathological patterns | Hardened |
