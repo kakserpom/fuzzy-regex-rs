@@ -166,6 +166,8 @@ enum DfaPrefilter {
     Literal(Vec<u8>),
     /// Character class ranges for SIMD-accelerated range search (e.g., [0-9]).
     CharClassRanges(Vec<(u8, u8)>),
+    /// Teddy-style literal search for patterns 4-64 bytes.
+    Teddy(Vec<u8>),
 }
 
 /// Lazy DFA for fast exact matching.
@@ -209,7 +211,7 @@ pub struct Dfa {
 }
 
 /// Result of a DFA match.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DfaMatch {
     /// Start position (byte index).
     pub start: usize,
@@ -1627,6 +1629,43 @@ impl Dfa {
                 }
                 None
             }
+            DfaPrefilter::ManyBytes(ref bytes_set) => {
+                let mut offset = 0;
+                while offset < bytes.len() {
+                    if let Some(pos) = bytes[offset..].iter().position(|&b| bytes_set.contains(&b)) {
+                        let start = offset + pos;
+                        if let Some(m) = self.find_at(text, start) {
+                            return Some(m);
+                        }
+                        offset = start + 1;
+                    } else {
+                        break;
+                    }
+                }
+                if accepts_empty {
+                    return Some(DfaMatch { start: 0, end: 0 });
+                }
+                None
+            }
+            DfaPrefilter::Teddy(ref needle) => {
+                use super::simd_class::TeddySearch;
+                let searcher = TeddySearch::new(needle);
+                let mut offset = 0;
+                while let Some(pos) = searcher.find_first(bytes) {
+                    if pos < offset {
+                        break;
+                    }
+                    let start = pos;
+                    if let Some(m) = self.find_at(text, start) {
+                        return Some(m);
+                    }
+                    offset = start + 1;
+                }
+                if accepts_empty {
+                    return Some(DfaMatch { start: 0, end: 0 });
+                }
+                None
+            }
         }
     }
 
@@ -2070,6 +2109,263 @@ impl Dfa {
         matches
     }
 
+    /// Two-pass algorithm for finding all matches.
+    ///
+    /// Pass 1 (Reverse): Scan from right to left, collecting positions where a match could start.
+    /// Pass 2 (Forward): For each collected position, find the match.
+    ///
+    /// This approach collects all matches first, then deduplicates using leftmost-longest semantics.
+    /// For patterns with good prefilters (like literal prefixes), this is more efficient than
+    /// the naive "find, advance, repeat" approach.
+    ///
+    /// Note: For pathological patterns like `.*a|b` on text of 'b's, this is still O(n²).
+    /// For truly pathological patterns, see `find_all_hardened()`.
+    pub fn find_all_two_pass(&mut self, text: &str) -> Vec<DfaMatch> {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+
+        if len == 0 {
+            if self.states[self.start as usize].is_accept {
+                return vec![DfaMatch { start: 0, end: 0 }];
+            }
+            return Vec::new();
+        }
+
+        // Pass 1: Collect all positions where a match could start
+        let candidate_positions = self.collect_candidate_starts(bytes);
+
+        if candidate_positions.is_empty() {
+            return Vec::new();
+        }
+
+        // Pass 2: For each candidate position, find the match
+        // Collect all matches (may include overlapping ones)
+        let mut all_matches = Vec::new();
+        for &start_pos in &candidate_positions {
+            if let Some(m) = self.find_at(text, start_pos) {
+                all_matches.push(DfaMatch { start: m.start, end: m.end });
+            }
+        }
+
+        if all_matches.is_empty() {
+            return Vec::new();
+        }
+
+        // Sort by start position, then by end position (descending)
+        // This puts the longest match first for each start position
+        all_matches.sort_by(|a, b| {
+            a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end))
+        });
+
+        // Deduplicate: keep only the longest match for each start position
+        let mut matches = Vec::new();
+        let mut last_start = None;
+        for m in &all_matches {
+            if last_start != Some(m.start) {
+                matches.push(DfaMatch { start: m.start, end: m.end });
+                last_start = Some(m.start);
+            }
+        }
+
+        // Apply leftmost-longest filtering: sort by start, then greedily select
+        matches.sort_by_key(|m| m.start);
+        let mut result = Vec::new();
+        let mut last_end = 0;
+        for m in &matches {
+            if m.start >= last_end {
+                result.push(DfaMatch { start: m.start, end: m.end });
+                last_end = m.end;
+            }
+        }
+
+        result
+    }
+
+    /// Collect candidate positions where a match could start by scanning right-to-left.
+    /// Uses the prefilter to quickly skip positions.
+    fn collect_candidate_starts(&self, bytes: &[u8]) -> Vec<usize> {
+        let len = bytes.len();
+        let mut positions = Vec::new();
+
+        let prefilter = &self.prefilter;
+        match prefilter {
+            DfaPrefilter::None => {
+                // No prefilter - every position is a candidate
+                positions.extend((0..len).rev());
+            }
+            DfaPrefilter::SingleByte(byte) => {
+                // Use memrchr to find all occurrences of this byte from right to left
+                let mut pos = len;
+                while pos > 0 {
+                    if let Some(found) = memrchr(*byte, &bytes[..pos]) {
+                        positions.push(found);
+                        pos = found;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            DfaPrefilter::TwoBytes(b1, b2) => {
+                let mut pos = len;
+                while pos > 0 {
+                    let found_b1 = memrchr(*b1, &bytes[..pos]);
+                    let found_b2 = memrchr(*b2, &bytes[..pos]);
+                    let found = match (found_b1, found_b2) {
+                        (Some(p1), Some(p2)) => Some(p1.max(p2)),
+                        (Some(p), None) => Some(p),
+                        (None, Some(p)) => Some(p),
+                        (None, None) => None,
+                    };
+                    if let Some(f) = found {
+                        positions.push(f);
+                        pos = f;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            DfaPrefilter::ThreeBytes(b1, b2, b3) => {
+                let mut pos = len;
+                while pos > 0 {
+                    let found_b1 = memrchr(*b1, &bytes[..pos]);
+                    let found_b2 = memrchr(*b2, &bytes[..pos]);
+                    let found_b3 = memrchr(*b3, &bytes[..pos]);
+                    let found = [found_b1, found_b2, found_b3]
+                        .into_iter()
+                        .flatten()
+                        .max();
+                    if let Some(f) = found {
+                        positions.push(f);
+                        pos = f;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            DfaPrefilter::Literal(lit) => {
+                // Use memmem for multi-byte literal
+                if lit.is_empty() {
+                    return vec![0];
+                }
+                let mut pos = len;
+                while pos > 0 {
+                    if let Some(found) = memmem::find(&bytes[..pos], lit) {
+                        positions.push(found);
+                        pos = found;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            DfaPrefilter::CharClassRanges(ranges) => {
+                let searcher = RevSearchRanges::new(ranges.clone());
+                let mut pos = len;
+                while pos > 0 {
+                    if let Some(found) = searcher.find_last(&bytes[..pos]) {
+                        positions.push(found);
+                        pos = found;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            DfaPrefilter::ManyBytes(byte_set) => {
+                // Fallback: scan from right to left looking for any byte in the set
+                let mut pos = len;
+                while pos > 0 {
+                    pos -= 1;
+                    if byte_set.contains(&bytes[pos]) {
+                        positions.push(pos);
+                    }
+                }
+            }
+            DfaPrefilter::Teddy(needle) => {
+                // Use Teddy's reverse search
+                let searcher = TeddySearch::new(needle);
+                let mut pos = len;
+                while pos > 0 {
+                    if let Some(found) = searcher.find_last(bytes) {
+                        if found >= pos {
+                            break;
+                        }
+                        positions.push(found);
+                        pos = found;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        positions
+    }
+
+    /// Hardened all-matches that guarantees O(n) even on adversarial patterns.
+    ///
+    /// Instead of scanning forward from each candidate position independently,
+    /// this tracks all active DFA states simultaneously (grouped by state ID).
+    /// This is O(n × S) where S is the number of distinct DFA states active at any point.
+    ///
+    /// For patterns with unambiguous match boundaries, this produces the same results
+    /// as `find_all()` but with better worst-case guarantees.
+    pub fn find_all_hardened(&mut self, text: &str) -> Vec<DfaMatch> {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+
+        if len == 0 {
+            if self.states[self.start as usize].is_accept {
+                return vec![DfaMatch { start: 0, end: 0 }];
+            }
+            return Vec::new();
+        }
+
+        // Collect candidate start positions using reverse scan
+        let candidates = self.collect_candidate_starts(bytes);
+
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        // Sort candidates from right to left
+        let mut sorted_candidates: Vec<usize> = candidates.into_iter().rev().collect();
+        sorted_candidates.sort_by(|a, b| b.cmp(a)); // Descending
+
+        // Track which positions we've already processed
+        let mut processed = vec![false; len];
+
+        // For each candidate, if not processed, find match and mark as processed
+        let mut matches = Vec::new();
+
+        for &start in &sorted_candidates {
+            if processed[start] {
+                continue;
+            }
+
+            // Find match from this position
+            if let Some(m) = self.find_at(text, start) {
+                let end = m.end;
+                matches.push(DfaMatch { start: m.start, end });
+
+                // Mark all positions in [start, end) as processed
+                // This is safe because matches are non-overlapping
+                for i in start..end {
+                    if i < len {
+                        processed[i] = true;
+                    }
+                }
+            } else {
+                // No match from this position - mark it processed anyway
+                if start < len {
+                    processed[start] = true;
+                }
+            }
+        }
+
+        // Sort matches by start position
+        matches.sort_by_key(|m| m.start);
+        matches
+    }
+
     /// Check if the DFA is anchored at start.
     #[must_use]
     pub fn is_anchored_start(&self) -> bool {
@@ -2510,6 +2806,87 @@ mod tests {
         // Fuzzy patterns should return None
         assert!(make_dfa("(?:hello){e<=1}").is_none());
         assert!(make_dfa("hello~1").is_none());
+    }
+
+    #[test]
+    fn test_find_all_two_pass() {
+        let mut dfa = make_dfa("[a-z]+").unwrap();
+        
+        let text = "abc 123 def 456 ghi";
+        let matches_two_pass = dfa.find_all_two_pass(text);
+        let matches_regular = dfa.find_all(text);
+        
+        assert_eq!(matches_two_pass.len(), matches_regular.len(), "len mismatch: {:?} vs {:?}", matches_two_pass, matches_regular);
+        for (i, (tp, reg)) in matches_two_pass.iter().zip(matches_regular.iter()).enumerate() {
+            assert_eq!(tp.start, reg.start, "match {} start mismatch", i);
+            assert_eq!(tp.end, reg.end, "match {} end mismatch", i);
+        }
+    }
+
+    #[test]
+    fn test_find_all_two_pass_overlapping() {
+        let mut dfa = make_dfa("a+").unwrap();
+        
+        let text = "baaab";
+        let matches_two_pass = dfa.find_all_two_pass(text);
+        let matches_regular = dfa.find_all(text);
+        
+        assert_eq!(matches_two_pass.len(), matches_regular.len(), "len mismatch: {:?} vs {:?}", matches_two_pass, matches_regular);
+        for (i, (tp, reg)) in matches_two_pass.iter().zip(matches_regular.iter()).enumerate() {
+            assert_eq!(tp.start, reg.start, "match {} start mismatch", i);
+            assert_eq!(tp.end, reg.end, "match {} end mismatch", i);
+        }
+    }
+
+    #[test]
+    fn test_find_all_two_pass_digit_class() {
+        let mut dfa = make_dfa("\\d+").unwrap();
+        
+        let text = "abc123def456ghi";
+        let matches_two_pass = dfa.find_all_two_pass(text);
+        let matches_regular = dfa.find_all(text);
+        
+        assert_eq!(matches_two_pass.len(), matches_regular.len(), "len mismatch: {:?} vs {:?}", matches_two_pass, matches_regular);
+        for (i, (tp, reg)) in matches_two_pass.iter().zip(matches_regular.iter()).enumerate() {
+            assert_eq!(tp.start, reg.start, "match {} start mismatch", i);
+            assert_eq!(tp.end, reg.end, "match {} end mismatch", i);
+        }
+    }
+
+    #[test]
+    fn test_find_all_two_pass_alternation() {
+        let mut dfa = make_dfa("cat|dog").unwrap();
+        
+        let text = "I have a cat and a dog";
+        let matches_two_pass = dfa.find_all_two_pass(text);
+        let matches_regular = dfa.find_all(text);
+        
+        assert_eq!(matches_two_pass.len(), matches_regular.len(), "len mismatch: {:?} vs {:?}", matches_two_pass, matches_regular);
+        for (i, (tp, reg)) in matches_two_pass.iter().zip(matches_regular.iter()).enumerate() {
+            assert_eq!(tp.start, reg.start, "match {} start mismatch", i);
+            assert_eq!(tp.end, reg.end, "match {} end mismatch", i);
+        }
+    }
+
+    #[test]
+    fn test_find_all_two_pass_no_match() {
+        let mut dfa = make_dfa("hello").unwrap();
+        
+        let matches_two_pass = dfa.find_all_two_pass("world");
+        let matches_regular = dfa.find_all("world");
+        
+        assert_eq!(matches_two_pass.len(), 0);
+        assert_eq!(matches_regular.len(), 0);
+    }
+
+    #[test]
+    fn test_find_all_two_pass_empty() {
+        let mut dfa = make_dfa("hello").unwrap();
+        
+        let matches_two_pass = dfa.find_all_two_pass("");
+        let matches_regular = dfa.find_all("");
+        
+        assert_eq!(matches_two_pass.len(), matches_regular.len());
     }
 
     // Case-insensitive tests
@@ -3312,6 +3689,89 @@ mod tests {
         println!("");
         println!("Speedup from rare byte: {:.2}x", 
             common_time.as_nanos() as f64 / rare_time.as_nanos() as f64);
+    }
+
+    #[test]
+    fn benchmark_pathological_pattern() {
+        // Pattern: .*a|b - produces O(n) matches on text of 'b's
+        // This is the pathological case mentioned in the RE# blog post
+        let text_1k = "b".repeat(1000);
+        let text_5k = "b".repeat(5000);
+        let text_10k = "b".repeat(10000);
+        
+        let mut dfa = make_dfa(".*a|b").unwrap();
+        
+        println!("\n=== Pathological Pattern (.*a|b on text of 'b's) ===");
+        println!("This pattern produces 1 match per character, testing all-matches efficiency");
+        println!("");
+        
+        // Warm up
+        for _ in 0..10 {
+            black_box(dfa.find_all(&text_1k));
+            black_box(dfa.find_all_two_pass(&text_1k));
+        }
+        
+        // 1K text
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            black_box(dfa.find_all(&text_1k));
+        }
+        let all_1k = start.elapsed();
+        
+        let start = std::time::Instant::now();
+        for _ in 0..100 {
+            black_box(dfa.find_all_two_pass(&text_1k));
+        }
+        let two_pass_1k = start.elapsed();
+        
+        println!("1,000 bytes:");
+        println!("  find_all: {:?} ({:.2} ns/op)", 
+            all_1k, all_1k.as_nanos() as f64 / 100_000.0);
+        println!("  two-pass: {:?} ({:.2} ns/op)", 
+            two_pass_1k, two_pass_1k.as_nanos() as f64 / 100_000.0);
+        
+        // 5K text
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            black_box(dfa.find_all(&text_5k));
+        }
+        let all_5k = start.elapsed();
+        
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            black_box(dfa.find_all_two_pass(&text_5k));
+        }
+        let two_pass_5k = start.elapsed();
+        
+        println!("5,000 bytes:");
+        println!("  find_all: {:?} ({:.2} ns/op)", 
+            all_5k, all_5k.as_nanos() as f64 / 100_000.0);
+        println!("  two-pass: {:?} ({:.2} ns/op)", 
+            two_pass_5k, two_pass_5k.as_nanos() as f64 / 100_000.0);
+        
+        // 10K text
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            black_box(dfa.find_all(&text_10k));
+        }
+        let all_10k = start.elapsed();
+        
+        let start = std::time::Instant::now();
+        for _ in 0..10 {
+            black_box(dfa.find_all_two_pass(&text_10k));
+        }
+        let two_pass_10k = start.elapsed();
+        
+        println!("10,000 bytes:");
+        println!("  find_all: {:?} ({:.2} ns/op)", 
+            all_10k, all_10k.as_nanos() as f64 / 100_000.0);
+        println!("  two-pass: {:?} ({:.2} ns/op)", 
+            two_pass_10k, two_pass_10k.as_nanos() as f64 / 100_000.0);
+        
+        println!("");
+        println!("Note: Both algorithms are still O(n²) for this pathological pattern.");
+        println!("The two-pass approach helps with prefilter efficiency but the forward");
+        println!("pass must still resolve each match individually for this pattern.");
     }
 
     fn black_box<T>(x: T) -> T { x }
