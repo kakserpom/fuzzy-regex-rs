@@ -127,9 +127,12 @@ See [docs/RE_SHARP_OPTIMIZATIONS.md](docs/RE_SHARP_OPTIMIZATIONS.md) for detaile
 ## Running Benchmarks
 
 ```bash
-# Run the comparison benchmark
-cargo run --release --example compare_std
+# Run the comparison benchmark (fuzzy-regex vs regex crate)
+cargo run --release --example bench_vs_regex
 
 # Run micro-benchmarks
 cargo run --release --example quick_bench
+
+# Run pathological pattern benchmark
+cargo test --lib benchmark_pathological_pattern -- --nocapture
 ```
