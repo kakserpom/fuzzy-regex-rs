@@ -88,6 +88,7 @@ pub struct FuzzyRegex {
     is_word_bounded_class: bool,
     #[allow(dead_code)]
     is_char_class_plus: bool,
+    is_char_class_plus_or_lazy: bool,
     is_class_plus_with_literal: bool,
     is_digit_sequence_with_separator: bool,
     has_literal_word_boundary: bool,
@@ -265,6 +266,7 @@ impl FuzzyRegex {
         let is_greedy_prefix_with_suffix = nfa.is_greedy_prefix_with_suffix();
         let is_word_bounded_class = nfa.is_word_bounded_class();
         let is_char_class_plus = nfa.is_char_class_plus();
+        let is_char_class_plus_or_lazy = nfa.is_char_class_plus_or_lazy();
         let is_class_plus_with_literal = nfa.is_class_plus_with_literal();
         let is_digit_sequence_with_separator = nfa.is_digit_sequence_with_separator();
         let has_literal_word_boundary = nfa.has_literal_word_boundary();
@@ -394,6 +396,7 @@ impl FuzzyRegex {
             is_greedy_prefix_with_suffix,
             is_word_bounded_class,
             is_char_class_plus,
+            is_char_class_plus_or_lazy,
             is_class_plus_with_literal,
             is_digit_sequence_with_separator,
             has_literal_word_boundary,
@@ -930,7 +933,7 @@ impl FuzzyRegex {
         // Also handles lazy versions: [a-z]+?, \d+?, \w+?
         // Use direct byte scanning instead of DFA/NFA
         // Only use when default_edits == 0 (exact matching, no fuzzy)
-        if self.config.default_edits == 0 && self.is_char_class_plus && self.literals.is_empty() {
+        if self.config.default_edits == 0 && self.is_char_class_plus_or_lazy && self.literals.is_empty() {
             let class_type = self.nfa.get_char_class_type();
             return Self::find_char_class_plus_first(text, self.has_lazy, class_type);
         }
@@ -1726,6 +1729,19 @@ impl FuzzyRegex {
             }
         }
 
+        // Fast path for greedy/lazy char class plus: \d+, \d+?, \w+, \w+?, [a-z]+, [a-z]+?
+        // This is critical for performance - lazy quantifiers were 23x slower than regex
+        if self.is_char_class_plus_or_lazy && self.literals.is_empty() {
+            if let Some(class_type) = self.nfa.get_char_class_type() {
+                // has_lazy controls greedy vs lazy behavior
+                return Matches::new(Self::find_all_char_class_plus(
+                    text,
+                    self.has_lazy,
+                    Some(class_type),
+                ));
+            }
+        }
+
         // For all other patterns, use batch collection with single Matcher
         Matches::new(
             self.create_matcher(self.is_unanchored())
@@ -2194,6 +2210,84 @@ impl FuzzyRegex {
         }
 
         None
+    }
+
+    /// Fast path for finding all matches with character class plus: [a-z]+, \d+, \w+
+    /// Handles both greedy and lazy (+?, *?) quantifiers.
+    /// If `lazy` is true, matches minimum length; otherwise matches maximum length.
+    fn find_all_char_class_plus<'a>(
+        text: &'a str,
+        lazy: bool,
+        class_type: Option<&'static str>,
+    ) -> Vec<Match<'a>> {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+
+        if len == 0 {
+            return Vec::new();
+        }
+
+        let matches_class = match class_type {
+            Some("digit") => |b: u8| b.is_ascii_digit(),
+            Some("word") => |b: u8| b.is_ascii_alphanumeric() || b == b'_',
+            Some("whitespace") => |b: u8| b.is_ascii_whitespace(),
+            Some("not_digit") => |b: u8| !b.is_ascii_digit(),
+            Some("not_word") => |b: u8| !b.is_ascii_alphanumeric() && b != b'_',
+            Some("not_whitespace") => |b: u8| !b.is_ascii_whitespace(),
+            _ => |b: u8| b.is_ascii_alphanumeric() || b == b'_',
+        };
+
+        let mut matches = Vec::new();
+        let mut i = 0;
+
+        while i < len {
+            // Find the start of a run
+            while i < len && !matches_class(bytes[i]) {
+                i += 1;
+            }
+
+            if i >= len {
+                break;
+            }
+
+            let start = i;
+
+            // Find the end of the run
+            let mut run_end = i;
+            while run_end < len && matches_class(bytes[run_end]) {
+                run_end += 1;
+            }
+
+            let run_length = run_end - start;
+            if run_length > 0 {
+                if lazy {
+                    // Lazy: emit each position from start to end as separate match
+                    // This gives minimum-length matches at each position
+                    for end in (start + 1)..=run_end {
+                        matches.push(Match::new(
+                            text,
+                            start,
+                            end,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+                } else {
+                    // Greedy: emit the longest match at this position
+                    matches.push(Match::new(
+                        text,
+                        start,
+                        run_end,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
+                }
+            }
+
+            i = run_end;
+        }
+
+        matches
     }
 
     /// Fast path for fixed repetition: (?:literal){N} -> search for concatenated literal

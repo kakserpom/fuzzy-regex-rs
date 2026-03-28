@@ -639,15 +639,50 @@ impl Nfa {
         self.check_char_class_plus(self.start, &mut visited, false, 0)
     }
 
+    /// Check if this NFA is a character class plus OR lazy plus: [charset]+ or [charset]+?
+    /// Returns true for patterns like \d+, \d+?, \w+, \w+?, [a-z]+, [a-z]+?
+    /// This is used for fast path optimization in find() and find_iter()
+    #[must_use]
+    pub fn is_char_class_plus_or_lazy(&self) -> bool {
+        // Skip for complex NFAs to avoid stack overflow
+        if self.states.len() > 50 {
+            return false;
+        }
+
+        // Check for either greedy or lazy loop
+        let has_greedy_loop = self.has_char_class_loop_with_greedy(true);
+        let has_lazy_loop = self.has_char_class_loop_with_greedy(false);
+        if !has_greedy_loop && !has_lazy_loop {
+            return false;
+        }
+
+        // Try greedy first, then lazy
+        let mut visited = vec![false; self.states.len()];
+        if has_greedy_loop && self.check_char_class_plus_with_greedy(self.start, &mut visited, false, 0, true) {
+            return true;
+        }
+
+        let mut visited = vec![false; self.states.len()];
+        if has_lazy_loop && self.check_char_class_plus_with_greedy(self.start, &mut visited, false, 0, false) {
+            return true;
+        }
+
+        false
+    }
+
     /// Check if the NFA has a Split state that creates a loop (for + quantifier)
     /// This is used to distinguish \d+ from \d{3}
     fn has_char_class_loop(&self) -> bool {
+        self.has_char_class_loop_with_greedy(true)
+    }
+
+    /// Check if the NFA has a Split state that creates a loop for either greedy or lazy + quantifier
+    fn has_char_class_loop_with_greedy(&self, greedy: bool) -> bool {
         for (state_id, state) in self.states.iter().enumerate() {
-            if let State::Split { branches, greedy } = state
-                && *greedy
+            if let State::Split { branches, greedy: is_greedy } = state
+                && *is_greedy == greedy
                 && branches.len() >= 2
             {
-                // Check if any branch loops back to an earlier state in the path
                 for &branch in branches {
                     if self.can_reach_state(branch, state_id) {
                         return true;
@@ -693,6 +728,17 @@ impl Nfa {
         seen_class: bool,
         depth: usize,
     ) -> bool {
+        self.check_char_class_plus_with_greedy(state_id, visited, seen_class, depth, true)
+    }
+
+    fn check_char_class_plus_with_greedy(
+        &self,
+        state_id: StateId,
+        visited: &mut [bool],
+        seen_class: bool,
+        depth: usize,
+        expect_greedy: bool,
+    ) -> bool {
         const MAX_DEPTH: usize = 50;
         if depth > MAX_DEPTH {
             return false;
@@ -715,9 +761,9 @@ impl Nfa {
             State::Accept => seen_class,
             State::Epsilon { targets } => targets
                 .iter()
-                .any(|&t| self.check_char_class_plus(t, visited, seen_class, depth + 1)),
+                .any(|&t| self.check_char_class_plus_with_greedy(t, visited, seen_class, depth + 1, expect_greedy)),
             State::Char { class: _, next } => {
-                self.check_char_class_plus(*next, visited, true, depth + 1)
+                self.check_char_class_plus_with_greedy(*next, visited, true, depth + 1, expect_greedy)
             }
             State::Split { branches, greedy } => {
                 // For \d+ (one or more), there's a Split with a loop back to the Char state.
@@ -727,7 +773,7 @@ impl Nfa {
                 // We must check that there's an ACTUAL LOOP (Split with branch leading back to a visited state).
                 // Without a loop, it's an exact repetition like {3} which should NOT use this fast path.
 
-                if *greedy && branches.len() >= 2 {
+                if *greedy == expect_greedy && branches.len() >= 2 {
                     // Check if any branch creates a loop (leads back to a state we've already visited)
                     // For \d+, one branch leads back to the Char state which we visited earlier in this path
                     let has_loop = branches.iter().any(|&b| {
@@ -741,7 +787,7 @@ impl Nfa {
                     if has_loop {
                         branches
                             .iter()
-                            .any(|&b| self.check_char_class_plus(b, visited, seen_class, depth + 1))
+                            .any(|&b| self.check_char_class_plus_with_greedy(b, visited, seen_class, depth + 1, expect_greedy))
                     } else {
                         false
                     }
