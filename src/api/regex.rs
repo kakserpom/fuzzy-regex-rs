@@ -1677,6 +1677,15 @@ impl FuzzyRegex {
             return Matches::new(self.find_all_word_list(text));
         }
 
+        // Fast path for simple exact literal patterns: use memchr
+        // This is critical for performance - literal patterns are common and memchr is very fast
+        // Check this BEFORE DFA to avoid DFA overhead for simple cases
+        if self.can_use_memchr_fast_path && self.fuzzy_bridge.is_none() {
+            return Matches::new(Self::find_all_literal_fast(text, unsafe {
+                &*self.fast_path_literal.unwrap()
+            }));
+        }
+
         // DFA fast path: use DFA for patterns that are DFA-compatible
         // This provides O(1) per character matching vs O(states) for NFA
         if let Some(ref dfa_cell) = self.dfa {
@@ -1696,14 +1705,6 @@ impl FuzzyRegex {
                     })
                     .collect(),
             );
-        }
-
-        // Fast path for simple exact literal patterns: use memchr
-        // This is critical for performance - literals are common and memchr is very fast
-        if self.can_use_memchr_fast_path && self.fuzzy_bridge.is_none() {
-            return Matches::new(Self::find_all_literal_fast(text, unsafe {
-                &*self.fast_path_literal.unwrap()
-            }));
         }
 
         // Fast path for start-anchored patterns: can only match at position 0
