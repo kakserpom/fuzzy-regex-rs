@@ -282,6 +282,7 @@ impl FuzzyRegex {
             && !config.case_insensitive
             && config.handlers.is_empty()
             && capture_count == 0
+            && !has_char_classes
             && {
                 let lit = &literals[0];
                 lit.limits.is_none()
@@ -292,7 +293,6 @@ impl FuzzyRegex {
                     && !nfa.has_word_boundary()
                     && !nfa.has_lookahead()
                     && !nfa.has_lookbehind()
-                    && !has_char_classes
             };
 
         #[allow(clippy::ref_as_ptr)]
@@ -1698,6 +1698,14 @@ impl FuzzyRegex {
             );
         }
 
+        // Fast path for simple exact literal patterns: use memchr
+        // This is critical for performance - literals are common and memchr is very fast
+        if self.can_use_memchr_fast_path && self.fuzzy_bridge.is_none() {
+            return Matches::new(Self::find_all_literal_fast(text, unsafe {
+                &*self.fast_path_literal.unwrap()
+            }));
+        }
+
         // Fast path for start-anchored patterns: can only match at position 0
         // Use find_single_matcher to avoid infinite recursion (find -> find_iter -> find)
         if self.anchored && !self.config.multi_line {
@@ -2285,6 +2293,35 @@ impl FuzzyRegex {
             }
 
             i = run_end;
+        }
+
+        matches
+    }
+
+    /// Fast path for finding all literal matches using memmem.
+    /// Used by find_iter for simple exact literal patterns.
+    fn find_all_literal_fast<'t>(text: &'t str, literal: &str) -> Vec<Match<'t>> {
+        if literal.is_empty() {
+            return Vec::new();
+        }
+
+        let literal_bytes = literal.as_bytes();
+        let text_bytes = text.as_bytes();
+        let literal_len = literal_bytes.len();
+
+        let mut matches = Vec::new();
+        let mut pos = 0;
+
+        while let Some(found) = memmem::find(&text_bytes[pos..], literal_bytes) {
+            let abs_pos = pos + found;
+            matches.push(Match::new(
+                text,
+                abs_pos,
+                abs_pos + literal_len,
+                1.0,
+                crate::engine::EditCounts::default(),
+            ));
+            pos = abs_pos + 1;
         }
 
         matches
