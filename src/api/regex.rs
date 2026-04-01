@@ -2309,8 +2309,12 @@ impl FuzzyRegex {
         let literal_bytes = literal.as_bytes();
         let text_bytes = text.as_bytes();
         let literal_len = literal_bytes.len();
+        let text_len = text_bytes.len();
 
-        let mut matches = Vec::new();
+        // Pre-allocate based on expected match count to avoid reallocations
+        // Assume ~1 match per 10 bytes as a reasonable upper bound
+        let capacity = (text_len / 10).max(1).min(1024);
+        let mut matches = Vec::with_capacity(capacity);
         let mut pos = 0;
 
         while let Some(found) = memmem::find(&text_bytes[pos..], literal_bytes) {
