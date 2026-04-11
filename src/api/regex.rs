@@ -1778,6 +1778,28 @@ impl FuzzyRegex {
             }
         }
 
+        // Fast path for character class + literal: \w+@, \d+\., etc.
+        // Find literal with memchr, extend backwards with character class
+        if self.is_class_plus_with_literal
+            && !self.has_recursion
+            && !self.literals.is_empty()
+            && self.capture_count == 0
+            && !self.config.case_insensitive
+        {
+            let all_simple = self.literals.iter().all(|l| {
+                l.limits.is_none() && l.min_edits.is_none() && l.edit_chars.is_none()
+            });
+            if all_simple && self.literals.len() <= 3 {
+                if let Some(class_type) = self.nfa.get_char_class_type() {
+                    return Matches::new(Self::find_all_class_plus_literal(
+                        text,
+                        class_type,
+                        &self.literals.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
+                    ));
+                }
+            }
+        }
+
         // Fast path for greedy/lazy char class plus: \d+, \d+?, \w+, \w+?, [a-z]+, [a-z]+?
         // This is critical for performance - lazy quantifiers were 23x slower than regex
         if self.is_char_class_plus_or_lazy && self.literals.is_empty() {
@@ -2471,6 +2493,90 @@ impl FuzzyRegex {
         }
 
         None
+    }
+
+    /// Fast path for character class + literal: \w+@, [a-z]+#, etc.
+    /// Finds all matches by scanning for literal, then extending with character class.
+    fn find_all_class_plus_literal<'a>(
+        text: &'a str,
+        class_type: &str,
+        literals: &[&str],
+    ) -> Vec<Match<'a>> {
+        let bytes = text.as_bytes();
+        let len = bytes.len();
+
+        if len == 0 || literals.is_empty() {
+            return Vec::new();
+        }
+
+        let matches_class: fn(u8) -> bool = match class_type {
+            "digit" => |b: u8| b.is_ascii_digit(),
+            "word" => |b: u8| b.is_ascii_alphanumeric() || b == b'_',
+            "whitespace" => |b: u8| b.is_ascii_whitespace(),
+            "not_digit" => |b: u8| !b.is_ascii_digit(),
+            "not_word" => |b: u8| !b.is_ascii_alphanumeric() && b != b'_',
+            "not_whitespace" => |b: u8| !b.is_ascii_whitespace(),
+            _ => |b: u8| b.is_ascii_alphanumeric() || b == b'_',
+        };
+
+        let mut matches = Vec::new();
+
+        for literal in literals {
+            let lit_bytes = literal.as_bytes();
+            if lit_bytes.is_empty() {
+                continue;
+            }
+
+            let mut pos = 0;
+            while pos < len {
+                if let Some(found) = memmem::find(&bytes[pos..], lit_bytes) {
+                    let abs_pos = pos + found;
+                    let lit_end = abs_pos + lit_bytes.len();
+
+                    // Extend backwards
+                    let mut class_start = abs_pos;
+                    while class_start > 0 && matches_class(bytes[class_start - 1]) {
+                        class_start -= 1;
+                    }
+
+                    // Extend forward
+                    let mut class_end = lit_end;
+                    while class_end < len && matches_class(bytes[class_end]) {
+                        class_end += 1;
+                    }
+
+                    if class_end > class_start {
+                        matches.push(Match::new(
+                            text,
+                            class_start,
+                            class_end,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+
+                    pos = lit_end;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Sort and deduplicate
+        matches.sort_by_key(|m| (m.start(), std::cmp::Reverse(m.end())));
+
+        let mut result = Vec::new();
+        let mut last_end = 0isize;
+        for m in matches {
+            let start = m.start();
+            let end = m.end();
+            if start as isize >= last_end {
+                result.push(m);
+                last_end = end as isize;
+            }
+        }
+
+        result
     }
 
     /// Fast path for ANY character class + literal: [a-z]+@, [0-9]+#
