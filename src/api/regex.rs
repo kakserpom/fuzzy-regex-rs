@@ -1686,6 +1686,46 @@ impl FuzzyRegex {
             }));
         }
 
+        // Fast path for simple alternations using Aho-Corasick
+        // Pattern like (?:a|b|c) - multiple literal alternatives
+        #[cfg(feature = "fuzzy-aho-corasick")]
+        if let Some(ref ac) = self.aho_corasick {
+            // Collect all matches from Aho-Corasick
+            let mut matches: Vec<Match<'_>> = ac
+                .find_iter(text)
+                .map(|m| {
+                    let pattern_idx = m.pattern().as_usize();
+                    let lit_len = if pattern_idx < self.literals.len() {
+                        self.literals[pattern_idx].text.len()
+                    } else {
+                        m.end() - m.start()
+                    };
+                    Match::new(
+                        text,
+                        m.start(),
+                        m.start() + lit_len,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    )
+                })
+                .collect();
+
+            // Sort by start position, then by end position (for leftmost semantics)
+            matches.sort_by_key(|m| (m.start(), std::cmp::Reverse(m.end())));
+
+            // Deduplicate overlapping matches (keep leftmost-longest per position)
+            let mut result = Vec::new();
+            let mut last_end = 0isize;
+            for m in matches {
+                if m.start() as isize >= last_end {
+                    result.push(m);
+                    last_end = m.end() as isize;
+                }
+            }
+
+            return Matches::new(result);
+        }
+
         // DFA fast path: use DFA for patterns that are DFA-compatible
         // This provides O(1) per character matching vs O(states) for NFA
         if let Some(ref dfa_cell) = self.dfa {
