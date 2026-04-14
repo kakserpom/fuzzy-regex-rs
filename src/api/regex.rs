@@ -27,7 +27,7 @@ use aho_corasick::AhoCorasick;
 use super::builder::{FuzzyRegexBuilder, HandlerMap, RegexConfig};
 
 type SmartStr = String;
-use super::match_result::{CaptureMatches, Captures, Match, Matches, Replacer, Split};
+use super::match_result::{CaptureMatches, Captures, LazyLiteralMatches, LazyMatches, Match, Matches, Replacer, Split};
 use crate::compiler::build_nfa;
 use crate::engine::backtrack::{BacktrackConfig, BacktrackMatcher};
 use crate::engine::hash::FxHashMap;
@@ -1671,19 +1671,21 @@ impl FuzzyRegex {
     }
 
     /// Find all non-overlapping matches.
-    pub fn find_iter<'t>(&self, text: &'t str) -> Matches<'t> {
+    pub fn find_iter<'t>(&self, text: &'t str) -> LazyMatches<'t> {
         // Word list fast path: handle \L<name> patterns
         if !self.word_lists.is_empty() {
-            return Matches::new(self.find_all_word_list(text));
+            return LazyMatches::Eager(Matches::new(self.find_all_word_list(text)));
         }
 
-        // Fast path for simple exact literal patterns: use memchr
-        // This is critical for performance - literal patterns are common and memchr is very fast
-        // Check this BEFORE DFA to avoid DFA overhead for simple cases
+        // Fast path for simple exact literal patterns: use lazy iterator
+        // This is critical for performance - literal patterns are common
+        // The lazy iterator defers scanning until next() is called
         if self.can_use_memchr_fast_path && self.fuzzy_bridge.is_none() {
-            return Matches::new(Self::find_all_literal_fast(text, unsafe {
-                &*self.fast_path_literal.unwrap()
-            }));
+            let literal = unsafe { &*self.fast_path_literal.unwrap() };
+            return LazyMatches::Lazy(LazyLiteralMatches::new(
+                text,
+                literal.as_bytes().to_vec(),
+            ));
         }
 
         // Fast path for simple alternations using Aho-Corasick
@@ -1723,13 +1725,13 @@ impl FuzzyRegex {
                 }
             }
 
-            return Matches::new(result);
+            return LazyMatches::Eager(Matches::new(result));
         }
 
         // DFA fast path: use DFA for patterns that are DFA-compatible
         // This provides O(1) per character matching vs O(states) for NFA
         if let Some(ref dfa_cell) = self.dfa {
-            return Matches::new(
+            return LazyMatches::Eager(Matches::new(
                 dfa_cell
                     .borrow_mut()
                     .find_all(text)
@@ -1744,24 +1746,24 @@ impl FuzzyRegex {
                         )
                     })
                     .collect(),
-            );
+            ));
         }
 
         // Fast path for start-anchored patterns: can only match at position 0
         // Use find_single_matcher to avoid infinite recursion (find -> find_iter -> find)
         if self.anchored && !self.config.multi_line {
-            return Matches::new(self.find_single_matcher(text).into_iter().collect());
+            return LazyMatches::Eager(Matches::new(self.find_single_matcher(text).into_iter().collect()));
         }
 
         // For simple fuzzy patterns, use optimized batch collection
         if self.is_simple_fuzzy() && self.fuzzy_bridge.is_some() {
-            return Matches::new(self.find_all_non_overlapping_fast(text));
+            return LazyMatches::Eager(Matches::new(self.find_all_non_overlapping_fast(text)));
         }
 
         // Optimization for patterns like .*?LITERAL: scan for literal positions
         // and emit matches from previous end to each literal position
         if self.has_lazy && self.literals.len() == 1 && self.fuzzy_bridge.is_some() {
-            return Matches::new(self.find_all_lazy_literal_fast(text));
+            return LazyMatches::Eager(Matches::new(self.find_all_lazy_literal_fast(text)));
         }
 
         // Optimization for word-bounded literals like \bword\b, \bword, word\b (but NOT \Bword\B)
@@ -1770,11 +1772,11 @@ impl FuzzyRegex {
                 && literal.limits.is_none()
             {
                 // Non-fuzzy - use fast exact search
-                return Matches::new(Self::find_all_word_bounded_exact(text, &literal.text));
+                return LazyMatches::Eager(Matches::new(Self::find_all_word_bounded_exact(text, &literal.text)));
             }
             // Fuzzy - use fast fuzzy search (but avoid slow path)
             if self.fuzzy_bridge.is_some() {
-                return Matches::new(self.find_all_word_bounded_literal_fast(text));
+                return LazyMatches::Eager(Matches::new(self.find_all_word_bounded_literal_fast(text)));
             }
         }
 
@@ -1791,11 +1793,11 @@ impl FuzzyRegex {
             });
             if all_simple && self.literals.len() <= 3 {
                 if let Some(class_type) = self.nfa.get_char_class_type() {
-                    return Matches::new(Self::find_all_class_plus_literal(
+                    return LazyMatches::Eager(Matches::new(Self::find_all_class_plus_literal(
                         text,
                         class_type,
                         &self.literals.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
-                    ));
+                    )));
                 }
             }
         }
@@ -1805,22 +1807,22 @@ impl FuzzyRegex {
         if self.is_char_class_plus_or_lazy && self.literals.is_empty() {
             if let Some(class_type) = self.nfa.get_char_class_type() {
                 // has_lazy controls greedy vs lazy behavior
-                return Matches::new(Self::find_all_char_class_plus(
+                return LazyMatches::Eager(Matches::new(Self::find_all_char_class_plus(
                     text,
                     self.has_lazy,
                     Some(class_type),
-                ));
+                )));
             }
         }
 
         // For all other patterns, use batch collection with single Matcher
-        Matches::new(
+        LazyMatches::Eager(Matches::new(
             self.create_matcher(self.is_unanchored())
                 .find_all(text)
                 .into_iter()
                 .map(|m| self.convert_match(text, m))
                 .collect(),
-        )
+        ))
     }
 
     /// Find the first `n` non-overlapping matches.
@@ -2356,39 +2358,6 @@ impl FuzzyRegex {
             }
 
             i = run_end;
-        }
-
-        matches
-    }
-
-    /// Fast path for finding all literal matches using memmem.
-    /// Used by find_iter for simple exact literal patterns.
-    fn find_all_literal_fast<'t>(text: &'t str, literal: &str) -> Vec<Match<'t>> {
-        if literal.is_empty() {
-            return Vec::new();
-        }
-
-        let literal_bytes = literal.as_bytes();
-        let text_bytes = text.as_bytes();
-        let literal_len = literal_bytes.len();
-        let text_len = text_bytes.len();
-
-        // Pre-allocate based on expected match count to avoid reallocations
-        // Assume ~1 match per 10 bytes as a reasonable upper bound
-        let capacity = (text_len / 10).max(1).min(1024);
-        let mut matches = Vec::with_capacity(capacity);
-        let mut pos = 0;
-
-        while let Some(found) = memmem::find(&text_bytes[pos..], literal_bytes) {
-            let abs_pos = pos + found;
-            matches.push(Match::new(
-                text,
-                abs_pos,
-                abs_pos + literal_len,
-                1.0,
-                crate::engine::EditCounts::default(),
-            ));
-            pos = abs_pos + 1;
         }
 
         matches
