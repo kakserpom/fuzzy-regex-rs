@@ -81,6 +81,32 @@ fn main() {
     });
 
     // ============================================================
+    // Test 2b: Lazy quantifiers (key test for our optimization)
+    // ============================================================
+    println!("\n=== Lazy Quantifiers ===\n");
+
+    let digit_text = "1234567890abc1234567890".repeat(10); // 440 bytes with digits
+
+    let fuzzy_lazy = FuzzyRegex::new(r"\d+?").unwrap();
+    let std_lazy = Regex::new(r"\d+?").unwrap();
+
+    bench("regex: \\d+? find (short)", 50000, || {
+        let _ = std_lazy.find(&digit_text);
+    });
+    bench("fuzzy-regex: \\d+? find (short)", 50000, || {
+        let _ = fuzzy_lazy.find(&digit_text);
+    });
+
+    // find_iter (all matches)
+    let digit_text_long = "123 456 789 012 345 678 901 234 567 890".repeat(10);
+    bench("regex: \\d+? find_iter", 5000, || {
+        let _ = std_lazy.find_iter(&digit_text_long).collect::<Vec<_>>();
+    });
+    bench("fuzzy-regex: \\d+? find_iter", 5000, || {
+        let _ = fuzzy_lazy.find_iter(&digit_text_long).collect::<Vec<_>>();
+    });
+
+    // ============================================================
     // Test 3: Word boundaries
     // Note: fuzzy-regex uses optimized word boundary detection
     // ============================================================
