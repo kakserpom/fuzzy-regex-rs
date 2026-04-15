@@ -7,7 +7,6 @@ use std::ops::Range;
 
 use crate::engine::hash::FxHashMap;
 use crate::engine::EditCounts;
-use memchr::memmem;
 
 /// Control replacement behavior in `replace_all_with`.
 #[derive(Debug, Clone)]
@@ -624,15 +623,39 @@ impl<'c, 't> IntoIterator for &'c Captures<'t> {
 
 /// Iterator over all matches.
 pub struct Matches<'t> {
-    matches: std::vec::IntoIter<Match<'t>>,
+    inner: MatchesInner<'t>,
+}
+
+enum MatchesInner<'t> {
+    Eager(std::vec::IntoIter<Match<'t>>),
+    Lazy {
+        text: &'t str,
+        literal: Vec<u8>,
+        literal_len: usize,
+        pos: usize,
+        exhausted: bool,
+    },
 }
 
 impl<'t> Matches<'t> {
-    /// Create a Matches iterator from pre-collected matches.
     #[inline]
     pub(crate) fn new(matches: Vec<Match<'t>>) -> Self {
         Matches {
-            matches: matches.into_iter(),
+            inner: MatchesInner::Eager(matches.into_iter()),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn new_lazy(text: &'t str, literal: Vec<u8>) -> Self {
+        let literal_len = literal.len();
+        Matches {
+            inner: MatchesInner::Lazy {
+                text,
+                literal,
+                literal_len,
+                pos: 0,
+                exhausted: false,
+            },
         }
     }
 }
@@ -642,90 +665,43 @@ impl<'t> Iterator for Matches<'t> {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.matches.next()
-    }
-}
+        match &mut self.inner {
+            MatchesInner::Eager(iter) => iter.next(),
+            MatchesInner::Lazy {
+                text,
+                literal,
+                literal_len,
+                pos,
+                exhausted,
+            } => {
+                if *exhausted {
+                    return None;
+                }
 
-/// Lazy iterator for simple literal patterns.
-/// Defers scanning until next() is called, enabling early termination.
-pub struct LazyLiteralMatches<'t> {
-    text: &'t str,
-    literal: Vec<u8>,
-    literal_len: usize,
-    pos: usize,
-    exhausted: bool,
-}
+                let text_bytes = text.as_bytes();
+                let text_len = text_bytes.len();
 
-impl<'t> LazyLiteralMatches<'t> {
-    /// Create a lazy literal matches iterator.
-    #[inline]
-    pub(crate) fn new(text: &'t str, literal: Vec<u8>) -> Self {
-        let literal_len = literal.len();
-        LazyLiteralMatches {
-            text,
-            literal,
-            literal_len,
-            pos: 0,
-            exhausted: false,
-        }
-    }
-}
+                if *pos >= text_len {
+                    *exhausted = true;
+                    return None;
+                }
 
-impl<'t> Iterator for LazyLiteralMatches<'t> {
-    type Item = Match<'t>;
+                if let Some(found) = memchr::memmem::find(&text_bytes[*pos..], literal) {
+                    let abs_pos = *pos + found;
+                    *pos = abs_pos + 1;
 
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.exhausted {
-            return None;
-        }
-
-        let text_bytes = self.text.as_bytes();
-        let text_len = text_bytes.len();
-
-        loop {
-            if self.pos >= text_len {
-                self.exhausted = true;
-                return None;
+                    return Some(Match::new(
+                        text,
+                        abs_pos,
+                        abs_pos + *literal_len,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
+                } else {
+                    *exhausted = true;
+                    return None;
+                }
             }
-
-            if let Some(found) = memchr::memmem::find(&text_bytes[self.pos..], &self.literal) {
-                let abs_pos = self.pos + found;
-                self.pos = abs_pos + 1;
-
-                return Some(Match::new(
-                    self.text,
-                    abs_pos,
-                    abs_pos + self.literal_len,
-                    1.0,
-                    crate::engine::EditCounts::default(),
-                ));
-            } else {
-                self.exhausted = true;
-                return None;
-            }
-        }
-    }
-}
-
-/// Enum that can hold either eager Matches or lazy LazyLiteralMatches.
-/// Used to enable lazy iteration for simple literal patterns while maintaining
-/// compatibility with complex patterns that require eager collection.
-pub enum LazyMatches<'t> {
-    /// Eager collection for complex patterns
-    Eager(Matches<'t>),
-    /// Lazy iteration for simple literal patterns
-    Lazy(LazyLiteralMatches<'t>),
-}
-
-impl<'t> Iterator for LazyMatches<'t> {
-    type Item = Match<'t>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            LazyMatches::Eager(m) => m.next(),
-            LazyMatches::Lazy(m) => m.next(),
         }
     }
 }
