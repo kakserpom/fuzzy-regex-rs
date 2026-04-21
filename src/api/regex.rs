@@ -108,6 +108,10 @@ pub struct FuzzyRegex {
     word_lists: FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
     /// Custom handlers for (?call:name) patterns.
     handlers: HandlerMap,
+    /// Simple lookbehind fast path: (lookbehind_literal, main_literal)
+    simple_lookbehind: Option<(String, String)>,
+    /// Simple lookahead fast path: (main_literal, lookahead_literal)
+    simple_lookahead: Option<(String, String)>,
 }
 
 impl std::fmt::Debug for FuzzyRegex {
@@ -302,6 +306,19 @@ impl FuzzyRegex {
             None
         };
 
+        // Detect simple literal lookarounds for fast path
+        // Note: we detect here but use it in find()/find_iter()
+        let simple_lookbehind = if !nfa.has_lookbehind() {
+            None
+        } else {
+            Self::detect_simple_lookbehind(&pattern)
+        };
+        let simple_lookahead = if !nfa.has_lookahead() {
+            None
+        } else {
+            Self::detect_simple_lookahead(&pattern)
+        };
+
         // Pre-compute repetition fast path: (?:literal){N} with identical non-fuzzy literals
         // This is checked at runtime for simple patterns
         let (can_use_repetition_fast_path, fast_path_repeated_literal) = if literals.len() >= 2
@@ -408,6 +425,8 @@ impl FuzzyRegex {
             fast_path_repeated_literal,
             word_lists: FxHashMap::default(),
             handlers: config.handlers,
+            simple_lookbehind,
+            simple_lookahead,
         })
     }
 
@@ -600,6 +619,60 @@ impl FuzzyRegex {
                     1.0,
                     crate::engine::EditCounts::default(),
                 ));
+            }
+            return None;
+        }
+
+        // Fast path for simple literal lookbehind (?<=X)Y where X and Y are exact literals
+        if let Some((lb_literal, main_literal)) = &self.simple_lookbehind {
+            let lb_bytes = lb_literal.as_bytes();
+            let main_bytes = main_literal.as_bytes();
+            let text_bytes = text.as_bytes();
+            // Find main_literal, then verify lookbehind before it
+            let mut search_start = 0;
+            while let Some(pos) = memmem::find(&text_bytes[search_start..], main_bytes) {
+                let abs_pos = search_start + pos;
+                // Need lb_literal immediately before main_literal
+                if abs_pos >= lb_bytes.len() {
+                    let lb_start = abs_pos - lb_bytes.len();
+                    if &text_bytes[lb_start..abs_pos] == lb_bytes {
+                        return Some(Match::new(
+                            text,
+                            abs_pos,
+                            abs_pos + main_bytes.len(),
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+                }
+                search_start = abs_pos + 1;
+            }
+            return None;
+        }
+
+        // Fast path for simple literal lookahead X(?=Y) where X and Y are exact literals
+        if let Some((main_literal, la_literal)) = &self.simple_lookahead {
+            let main_bytes = main_literal.as_bytes();
+            let la_bytes = la_literal.as_bytes();
+            let text_bytes = text.as_bytes();
+            // Find main_literal, then verify lookahead immediately after it
+            let mut search_start = 0;
+            while let Some(pos) = memmem::find(&text_bytes[search_start..], main_bytes) {
+                let abs_pos = search_start + pos;
+                let main_end = abs_pos + main_bytes.len();
+                // Need la_literal immediately after main_literal
+                if main_end + la_bytes.len() <= text_bytes.len() {
+                    if &text_bytes[main_end..main_end + la_bytes.len()] == la_bytes {
+                        return Some(Match::new(
+                            text,
+                            abs_pos,
+                            main_end,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+                }
+                search_start = abs_pos + 1;
             }
             return None;
         }
@@ -2014,6 +2087,68 @@ impl FuzzyRegex {
 
     /// Check if a byte is a word character (ASCII alphanumeric or underscore).
     #[inline]
+    /// Detect simple positive lookbehind pattern: (?<=X)Y where X and Y are exact literals
+    /// Returns Some((lookbehind, main_literal)) if pattern is simple, None otherwise
+    fn detect_simple_lookbehind(pattern: &str) -> Option<(String, String)> {
+        // Simple check: pattern should look like (?<=X)Y
+        if !pattern.starts_with("(?<=") {
+            return None;
+        }
+        // Find the closing ) after (?<=
+        let lb_start = 3; // after (?<=
+        let lb_end = pattern.find(')')?;
+        if lb_end <= lb_start {
+            return None;
+        }
+        let lookbehind = &pattern[lb_start..lb_end];
+        // Skip ) and check for main literal
+        let remainder = &pattern[lb_end + 1..];
+        if remainder.is_empty() {
+            return None;
+        }
+        // Main literal should be plain (no special chars that need escaping)
+        // For now, only support simple alphanumeric literals
+        if !remainder.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_') {
+            return None;
+        }
+        // Ensure lookbehind is also simple literal
+        if !lookbehind.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_') {
+            return None;
+        }
+        Some((lookbehind.to_string(), remainder.to_string()))
+    }
+
+    /// Detect simple positive lookahead pattern: X(?=Y) where X and Y are exact literals
+    /// Returns Some((main_literal, lookahead)) if pattern is simple, None otherwise
+    fn detect_simple_lookahead(pattern: &str) -> Option<(String, String)> {
+        // Pattern should be like: main(?=la)
+        if !pattern.contains("(?=") {
+            return None;
+        }
+        if pattern.starts_with("(?=") {
+            return None; // no main literal before lookahead
+        }
+        // Split at (?=
+        let la_start = pattern.find("(?=")?;
+        let main_literal = &pattern[..la_start];
+        let remainder = &pattern[la_start + 3..]; // after (?=
+        let la_end = remainder.find(')')?;
+        let lookahead = &remainder[..la_end];
+        let after = &remainder[la_end + 1..];
+        // Main literal must exist and nothing should follow (or end anchor)
+        if main_literal.is_empty() || !after.is_empty() {
+            return None;
+        }
+        // Both should be simple literals
+        if !main_literal.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_') {
+            return None;
+        }
+        if !lookahead.chars().all(|c| c.is_alphanumeric() || c == '.' || c == '-' || c == '_') {
+            return None;
+        }
+        Some((main_literal.to_string(), lookahead.to_string()))
+    }
+
     fn is_word_char(b: u8) -> bool {
         b.is_ascii_alphanumeric() || b == b'_'
     }
