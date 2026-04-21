@@ -360,6 +360,21 @@ impl<'a> BacktrackMatcher<'a> {
                     state = *next;
                 }
 
+                State::LookaheadLiteral {
+                    positive,
+                    literal,
+                    next,
+                } => {
+                    // Inline literal lookahead - check if literal exists at current position
+                    let matched = text.len() >= pos + literal.len()
+                        && &text.as_bytes()[pos..pos + literal.len()] == literal.as_slice();
+                    if matched == *positive {
+                        state = *next;
+                    } else {
+                        return None;
+                    }
+                }
+
                 State::Lookbehind {
                     positive: _,
                     nfa: _,
@@ -369,6 +384,21 @@ impl<'a> BacktrackMatcher<'a> {
                 } => {
                     // For lookbehind, similar complexity
                     state = *next;
+                }
+
+                State::LookbehindLiteral {
+                    positive,
+                    literal,
+                    next,
+                } => {
+                    // Inline literal lookbehind - check if literal exists before current position
+                    let matched = pos >= literal.len()
+                        && &text.as_bytes()[pos - literal.len()..pos] == literal.as_slice();
+                    if matched == *positive {
+                        state = *next;
+                    } else {
+                        return None;
+                    }
                 }
 
                 State::Backreference { group, next, .. } => {

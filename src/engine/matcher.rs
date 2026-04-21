@@ -1839,6 +1839,24 @@ impl<'a> Matcher<'a> {
                 }
             }
 
+            State::LookaheadLiteral {
+                positive,
+                literal,
+                next,
+            } => {
+                // Inline literal lookahead - check if literal exists at current position
+                let bytes = text.as_bytes();
+                let pos = thread.pos;
+                let matched = pos + literal.len() <= bytes.len()
+                    && &bytes[pos..pos + literal.len()] == literal.as_slice();
+                if matched == *positive {
+                    next_threads.push(Thread {
+                        state: *next,
+                        ..thread
+                    });
+                }
+            }
+
             State::Lookbehind {
                 positive,
                 nfa,
@@ -1850,6 +1868,24 @@ impl<'a> Matcher<'a> {
                     self.try_lookbehind(text, thread.pos, nfa, literals, bridge.as_deref());
 
                 if has_match == *positive {
+                    next_threads.push(Thread {
+                        state: *next,
+                        ..thread
+                    });
+                }
+            }
+
+            State::LookbehindLiteral {
+                positive,
+                literal,
+                next,
+            } => {
+                // Inline literal lookbehind - check if literal exists before current position
+                let bytes = text.as_bytes();
+                let pos = thread.pos;
+                let matched = pos >= literal.len()
+                    && &bytes[pos - literal.len()..pos] == literal.as_slice();
+                if matched == *positive {
                     next_threads.push(Thread {
                         state: *next,
                         ..thread
@@ -2042,6 +2078,14 @@ impl<'a> Matcher<'a> {
 
             // Other anchors (like word boundary) - continue through
             State::Anchor { next, .. } => self.find_expected_end_recursive(*next, text_len, visited),
+
+            // Lookarounds don't consume characters - continue through
+            State::Lookahead { next, .. }
+            | State::LookaheadLiteral { next, .. }
+            | State::Lookbehind { next, .. }
+            | State::LookbehindLiteral { next, .. } => {
+                self.find_expected_end_recursive(*next, text_len, visited)
+            }
 
             // Accept without End anchor - no expected end
             State::Accept

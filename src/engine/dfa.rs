@@ -933,7 +933,9 @@ impl Dfa {
                 // These can't be converted to DFA
                 State::FuzzyChar { .. }
                 | State::Lookahead { .. }
+                | State::LookaheadLiteral { .. }
                 | State::Lookbehind { .. }
+                | State::LookbehindLiteral { .. }
                 | State::Backreference { .. }
                 | State::AtomicGroup { .. }
                 | State::RecursivePattern { .. }

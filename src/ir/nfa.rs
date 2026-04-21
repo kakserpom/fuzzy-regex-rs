@@ -226,7 +226,9 @@ impl Nfa {
             | State::CaptureEnd { .. }
             | State::Anchor { .. }
             | State::Lookahead { .. }
+            | State::LookaheadLiteral { .. }
             | State::Lookbehind { .. }
+            | State::LookbehindLiteral { .. }
             | State::Backreference { .. }
             | State::Split { .. }
             | State::ResetMatchStart { .. }
@@ -293,7 +295,7 @@ impl Nfa {
     pub fn has_lookahead(&self) -> bool {
         self.states
             .iter()
-            .any(|state| matches!(state, State::Lookahead { .. }))
+            .any(|state| matches!(state, State::Lookahead { .. } | State::LookaheadLiteral { .. }))
     }
 
     /// Check if this NFA contains lookbehind assertions.
@@ -301,7 +303,7 @@ impl Nfa {
     pub fn has_lookbehind(&self) -> bool {
         self.states
             .iter()
-            .any(|state| matches!(state, State::Lookbehind { .. }))
+            .any(|state| matches!(state, State::Lookbehind { .. } | State::LookbehindLiteral { .. }))
     }
 
     /// Check if this NFA contains word boundary anchors.
@@ -1473,7 +1475,9 @@ impl Nfa {
             | State::Backreference { next, .. }
             | State::ResetMatchStart { next }
             | State::Lookahead { next, .. }
+            | State::LookaheadLiteral { next, .. }
             | State::Lookbehind { next, .. }
+            | State::LookbehindLiteral { next, .. }
             | State::AtomicGroup { next, .. }
             | State::RecursivePattern { next, .. }
             | State::RecursiveGroup { next, .. }
@@ -1561,7 +1565,10 @@ impl Nfa {
                 max
             }
 
-            State::Lookahead { next, .. } | State::Lookbehind { next, .. } => {
+            State::Lookahead { next, .. }
+            | State::LookaheadLiteral { next, .. }
+            | State::Lookbehind { next, .. }
+            | State::LookbehindLiteral { next, .. } => {
                 // Assertions don't consume
                 self.max_simple_length_from(*next, visited)
             }
@@ -1688,7 +1695,9 @@ impl Nfa {
             | State::CaptureEnd { next, .. }
             | State::Anchor { next, .. }
             | State::Lookahead { next, .. }
+            | State::LookaheadLiteral { next, .. }
             | State::Lookbehind { next, .. }
+            | State::LookbehindLiteral { next, .. }
             | State::AtomicGroup { next, .. } => {
                 self.length_range_state(*next, pattern_lengths, visited, memo)
             }
@@ -1822,6 +1831,16 @@ pub enum State {
         next: StateId,
     },
 
+    /// Optimized lookahead for simple exact literal (inline, no sub-NFA).
+    LookaheadLiteral {
+        /// True for positive lookahead, false for negative.
+        positive: bool,
+        /// Literal bytes to match.
+        literal: Vec<u8>,
+        /// Next state if assertion passes.
+        next: StateId,
+    },
+
     /// Lookbehind assertion.
     Lookbehind {
         /// True for positive lookbehind, false for negative.
@@ -1832,6 +1851,16 @@ pub enum State {
         literals: Vec<LiteralPattern>,
         /// Pre-built `FuzzyBridge` for efficient matching (shared via Arc for Clone).
         bridge: Option<Arc<FuzzyBridge>>,
+        /// Next state if assertion passes.
+        next: StateId,
+    },
+
+    /// Optimized lookbehind for simple exact literal (inline, no sub-NFA).
+    LookbehindLiteral {
+        /// True for positive lookbehind, false for negative.
+        positive: bool,
+        /// Literal bytes to match.
+        literal: Vec<u8>,
         /// Next state if assertion passes.
         next: StateId,
     },
@@ -2034,7 +2063,9 @@ impl State {
             | State::CaptureEnd { next, .. }
             | State::Anchor { next, .. }
             | State::Lookahead { next, .. }
+            | State::LookaheadLiteral { next, .. }
             | State::Lookbehind { next, .. }
+            | State::LookbehindLiteral { next, .. }
             | State::Backreference { next, .. }
             | State::AtomicGroup { next, .. }
             | State::RecursivePattern { next, .. }

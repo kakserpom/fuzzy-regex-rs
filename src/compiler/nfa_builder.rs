@@ -32,6 +32,40 @@ impl NfaBuilder {
         }
     }
 
+    /// Check if HIR is a simple literal that can be inlined.
+    /// Returns the literal bytes if simple (no fuzzy), None otherwise.
+    fn get_simple_literal(hir: &Hir) -> Option<Vec<u8>> {
+        match hir {
+            Hir::Literal {
+                text,
+                limits,
+                min_edits,
+                edit_chars,
+                ..
+            } => {
+                if limits.is_none() && min_edits.is_none() && edit_chars.is_none() {
+                    let txt = text.as_str();
+                    if txt.chars().all(|c: char| {
+                        c.is_ascii_alphanumeric()
+                            || c == '.'
+                            || c == '-'
+                            || c == '_'
+                            || c == '@'
+                            || c == ':'
+                            || c == '/'
+                    }) {
+                        Some(txt.as_bytes().to_vec())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Build an NFA from HIR.
     #[must_use]
     pub fn build(mut self, hir: &Hir) -> (Nfa, Vec<LiteralPattern>) {
@@ -189,6 +223,16 @@ impl NfaBuilder {
             }
 
             Hir::Lookahead { positive, expr } => {
+                // Check if we can use the optimized literal form
+                if let Some(literal_bytes) = Self::get_simple_literal(expr) {
+                    let state = self.nfa.add_state(State::LookaheadLiteral {
+                        positive: *positive,
+                        literal: literal_bytes,
+                        next: 0,
+                    });
+                    return NfaFragment::single(state, state);
+                }
+
                 // Build sub-NFA for the assertion
                 let sub_builder = NfaBuilder::new();
                 let (sub_nfa, sub_literals) = sub_builder.build(expr);
@@ -203,6 +247,16 @@ impl NfaBuilder {
             }
 
             Hir::Lookbehind { positive, expr } => {
+                // Check if we can use the optimized literal form
+                if let Some(literal_bytes) = Self::get_simple_literal(expr) {
+                    let state = self.nfa.add_state(State::LookbehindLiteral {
+                        positive: *positive,
+                        literal: literal_bytes,
+                        next: 0,
+                    });
+                    return NfaFragment::single(state, state);
+                }
+
                 let sub_builder = NfaBuilder::new();
                 let (sub_nfa, sub_literals) = sub_builder.build(expr);
 
@@ -533,7 +587,9 @@ impl NfaBuilder {
             | State::CaptureEnd { next, .. }
             | State::Anchor { next, .. }
             | State::Lookahead { next, .. }
+            | State::LookaheadLiteral { next, .. }
             | State::Lookbehind { next, .. }
+            | State::LookbehindLiteral { next, .. }
             | State::Backreference { next, .. }
             | State::AtomicGroup { next, .. }
             | State::RecursivePattern { next, .. }
@@ -637,16 +693,14 @@ mod tests {
         let (nfa, _) = build_nfa(&hir);
 
         // Should have capture start and end
-        assert!(
-            nfa.states
-                .iter()
-                .any(|s| matches!(s, State::CaptureStart { .. }))
-        );
-        assert!(
-            nfa.states
-                .iter()
-                .any(|s| matches!(s, State::CaptureEnd { .. }))
-        );
+        assert!(nfa
+            .states
+            .iter()
+            .any(|s| matches!(s, State::CaptureStart { .. })));
+        assert!(nfa
+            .states
+            .iter()
+            .any(|s| matches!(s, State::CaptureEnd { .. })));
     }
 
     #[test]
