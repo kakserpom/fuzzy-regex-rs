@@ -1779,8 +1779,8 @@ impl FuzzyRegex {
             let mut last_end = 0isize;
             for m in matches {
                 if m.start() as isize >= last_end {
-                    result.push(m);
                     last_end = m.end() as isize;
+                    result.push(m);
                 }
             }
 
