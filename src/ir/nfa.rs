@@ -293,17 +293,23 @@ impl Nfa {
     /// Check if this NFA contains any lookahead or lookbehind assertions.
     #[must_use]
     pub fn has_lookahead(&self) -> bool {
-        self.states
-            .iter()
-            .any(|state| matches!(state, State::Lookahead { .. } | State::LookaheadLiteral { .. }))
+        self.states.iter().any(|state| {
+            matches!(
+                state,
+                State::Lookahead { .. } | State::LookaheadLiteral { .. }
+            )
+        })
     }
 
     /// Check if this NFA contains lookbehind assertions.
     #[must_use]
     pub fn has_lookbehind(&self) -> bool {
-        self.states
-            .iter()
-            .any(|state| matches!(state, State::Lookbehind { .. } | State::LookbehindLiteral { .. }))
+        self.states.iter().any(|state| {
+            matches!(
+                state,
+                State::Lookbehind { .. } | State::LookbehindLiteral { .. }
+            )
+        })
     }
 
     /// Check if this NFA contains word boundary anchors.
@@ -534,12 +540,11 @@ impl Nfa {
             State::Char { class: _, next } => {
                 self.check_word_bounded_class(*next, visited, seen_start_boundary, true)
             }
-            State::Split { branches, greedy }
-                if *greedy && branches.len() >= 2 => {
-                    branches.iter().any(|&b| {
-                        self.check_word_bounded_class(b, visited, seen_start_boundary, seen_class)
-                    })
-                }
+            State::Split { branches, greedy } if *greedy && branches.len() >= 2 => {
+                branches.iter().any(|&b| {
+                    self.check_word_bounded_class(b, visited, seen_start_boundary, seen_class)
+                })
+            }
             _ => false,
         }
     }
@@ -600,12 +605,13 @@ impl Nfa {
                     }
                 }
                 State::Split { branches, greedy }
-                    if *greedy && branches.len() == 2 && count < max_count => {
-                        // Branch 0: continue repetition, Branch 1: exit
-                        // Push exit first (lower priority), then continue
-                        stack.push((branches[1], literal.clone(), 0));
-                        stack.push((branches[0], literal.clone(), count + 1));
-                    }
+                    if *greedy && branches.len() == 2 && count < max_count =>
+                {
+                    // Branch 0: continue repetition, Branch 1: exit
+                    // Push exit first (lower priority), then continue
+                    stack.push((branches[1], literal.clone(), 0));
+                    stack.push((branches[0], literal.clone(), count + 1));
+                }
                 _ => return None, // Complex state
             }
         }
@@ -654,12 +660,16 @@ impl Nfa {
 
         // Try greedy first, then lazy
         let mut visited = vec![false; self.states.len()];
-        if has_greedy_loop && self.check_char_class_plus_with_greedy(self.start, &mut visited, false, 0, true) {
+        if has_greedy_loop
+            && self.check_char_class_plus_with_greedy(self.start, &mut visited, false, 0, true)
+        {
             return true;
         }
 
         let mut visited = vec![false; self.states.len()];
-        if has_lazy_loop && self.check_char_class_plus_with_greedy(self.start, &mut visited, false, 0, false) {
+        if has_lazy_loop
+            && self.check_char_class_plus_with_greedy(self.start, &mut visited, false, 0, false)
+        {
             return true;
         }
 
@@ -675,7 +685,10 @@ impl Nfa {
     /// Check if the NFA has a Split state that creates a loop for either greedy or lazy + quantifier
     fn has_char_class_loop_with_greedy(&self, greedy: bool) -> bool {
         for (state_id, state) in self.states.iter().enumerate() {
-            if let State::Split { branches, greedy: is_greedy } = state
+            if let State::Split {
+                branches,
+                greedy: is_greedy,
+            } = state
                 && *is_greedy == greedy
                 && branches.len() >= 2
             {
@@ -1040,16 +1053,17 @@ impl Nfa {
                 }
             }
             State::FuzzyLiteral { next, .. }
-                if seen_start_boundary && !seen_literal && !seen_end_boundary => {
-                    // We have start boundary, now seeing literal
-                    self.check_word_bounded_literal(
-                        *next,
-                        visited,
-                        seen_start_boundary,
-                        false,
-                        true, // Literal seen
-                    )
-                }
+                if seen_start_boundary && !seen_literal && !seen_end_boundary =>
+            {
+                // We have start boundary, now seeing literal
+                self.check_word_bounded_literal(
+                    *next,
+                    visited,
+                    seen_start_boundary,
+                    false,
+                    true, // Literal seen
+                )
+            }
             _ => false,
         }
     }
@@ -1141,20 +1155,19 @@ impl Nfa {
                     false
                 }
             }
-            State::Split { branches, greedy }
-                if *greedy => {
-                    for &branch in branches {
-                        if !self.check_pure_greedy_dotstar(
-                            branch,
-                            visited,
-                            seen_dotstar,
-                            seen_end_anchor,
-                        ) {
-                            return false;
-                        }
+            State::Split { branches, greedy } if *greedy => {
+                for &branch in branches {
+                    if !self.check_pure_greedy_dotstar(
+                        branch,
+                        visited,
+                        seen_dotstar,
+                        seen_end_anchor,
+                    ) {
+                        return false;
                     }
-                    true
                 }
+                true
+            }
             _ => false,
         }
     }

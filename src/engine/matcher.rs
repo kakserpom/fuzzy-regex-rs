@@ -1883,8 +1883,8 @@ impl<'a> Matcher<'a> {
                 // Inline literal lookbehind - check if literal exists before current position
                 let bytes = text.as_bytes();
                 let pos = thread.pos;
-                let matched = pos >= literal.len()
-                    && &bytes[pos - literal.len()..pos] == literal.as_slice();
+                let matched =
+                    pos >= literal.len() && &bytes[pos - literal.len()..pos] == literal.as_slice();
                 if matched == *positive {
                     next_threads.push(Thread {
                         state: *next,

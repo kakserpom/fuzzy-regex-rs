@@ -702,14 +702,16 @@ mod tests {
         let (nfa, _) = build_nfa(&hir);
 
         // Should have capture start and end
-        assert!(nfa
-            .states
-            .iter()
-            .any(|s| matches!(s, State::CaptureStart { .. })));
-        assert!(nfa
-            .states
-            .iter()
-            .any(|s| matches!(s, State::CaptureEnd { .. })));
+        assert!(
+            nfa.states
+                .iter()
+                .any(|s| matches!(s, State::CaptureStart { .. }))
+        );
+        assert!(
+            nfa.states
+                .iter()
+                .any(|s| matches!(s, State::CaptureEnd { .. }))
+        );
     }
 
     #[test]

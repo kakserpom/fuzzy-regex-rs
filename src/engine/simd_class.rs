@@ -228,11 +228,7 @@ impl AsciiClassBitmap {
             self.matches_non_ascii
         };
 
-        if self.negated {
-            !in_bitmap
-        } else {
-            in_bitmap
-        }
+        if self.negated { !in_bitmap } else { in_bitmap }
     }
 
     /// Check if a character is in the class.
@@ -243,11 +239,7 @@ impl AsciiClassBitmap {
             self.contains(ch as u8)
         } else {
             let in_class = self.matches_non_ascii;
-            if self.negated {
-                !in_class
-            } else {
-                in_class
-            }
+            if self.negated { !in_class } else { in_class }
         }
     }
 
@@ -646,7 +638,9 @@ impl RevSearchRanges {
 
     /// Scalar fallback for `find_last`.
     fn find_last_scalar(&self, haystack: &[u8]) -> Option<usize> {
-        (0..haystack.len()).rev().find(|&i| self.matches_byte(haystack[i]))
+        (0..haystack.len())
+            .rev()
+            .find(|&i| self.matches_byte(haystack[i]))
     }
 
     /// Scalar fallback for `find_first`.

@@ -650,15 +650,16 @@ impl FuzzyRegex {
                 let main_end = abs_pos + main_bytes.len();
                 // Check lookahead immediately after
                 if main_end + la_bytes.len() <= text_bytes.len()
-                    && &text_bytes[main_end..main_end + la_bytes.len()] == la_bytes {
-                        return Some(Match::new(
-                            text,
-                            abs_pos,
-                            main_end,
-                            1.0,
-                            crate::engine::EditCounts::default(),
-                        ));
-                    }
+                    && &text_bytes[main_end..main_end + la_bytes.len()] == la_bytes
+                {
+                    return Some(Match::new(
+                        text,
+                        abs_pos,
+                        main_end,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
+                }
                 search_start = abs_pos + 1;
             }
             return None;
@@ -993,7 +994,10 @@ impl FuzzyRegex {
         // Also handles lazy versions: [a-z]+?, \d+?, \w+?
         // Use direct byte scanning instead of DFA/NFA
         // Only use when default_edits == 0 (exact matching, no fuzzy)
-        if self.config.default_edits == 0 && self.is_char_class_plus_or_lazy && self.literals.is_empty() {
+        if self.config.default_edits == 0
+            && self.is_char_class_plus_or_lazy
+            && self.literals.is_empty()
+        {
             let class_type = self.nfa.get_char_class_type();
             return Self::find_char_class_plus_first(text, self.has_lazy, class_type);
         }
@@ -1689,34 +1693,41 @@ impl FuzzyRegex {
         if let Some(ref dfa_cell) = self.dfa {
             let mut dfa = dfa_cell.borrow_mut();
             let len = text.len();
-            
+
             // Step 1: Find all unique matches (no duplicates)
             let mut unique_matches: Vec<(usize, usize)> = Vec::new();
             let mut seen = std::collections::HashSet::new();
-            
+
             for start_pos in 0..=len {
                 if let Some(m) = dfa.find_at(text, start_pos)
                     && m.start == start_pos
-                        && !seen.contains(&(m.start, m.end)) {
-                            seen.insert((m.start, m.end));
-                            unique_matches.push((m.start, m.end));
-                        }
+                    && !seen.contains(&(m.start, m.end))
+                {
+                    seen.insert((m.start, m.end));
+                    unique_matches.push((m.start, m.end));
+                }
             }
-            
+
             // Step 2: Sort by start position (ascending) to get leftmost-longest behavior
             unique_matches.sort_by_key(|m| m.0);
-            
+
             // Step 3: Select non-overlapping matches (greedy leftmost)
             let mut results = Vec::new();
             let mut last_end = 0;
-            
+
             for (start, end) in &unique_matches {
                 if *start >= last_end {
-                    results.push(Match::new(text, *start, *end, 1.0, crate::engine::EditCounts::default()));
+                    results.push(Match::new(
+                        text,
+                        *start,
+                        *end,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    ));
                     last_end = *end;
                 }
             }
-            
+
             // Step 4: Reverse to get rightmost first
             results.reverse();
             return results;
@@ -1847,30 +1858,39 @@ impl FuzzyRegex {
             && self.capture_count == 0
             && !self.config.case_insensitive
         {
-            let all_simple = self.literals.iter().all(|l| {
-                l.limits.is_none() && l.min_edits.is_none() && l.edit_chars.is_none()
-            });
-            if all_simple && self.literals.len() <= 3
-                && let Some(class_type) = self.nfa.get_char_class_type() {
-                    return Matches::new(Self::find_all_class_plus_literal(
-                        text,
-                        class_type,
-                        &self.literals.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
-                    ));
-                }
+            let all_simple = self
+                .literals
+                .iter()
+                .all(|l| l.limits.is_none() && l.min_edits.is_none() && l.edit_chars.is_none());
+            if all_simple
+                && self.literals.len() <= 3
+                && let Some(class_type) = self.nfa.get_char_class_type()
+            {
+                return Matches::new(Self::find_all_class_plus_literal(
+                    text,
+                    class_type,
+                    &self
+                        .literals
+                        .iter()
+                        .map(|l| l.text.as_str())
+                        .collect::<Vec<_>>(),
+                ));
+            }
         }
 
         // Fast path for greedy/lazy char class plus: \d+, \d+?, \w+, \w+?, [a-z]+, [a-z]+?
         // This is critical for performance - lazy quantifiers were 23x slower than regex
-        if self.is_char_class_plus_or_lazy && self.literals.is_empty()
-            && let Some(class_type) = self.nfa.get_char_class_type() {
-                // has_lazy controls greedy vs lazy behavior
-                return Matches::new(Self::find_all_char_class_plus(
-                    text,
-                    self.has_lazy,
-                    Some(class_type),
-                ));
-            }
+        if self.is_char_class_plus_or_lazy
+            && self.literals.is_empty()
+            && let Some(class_type) = self.nfa.get_char_class_type()
+        {
+            // has_lazy controls greedy vs lazy behavior
+            return Matches::new(Self::find_all_char_class_plus(
+                text,
+                self.has_lazy,
+                Some(class_type),
+            ));
+        }
 
         // For all other patterns, use batch collection with single Matcher
         Matches::new(
@@ -2124,32 +2144,55 @@ impl FuzzyRegex {
 
         for (lookahead_idx, state) in nfa.states.iter().enumerate() {
             match state {
-                State::LookbehindLiteral { positive: true, literal, next } => {
+                State::LookbehindLiteral {
+                    positive: true,
+                    literal,
+                    next,
+                } => {
                     if lookbehind.is_none()
                         && let Some(next_state) = nfa.states.get(*next)
-                            && let State::FuzzyLiteral { pattern_index, limits, min_edits, cost_constraint: _, next: _ } = next_state
-                                && limits.is_none() && min_edits.is_none()
-                                    && let Some(lit) = literals.get(*pattern_index) {
-                                        lookbehind = Some((
-                                            String::from_utf8_lossy(literal).to_string(),
-                                            lit.text.clone(),
-                                        ));
-                                    }
+                        && let State::FuzzyLiteral {
+                            pattern_index,
+                            limits,
+                            min_edits,
+                            cost_constraint: _,
+                            next: _,
+                        } = next_state
+                        && limits.is_none()
+                        && min_edits.is_none()
+                        && let Some(lit) = literals.get(*pattern_index)
+                    {
+                        lookbehind = Some((
+                            String::from_utf8_lossy(literal).to_string(),
+                            lit.text.clone(),
+                        ));
+                    }
                 }
-                State::LookaheadLiteral { positive: true, literal, next: _ }
-                    if lookahead.is_none() => {
-                        for prev_state in &nfa.states {
-                            if let State::FuzzyLiteral { pattern_index, limits, min_edits, cost_constraint: _, next: next_state } = prev_state
-                                && *next_state == lookahead_idx
-                                    && limits.is_none() && min_edits.is_none()
-                                        && let Some(lit) = literals.get(*pattern_index) {
-                                            lookahead = Some((
-                                                lit.text.clone(),
-                                                String::from_utf8_lossy(literal).to_string(),
-                                            ));
-                                        }
+                State::LookaheadLiteral {
+                    positive: true,
+                    literal,
+                    next: _,
+                } if lookahead.is_none() => {
+                    for prev_state in &nfa.states {
+                        if let State::FuzzyLiteral {
+                            pattern_index,
+                            limits,
+                            min_edits,
+                            cost_constraint: _,
+                            next: next_state,
+                        } = prev_state
+                            && *next_state == lookahead_idx
+                            && limits.is_none()
+                            && min_edits.is_none()
+                            && let Some(lit) = literals.get(*pattern_index)
+                        {
+                            lookahead = Some((
+                                lit.text.clone(),
+                                String::from_utf8_lossy(literal).to_string(),
+                            ));
                         }
                     }
+                }
                 _ => {}
             }
         }
