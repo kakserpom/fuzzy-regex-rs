@@ -534,15 +534,12 @@ impl Nfa {
             State::Char { class: _, next } => {
                 self.check_word_bounded_class(*next, visited, seen_start_boundary, true)
             }
-            State::Split { branches, greedy } => {
-                if *greedy && branches.len() >= 2 {
+            State::Split { branches, greedy }
+                if *greedy && branches.len() >= 2 => {
                     branches.iter().any(|&b| {
                         self.check_word_bounded_class(b, visited, seen_start_boundary, seen_class)
                     })
-                } else {
-                    false
                 }
-            }
             _ => false,
         }
     }
@@ -602,16 +599,13 @@ impl Nfa {
                         return None; // Not a simple literal
                     }
                 }
-                State::Split { branches, greedy } => {
-                    if *greedy && branches.len() == 2 && count < max_count {
+                State::Split { branches, greedy }
+                    if *greedy && branches.len() == 2 && count < max_count => {
                         // Branch 0: continue repetition, Branch 1: exit
                         // Push exit first (lower priority), then continue
                         stack.push((branches[1], literal.clone(), 0));
                         stack.push((branches[0], literal.clone(), count + 1));
-                    } else {
-                        return None; // Not a simple repetition
                     }
-                }
                 _ => return None, // Complex state
             }
         }
@@ -643,7 +637,7 @@ impl Nfa {
 
     /// Check if this NFA is a character class plus OR lazy plus: [charset]+ or [charset]+?
     /// Returns true for patterns like \d+, \d+?, \w+, \w+?, [a-z]+, [a-z]+?
-    /// This is used for fast path optimization in find() and find_iter()
+    /// This is used for fast path optimization in `find()` and `find_iter()`
     #[must_use]
     pub fn is_char_class_plus_or_lazy(&self) -> bool {
         // Skip for complex NFAs to avoid stack overflow
@@ -767,7 +761,7 @@ impl Nfa {
             State::Char { class: _, next } => {
                 self.check_char_class_plus_with_greedy(*next, visited, true, depth + 1, expect_greedy)
             }
-            State::Split { branches, greedy } => {
+            State::Split { branches, greedy }
                 // For \d+ (one or more), there's a Split with a loop back to the Char state.
                 // For \d{3} (exactly 3), there are NO Splits - just chained Char states.
                 // For \d* (zero or more), there's a Split with a loop.
@@ -775,7 +769,7 @@ impl Nfa {
                 // We must check that there's an ACTUAL LOOP (Split with branch leading back to a visited state).
                 // Without a loop, it's an exact repetition like {3} which should NOT use this fast path.
 
-                if *greedy == expect_greedy && branches.len() >= 2 {
+                if *greedy == expect_greedy && branches.len() >= 2 => {
                     // Check if any branch creates a loop (leads back to a state we've already visited)
                     // For \d+, one branch leads back to the Char state which we visited earlier in this path
                     let has_loop = branches.iter().any(|&b| {
@@ -793,10 +787,7 @@ impl Nfa {
                     } else {
                         false
                     }
-                } else {
-                    false
                 }
-            }
             _ => false,
         }
     }
@@ -1048,8 +1039,8 @@ impl Nfa {
                     false // Invalid state
                 }
             }
-            State::FuzzyLiteral { next, .. } => {
-                if seen_start_boundary && !seen_literal && !seen_end_boundary {
+            State::FuzzyLiteral { next, .. }
+                if seen_start_boundary && !seen_literal && !seen_end_boundary => {
                     // We have start boundary, now seeing literal
                     self.check_word_bounded_literal(
                         *next,
@@ -1058,10 +1049,7 @@ impl Nfa {
                         false,
                         true, // Literal seen
                     )
-                } else {
-                    false
                 }
-            }
             _ => false,
         }
     }
@@ -1153,8 +1141,8 @@ impl Nfa {
                     false
                 }
             }
-            State::Split { branches, greedy } => {
-                if *greedy {
+            State::Split { branches, greedy }
+                if *greedy => {
                     for &branch in branches {
                         if !self.check_pure_greedy_dotstar(
                             branch,
@@ -1166,10 +1154,7 @@ impl Nfa {
                         }
                     }
                     true
-                } else {
-                    false
                 }
-            }
             _ => false,
         }
     }
@@ -1221,7 +1206,7 @@ impl Nfa {
                 kind: crate::parser::Anchor::Start,
                 next,
             } => self.check_greedy_dotstar_prefix(*next),
-            State::Char { class, next } => {
+            State::Char { class, next }
                 // Check if this is `.` (any character)
                 if class.named.iter().any(|n| {
                     matches!(
@@ -1230,13 +1215,10 @@ impl Nfa {
                             | crate::parser::NamedClass::AnyExceptNewline
                     )
                 }) && !class.negated
-                {
+                => {
                     // Found `.` - now check for * (Split) after it
                     self.check_greedy_star_after_dot(*next)
-                } else {
-                    false
                 }
-            }
             _ => false,
         }
     }
@@ -1319,19 +1301,16 @@ impl Nfa {
             State::Char { next, .. } | State::FuzzyLiteral { next, .. } => {
                 self.check_reaches_accept(*next)
             }
-            State::Split { branches, greedy } => {
+            State::Split { branches, greedy }
                 // For greedy split, all branches must reach Accept for valid suffix
-                if *greedy {
+                if *greedy => {
                     for &branch in branches {
                         if !self.check_reaches_accept(branch) {
                             return false;
                         }
                     }
                     true
-                } else {
-                    false
                 }
-            }
             _ => false,
         }
     }

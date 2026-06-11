@@ -2096,8 +2096,6 @@ impl<'a> Matcher<'a> {
             | State::FuzzyChar { .. }
             | State::FuzzyLiteral { .. }
             | State::Backreference { .. }
-            | State::Lookahead { .. }
-            | State::Lookbehind { .. }
             | State::CaptureStart { .. }
             | State::ResetMatchStart { .. }
             | State::AtomicGroup { .. }

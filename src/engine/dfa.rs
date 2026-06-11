@@ -166,8 +166,6 @@ enum DfaPrefilter {
     Literal(Vec<u8>),
     /// Character class ranges for SIMD-accelerated range search (e.g., [0-9]).
     CharClassRanges(Vec<(u8, u8)>),
-    /// Teddy-style literal search for patterns 4-64 bytes.
-    Teddy(Vec<u8>),
 }
 
 /// Lazy DFA for fast exact matching.
@@ -868,7 +866,7 @@ impl Dfa {
                 // More than 3 bytes - check if we can use SIMD-accelerated range search
                 // Sort bytes and convert to contiguous ranges
                 let mut sorted = expanded.clone();
-                sorted.sort();
+                sorted.sort_unstable();
                 sorted.dedup();
                 
                 let ranges = Self::bytes_to_ranges(&sorted);
@@ -1161,9 +1159,9 @@ impl Dfa {
                     pattern_index,
                     next,
                     ..
-                } => {
+                }
                     // Only handle fuzzy literals in non-exact mode
-                    if !EXACT_MODE {
+                    if !EXACT_MODE => {
                         let offset = ext_state.literal_offset.unwrap_or(0);
                         if let Some(pattern) = self.literal_texts.get(*pattern_index) {
                             let pattern_chars: Vec<char> = pattern.chars().collect();
@@ -1179,7 +1177,6 @@ impl Dfa {
                             }
                         }
                     }
-                }
                 _ => {
                     // Other state types don't consume characters
                     // Anchors, Accept, Split, etc. are handled via epsilon_closure
@@ -1313,7 +1310,7 @@ impl Dfa {
         let lit_len = lit_bytes.len();
 
         // Use TeddySearch for SIMD-accelerated forward search with rare byte optimization
-        if bytes.len() >= 32 && lit_len >= 4 && lit_len <= 64 {
+        if bytes.len() >= 32 && (4..=64).contains(&lit_len) {
             let teddy = TeddySearch::new(lit_bytes);
             if let Some(pos) = teddy.find_first(bytes) {
                 return Some(DfaMatch { start: pos, end: pos + lit_len });
@@ -1356,7 +1353,7 @@ impl Dfa {
 
         // Use TeddySearch for SIMD-accelerated reverse search with rare byte optimization
         // Teddy is most effective for patterns >= 4 bytes where rare byte selection helps
-        if bytes.len() >= 32 && lit_len >= 4 && lit_len <= 64 {
+        if bytes.len() >= 32 && (4..=64).contains(&lit_len) {
             let teddy = TeddySearch::new(lit_bytes);
             if let Some(pos) = teddy.find_last(bytes) {
                 return Some(DfaMatch { start: pos, end: pos + lit_len });
@@ -1631,43 +1628,7 @@ impl Dfa {
                 }
                 None
             }
-            DfaPrefilter::ManyBytes(ref bytes_set) => {
-                let mut offset = 0;
-                while offset < bytes.len() {
-                    if let Some(pos) = bytes[offset..].iter().position(|&b| bytes_set.contains(&b)) {
-                        let start = offset + pos;
-                        if let Some(m) = self.find_at(text, start) {
-                            return Some(m);
-                        }
-                        offset = start + 1;
-                    } else {
-                        break;
-                    }
-                }
-                if accepts_empty {
-                    return Some(DfaMatch { start: 0, end: 0 });
-                }
-                None
-            }
-            DfaPrefilter::Teddy(ref needle) => {
-                use super::simd_class::TeddySearch;
-                let searcher = TeddySearch::new(needle);
-                let mut offset = 0;
-                while let Some(pos) = searcher.find_first(bytes) {
-                    if pos < offset {
-                        break;
-                    }
-                    let start = pos;
-                    if let Some(m) = self.find_at(text, start) {
-                        return Some(m);
-                    }
-                    offset = start + 1;
-                }
-                if accepts_empty {
-                    return Some(DfaMatch { start: 0, end: 0 });
-                }
-                None
-            }
+
         }
     }
 
@@ -1734,11 +1695,10 @@ impl Dfa {
         
         let mut offset = start_offset;
         while offset < len {
-            if byte_set[bytes[offset] as usize] {
-                if let Some(m) = self.find_at(text, offset) {
+            if byte_set[bytes[offset] as usize]
+                && let Some(m) = self.find_at(text, offset) {
                     return Some(m);
                 }
-            }
             offset += 1;
         }
         None
@@ -2281,22 +2241,7 @@ impl Dfa {
                     }
                 }
             }
-            DfaPrefilter::Teddy(needle) => {
-                // Use Teddy's reverse search
-                let searcher = TeddySearch::new(needle);
-                let mut pos = len;
-                while pos > 0 {
-                    if let Some(found) = searcher.find_last(bytes) {
-                        if found >= pos {
-                            break;
-                        }
-                        positions.push(found);
-                        pos = found;
-                    } else {
-                        break;
-                    }
-                }
-            }
+
         }
 
         positions
@@ -2344,14 +2289,13 @@ impl Dfa {
                     let state_idx = state_id as usize;
                     
                     // Check if this state is accepting
-                    if self.states[state_idx].is_accept {
-                        if !self.states[state_idx].has_end_anchor || cur_pos == len {
+                    if self.states[state_idx].is_accept
+                        && (!self.states[state_idx].has_end_anchor || cur_pos == len) {
                             // Track leftmost starting position
                             if pending_start.is_none() || start_pos < pending_start.unwrap() {
                                 pending_start = Some(start_pos);
                             }
                         }
-                    }
                     
                     // If at end, don't compute transitions
                     if cur_pos == len {
@@ -2375,7 +2319,7 @@ impl Dfa {
                         pos = if cur_pos > pos { cur_pos } else { pos + 1 };
                     } else {
                         // No match found, advance by one
-                        pos += text[pos..].chars().next().map_or(1, |c| c.len_utf8());
+                        pos += text[pos..].chars().next().map_or(1, char::len_utf8);
                     }
                     break;
                 }
@@ -2388,7 +2332,7 @@ impl Dfa {
                 for (state_id, start_pos) in new_states {
                     deduped.entry(state_id).or_insert(start_pos);
                 }
-                active_states = deduped.into_iter().map(|(k, v)| (k, v)).collect();
+                active_states = deduped.into_iter().collect();
             }
         }
 

@@ -103,6 +103,10 @@ pub struct FuzzyRegex {
     fast_path_literal: Option<*const str>,
     /// Pre-computed: cached repeated literal for repetition fast path
     fast_path_repeated_literal: Option<String>,
+    /// Pre-computed: lookbehind fast path (`lookbehind_literal`, `main_literal`)
+    lookbehind_fast: Option<(String, String)>,
+    /// Pre-computed: lookahead fast path (`main_literal`, `lookahead_literal`)
+    lookahead_fast: Option<(String, String)>,
     /// Named word lists for \L<name> patterns.
     /// Map from list name to vector of words.
     word_lists: FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
@@ -302,6 +306,9 @@ impl FuzzyRegex {
             None
         };
 
+        // Detect lookarounds for fast path - check NFA states for LookaheadLiteral/LookbehindLiteral
+        let (lookbehind_fast, lookahead_fast) = Self::detect_lookaround_fast_path(&nfa, &literals);
+
         // Pre-compute repetition fast path: (?:literal){N} with identical non-fuzzy literals
         // This is checked at runtime for simple patterns
         let (can_use_repetition_fast_path, fast_path_repeated_literal) = if literals.len() >= 2
@@ -406,6 +413,8 @@ impl FuzzyRegex {
             can_use_repetition_fast_path,
             fast_path_literal,
             fast_path_repeated_literal,
+            lookbehind_fast,
+            lookahead_fast,
             word_lists: FxHashMap::default(),
             handlers: config.handlers,
         })
@@ -600,6 +609,57 @@ impl FuzzyRegex {
                     1.0,
                     crate::engine::EditCounts::default(),
                 ));
+            }
+            return None;
+        }
+
+        // Fast path for lookbehind: find main literal, verify lookbehind before it
+        if let Some((lb_literal, main_literal)) = &self.lookbehind_fast {
+            let lb_bytes = lb_literal.as_bytes();
+            let main_bytes = main_literal.as_bytes();
+            let text_bytes = text.as_bytes();
+            let mut search_start = 0;
+            while let Some(pos) = memmem::find(&text_bytes[search_start..], main_bytes) {
+                let abs_pos = search_start + pos;
+                // Check lookbehind immediately before
+                if abs_pos >= lb_bytes.len() {
+                    let lb_start = abs_pos - lb_bytes.len();
+                    if &text_bytes[lb_start..abs_pos] == lb_bytes {
+                        return Some(Match::new(
+                            text,
+                            abs_pos,
+                            abs_pos + main_bytes.len(),
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+                }
+                search_start = abs_pos + 1;
+            }
+            return None;
+        }
+
+        // Fast path for lookahead: find main literal, verify lookahead after it
+        if let Some((main_literal, la_literal)) = &self.lookahead_fast {
+            let main_bytes = main_literal.as_bytes();
+            let la_bytes = la_literal.as_bytes();
+            let text_bytes = text.as_bytes();
+            let mut search_start = 0;
+            while let Some(pos) = memmem::find(&text_bytes[search_start..], main_bytes) {
+                let abs_pos = search_start + pos;
+                let main_end = abs_pos + main_bytes.len();
+                // Check lookahead immediately after
+                if main_end + la_bytes.len() <= text_bytes.len()
+                    && &text_bytes[main_end..main_end + la_bytes.len()] == la_bytes {
+                        return Some(Match::new(
+                            text,
+                            abs_pos,
+                            main_end,
+                            1.0,
+                            crate::engine::EditCounts::default(),
+                        ));
+                    }
+                search_start = abs_pos + 1;
             }
             return None;
         }
@@ -1635,14 +1695,12 @@ impl FuzzyRegex {
             let mut seen = std::collections::HashSet::new();
             
             for start_pos in 0..=len {
-                if let Some(m) = dfa.find_at(text, start_pos) {
-                    if m.start == start_pos {
-                        if !seen.contains(&(m.start, m.end)) {
+                if let Some(m) = dfa.find_at(text, start_pos)
+                    && m.start == start_pos
+                        && !seen.contains(&(m.start, m.end)) {
                             seen.insert((m.start, m.end));
                             unique_matches.push((m.start, m.end));
                         }
-                    }
-                }
             }
             
             // Step 2: Sort by start position (ascending) to get leftmost-longest behavior
@@ -1671,6 +1729,10 @@ impl FuzzyRegex {
     }
 
     /// Find all non-overlapping matches.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fast path literal pointer is null (internal invariant).
     pub fn find_iter<'t>(&self, text: &'t str) -> Matches<'t> {
         // Word list fast path: handle \L<name> patterns
         if !self.word_lists.is_empty() {
@@ -1788,21 +1850,20 @@ impl FuzzyRegex {
             let all_simple = self.literals.iter().all(|l| {
                 l.limits.is_none() && l.min_edits.is_none() && l.edit_chars.is_none()
             });
-            if all_simple && self.literals.len() <= 3 {
-                if let Some(class_type) = self.nfa.get_char_class_type() {
+            if all_simple && self.literals.len() <= 3
+                && let Some(class_type) = self.nfa.get_char_class_type() {
                     return Matches::new(Self::find_all_class_plus_literal(
                         text,
                         class_type,
                         &self.literals.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(),
                     ));
                 }
-            }
         }
 
         // Fast path for greedy/lazy char class plus: \d+, \d+?, \w+, \w+?, [a-z]+, [a-z]+?
         // This is critical for performance - lazy quantifiers were 23x slower than regex
-        if self.is_char_class_plus_or_lazy && self.literals.is_empty() {
-            if let Some(class_type) = self.nfa.get_char_class_type() {
+        if self.is_char_class_plus_or_lazy && self.literals.is_empty()
+            && let Some(class_type) = self.nfa.get_char_class_type() {
                 // has_lazy controls greedy vs lazy behavior
                 return Matches::new(Self::find_all_char_class_plus(
                     text,
@@ -1810,7 +1871,6 @@ impl FuzzyRegex {
                     Some(class_type),
                 ));
             }
-        }
 
         // For all other patterns, use batch collection with single Matcher
         Matches::new(
@@ -2049,6 +2109,52 @@ impl FuzzyRegex {
             .is_some_and(|c| c.is_alphanumeric() || c == '_');
 
         before_is_word != after_is_word
+    }
+
+    /// Detect simple lookarounds from NFA for fast path
+    #[allow(clippy::type_complexity)]
+    fn detect_lookaround_fast_path(
+        nfa: &crate::ir::Nfa,
+        literals: &[crate::ir::LiteralPattern],
+    ) -> (Option<(String, String)>, Option<(String, String)>) {
+        use crate::ir::nfa::State;
+
+        let mut lookbehind = None;
+        let mut lookahead = None;
+
+        for (lookahead_idx, state) in nfa.states.iter().enumerate() {
+            match state {
+                State::LookbehindLiteral { positive: true, literal, next } => {
+                    if lookbehind.is_none()
+                        && let Some(next_state) = nfa.states.get(*next)
+                            && let State::FuzzyLiteral { pattern_index, limits, min_edits, cost_constraint: _, next: _ } = next_state
+                                && limits.is_none() && min_edits.is_none()
+                                    && let Some(lit) = literals.get(*pattern_index) {
+                                        lookbehind = Some((
+                                            String::from_utf8_lossy(literal).to_string(),
+                                            lit.text.clone(),
+                                        ));
+                                    }
+                }
+                State::LookaheadLiteral { positive: true, literal, next: _ }
+                    if lookahead.is_none() => {
+                        for prev_state in &nfa.states {
+                            if let State::FuzzyLiteral { pattern_index, limits, min_edits, cost_constraint: _, next: next_state } = prev_state
+                                && *next_state == lookahead_idx
+                                    && limits.is_none() && min_edits.is_none()
+                                        && let Some(lit) = literals.get(*pattern_index) {
+                                            lookahead = Some((
+                                                lit.text.clone(),
+                                                String::from_utf8_lossy(literal).to_string(),
+                                            ));
+                                        }
+                        }
+                    }
+                _ => {}
+            }
+        }
+
+        (lookbehind, lookahead)
     }
 
     /// Fast path for non-fuzzy word-bounded literals using exact search.

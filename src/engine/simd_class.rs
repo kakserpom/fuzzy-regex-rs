@@ -580,8 +580,8 @@ mod tests {
 #[inline(always)]
 unsafe fn neon_movemask(v: std::arch::aarch64::uint8x16_t) -> u16 {
     use std::arch::aarch64::*;
-    let signs = vreinterpretq_u8_s8(vshrq_n_s8(vreinterpretq_s8_u8(v), 7));
     const MASK_BITS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+    let signs = vreinterpretq_u8_s8(vshrq_n_s8(vreinterpretq_s8_u8(v), 7));
     let mask = vld1_u8(MASK_BITS.as_ptr());
     let lo = vand_u8(vget_low_u8(signs), mask);
     let hi = vand_u8(vget_high_u8(signs), mask);
@@ -598,8 +598,8 @@ pub struct RevSearchRanges {
 }
 
 impl RevSearchRanges {
-    /// Create a new RevSearchRanges with the given byte ranges.
-    /// Each range is (inclusive_low, inclusive_high).
+    /// Create a new `RevSearchRanges` with the given byte ranges.
+    /// Each range is (`inclusive_low`, `inclusive_high`).
     #[must_use]
     pub fn new(ranges: Vec<(u8, u8)>) -> Self {
         debug_assert!(!ranges.is_empty() && ranges.len() <= 3);
@@ -644,27 +644,18 @@ impl RevSearchRanges {
         self.find_first_scalar(haystack)
     }
 
-    /// Scalar fallback for find_last.
+    /// Scalar fallback for `find_last`.
     fn find_last_scalar(&self, haystack: &[u8]) -> Option<usize> {
-        for i in (0..haystack.len()).rev() {
-            if self.matches_byte(haystack[i]) {
-                return Some(i);
-            }
-        }
-        None
+        (0..haystack.len()).rev().find(|&i| self.matches_byte(haystack[i]))
     }
 
-    /// Scalar fallback for find_first.
+    /// Scalar fallback for `find_first`.
     fn find_first_scalar(&self, haystack: &[u8]) -> Option<usize> {
-        for i in 0..haystack.len() {
-            if self.matches_byte(haystack[i]) {
-                return Some(i);
-            }
-        }
-        None
+        (0..haystack.len()).find(|&i| self.matches_byte(haystack[i]))
     }
 
     #[inline]
+    #[must_use]
     pub fn matches_byte(&self, byte: u8) -> bool {
         for &(lo, hi) in &self.ranges {
             if byte >= lo && byte <= hi {
@@ -1080,7 +1071,7 @@ pub struct TeddySearch {
 }
 
 impl TeddySearch {
-    /// Create a new TeddySearch for the given pattern.
+    /// Create a new `TeddySearch` for the given pattern.
     #[must_use]
     pub fn new(needle: &[u8]) -> Self {
         debug_assert!(!needle.is_empty());
@@ -1096,7 +1087,7 @@ impl TeddySearch {
         }
 
         let confirm_idx = if needle.len() > 1 {
-            let mut ci = if rare_idx == 0 { 1 } else { 0 };
+            let mut ci = usize::from(rare_idx == 0);
             let mut cf = BYTE_FREQ[needle[ci] as usize];
             for (i, &b) in needle.iter().enumerate() {
                 if i == rare_idx {
@@ -1129,6 +1120,12 @@ impl TeddySearch {
         self.needle.len()
     }
 
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.needle.is_empty()
+    }
+
     /// The rare byte used for SIMD scanning.
     #[inline]
     #[must_use]
@@ -1142,7 +1139,7 @@ impl TeddySearch {
         if start + n > haystack.len() {
             return false;
         }
-        &haystack[start..start + n] == &self.needle
+        haystack[start..start + n] == self.needle
     }
 
     /// Find the first occurrence of the pattern (forward search).

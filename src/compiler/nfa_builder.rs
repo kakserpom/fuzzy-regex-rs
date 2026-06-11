@@ -62,6 +62,16 @@ impl NfaBuilder {
                     None
                 }
             }
+            Hir::Char(c) => {
+                // Single character - can be inlined if ASCII
+                let mut bytes = [0u8; 4];
+                let encoded = c.encode_utf8(&mut bytes);
+                if encoded.len() == 1 && encoded.as_bytes()[0].is_ascii() {
+                    Some(encoded.as_bytes().to_vec())
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -223,7 +233,6 @@ impl NfaBuilder {
             }
 
             Hir::Lookahead { positive, expr } => {
-                // Check if we can use the optimized literal form
                 if let Some(literal_bytes) = Self::get_simple_literal(expr) {
                     let state = self.nfa.add_state(State::LookaheadLiteral {
                         positive: *positive,

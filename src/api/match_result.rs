@@ -690,16 +690,16 @@ impl<'t> Iterator for Matches<'t> {
                     let abs_pos = *pos + found;
                     *pos = abs_pos + 1;
 
-                    return Some(Match::new(
+                    Some(Match::new(
                         text,
                         abs_pos,
                         abs_pos + *literal_len,
                         1.0,
                         crate::engine::EditCounts::default(),
-                    ));
+                    ))
                 } else {
                     *exhausted = true;
-                    return None;
+                    None
                 }
             }
         }
