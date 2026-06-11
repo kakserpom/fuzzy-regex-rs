@@ -1066,7 +1066,23 @@ pub struct TeddySearch {
     needle: Vec<u8>,
     rare_idx: usize,
     rare_byte: u8,
+    /// Used in SIMD-accelerated `find_first`/`find_last` (avx2/neon).
+    #[cfg_attr(
+        not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(target_arch = "aarch64", target_feature = "neon")
+        )),
+        allow(dead_code)
+    )]
     confirm_idx: usize,
+    /// Used in SIMD-accelerated `find_first`/`find_last` (avx2/neon).
+    #[cfg_attr(
+        not(any(
+            all(target_arch = "x86_64", target_feature = "avx2"),
+            all(target_arch = "aarch64", target_feature = "neon")
+        )),
+        allow(dead_code)
+    )]
     confirm_byte: u8,
 }
 
