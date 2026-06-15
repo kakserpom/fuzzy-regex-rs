@@ -1359,16 +1359,28 @@ impl Nfa {
             }
             State::Char { class, .. } => Some(class.clone()),
             State::FuzzyChar { class, limits, .. } => {
-                // Only use as prefilter if no deletions allowed
-                // (deletion would allow skipping the first char)
-                let max_deletions = limits
-                    .as_ref()
-                    .and_then(FuzzyLimits::get_deletions)
-                    .unwrap_or(0);
-                if max_deletions == 0 {
-                    Some(class.clone())
-                } else {
+                // The first text char is guaranteed to be in `class` only if the
+                // first char can be neither substituted (then any char matches)
+                // nor deleted (then the first text char is the next element).
+                // An insertion budget is fine: it only adds an alternative match
+                // starting at the class char, so existence is preserved.
+                let total_edits = limits.as_ref().map_or(0, |l| {
+                    l.get_edits().unwrap_or_else(|| {
+                        l.get_insertions()
+                            .unwrap_or(0)
+                            .saturating_add(l.get_deletions().unwrap_or(0))
+                            .saturating_add(l.get_substitutions().unwrap_or(0))
+                            .saturating_add(l.get_swaps().unwrap_or(0))
+                    })
+                });
+                let subs = limits.as_ref().and_then(FuzzyLimits::get_substitutions);
+                let dels = limits.as_ref().and_then(FuzzyLimits::get_deletions);
+                let sub_possible = total_edits > 0 && subs != Some(0);
+                let del_possible = total_edits > 0 && dels != Some(0);
+                if sub_possible || del_possible {
                     None
+                } else {
+                    Some(class.clone())
                 }
             }
             State::CaptureStart { next, .. } | State::CaptureEnd { next, .. } => {

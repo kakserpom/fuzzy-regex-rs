@@ -686,13 +686,47 @@ impl HirLowering {
                 quantifier,
                 greedy,
             } => {
-                let inner =
-                    self.lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars);
-                Hir::Repeat {
-                    expr: Box::new(inner),
-                    min: quantifier.min(),
-                    max: quantifier.max(),
-                    greedy: *greedy,
+                // mrab semantics: a fuzziness on a group applies to the WHOLE
+                // expansion as a single unit. For a fixed/bounded repeat of a
+                // single literal/char, fold each repetition count into one fuzzy
+                // literal of the repeated text so the edit budget is shared, not
+                // duplicated per copy. (Without this, `(?:b{2}){e<=1}` becomes
+                // two independent `b{e<=1}` literals == effectively e<=2.)
+                let min = quantifier.min();
+                let max = quantifier.max();
+                if let Some(base) = ast_repeatable_literal(expr)
+                    && let Some(max) = max
+                    && max >= min
+                    && (max - min) < MAX_FUZZY_FOLD_ALTS
+                    && base.chars().count().saturating_mul(max) <= MAX_FUZZY_FOLD_LEN
+                {
+                    let make = |k: usize| -> Hir {
+                        if k == 0 {
+                            Hir::Empty
+                        } else {
+                            Hir::Literal {
+                                text: base.repeat(k),
+                                limits: Some(limits.clone()),
+                                min_edits,
+                                cost_info: cost_info.clone(),
+                                edit_chars: edit_chars.clone(),
+                            }
+                        }
+                    };
+                    if min == max {
+                        make(min)
+                    } else {
+                        Hir::Alt((min..=max).map(make).collect())
+                    }
+                } else {
+                    let inner = self
+                        .lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars);
+                    Hir::Repeat {
+                        expr: Box::new(inner),
+                        min,
+                        max,
+                        greedy: *greedy,
+                    }
                 }
             }
 
@@ -750,6 +784,32 @@ impl HirLowering {
             1 => result.pop().unwrap(),
             _ => Hir::Concat(result),
         }
+    }
+}
+
+/// Maximum number of alternatives produced when folding a bounded fuzzy repeat
+/// (e.g. `(?:b{1,3}){e<=1}` -> 3 alternatives). Larger ranges fall back to the
+/// generic `Repeat` lowering.
+const MAX_FUZZY_FOLD_ALTS: usize = 32;
+/// Maximum repeated-text length (in chars) produced when folding a fuzzy repeat,
+/// to avoid pathological expansion like `(?:a{100000}){e<=1}`.
+const MAX_FUZZY_FOLD_LEN: usize = 256;
+
+/// If `ast` is a single literal or char (with no fuzziness of its own), return
+/// its text so a surrounding fuzzy quantifier can fold it into one literal.
+/// Returns `None` for anything else (classes, groups carrying fuzziness, etc.).
+fn ast_repeatable_literal(ast: &Ast) -> Option<String> {
+    match ast {
+        Ast::Char(c) => Some(c.to_string()),
+        Ast::Literal {
+            text,
+            fuzziness: Fuzziness::Inherited,
+        } => Some(text.clone()),
+        Ast::NonCapturingGroup {
+            expr,
+            fuzziness: Fuzziness::Inherited,
+        } => ast_repeatable_literal(expr),
+        _ => None,
     }
 }
 

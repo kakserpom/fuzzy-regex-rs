@@ -75,16 +75,32 @@ cases); over-permissive (rust matches, mrab doesn't) dropped **608 → 13**.
 Generalizes across seeds (777→217, 2024→246), zero panics, zero compile
 divergences. Full suite green (786 tests), clippy clean.
 
-### Remaining divergences (228) — separate, smaller classes
+### Two more fixes (quantifier-in-group + fuzzy-class substitution)
 
-- ~215 are `mrab=1 rust=0` where mrab emits a **zero-width match** by deleting
-  the entire pattern (e.g. `(?:acb){d<=3}` on `"dd"` → mrab match span `(0,0)`).
-  fuzzy-regex declines zero-width fuzzy matches. This is a semantic policy
-  choice, not the per-op bug — decide separately whether to emulate mrab.
-- A few genuine short-match misses where the pattern is longer than the text and
-  most of it is edited (`(?:c{2}){e<=3}` on `"d"` → mrab `(0,1)` = `"d"`).
-- ~13 over-permissive cases with a **quantifier inside the fuzzy group**
-  (`(?:b{2}){e<=1}`, `(?:b+){d<=2}`) — fuzzy handling of quantified sub-patterns.
+3. **Quantifier inside a fuzzy group** (`(?:b{2}){e<=1}`) lowered to N
+   independent fuzzy copies of the literal (each with the full edit budget), so
+   `(?:b{2}){e<=1}` behaved like `b{e<=1}b{e<=1}` (== e<=2). Fixed in
+   `lower_with_detailed_limits` (`src/ir/hir.rs`): a fixed/bounded repeat of a
+   single literal/char is now folded into one fuzzy literal of the repeated text
+   (`{N}` → one literal; `{N,M}` → an alternation), so the edit budget is shared.
+   Eliminated the last over-permissive divergences (→ **0**).
+4. **Standalone fuzzy character class via substitution** (`(?:[a]){s<=1}` on
+   `"d"`) returned no match. `Nfa::first_char_class` (`src/ir/nfa.rs`) used a
+   fuzzy first char as an exact prefilter whenever deletions were 0, ignoring
+   substitutions — so the position scan skipped every char not literally in the
+   class. Fixed: the class is used as a prefilter only when neither substitution
+   nor deletion is possible at the first char (an insertion budget is still
+   fine). Eliminated all 57 non-empty class misses.
+
+### Remaining divergences (~140) — single class, all `mrab=1 rust=0`
+
+Every remaining divergence is a **zero-width match** where mrab deletes the
+entire pattern (e.g. `(?:acb){d<=3}` on `"dd"` → mrab span `(0,0)`); fuzzy-regex
+declines zero-width fuzzy matches. After all four fixes: **0 over-permissive, 0
+non-empty misses, 0 panics, 0 compile divergences** across seeds 12345/777/2024/
+555 (20 000 cases each). Whether to emit mrab-style zero-width whole-pattern
+deletions is a semantic policy choice (they would match at every position of any
+text) — left as-is pending a decision.
 
 ## 4. Performance vs mrab-regex (existing harness)
 
