@@ -92,15 +92,51 @@ divergences. Full suite green (786 tests), clippy clean.
    nor deletion is possible at the first char (an insertion budget is still
    fine). Eliminated all 57 non-empty class misses.
 
-### Remaining divergences (~140) — single class, all `mrab=1 rust=0`
+## 6. Broadened fuzzer + further fixes
 
-Every remaining divergence is a **zero-width match** where mrab deletes the
-entire pattern (e.g. `(?:acb){d<=3}` on `"dd"` → mrab span `(0,0)`); fuzzy-regex
-declines zero-width fuzzy matches. After all four fixes: **0 over-permissive, 0
-non-empty misses, 0 panics, 0 compile divergences** across seeds 12345/777/2024/
-555 (20 000 cases each). Whether to emit mrab-style zero-width whole-pattern
-deletions is a semantic policy choice (they would match at every position of any
-text) — left as-is pending a decision.
+`diff_fuzz.py` was extended (anchors, unicode, character classes with
+ranges/negation/escapes, multi-piece concatenations, ranges & exclusive bounds,
+combined individual+total specs) and now classifies mrab zero-width
+whole-pattern deletions separately so real bugs surface. This found:
+
+5. **UTF-8 panic** (~90 inputs/run): three find loops (`find_all`, `find_n`,
+   `find_all_with_literal_guide` in `matcher.rs`) advanced `pos + 1` (one byte)
+   after a zero-width match, landing mid-char → `text[pos..]` panicked. Now use
+   the char-boundary-safe advance. **Panics → 0.**
+6. **mrab per-op/cost rule refinement** (`ast.rs`): unspecified i/d/s default to
+   0 whenever any of i/d/s is named — *including* with an explicit `e<=` (which
+   only caps the total). Transposition (`t`, a fuzzy-regex extension) and cost
+   constraints suppress the defaulting. Eliminated the `{i<=k,e<=m}` over-match
+   class.
+7. **Alternation with duplicate branches** (`ab|a|ab`, `c|bc|bc`, `^(?:bb|bb)`):
+   a `Char` branch isn't extracted as a literal, so `is_simple_alternation` was
+   false and the repetition fast path still flattened the identical literals to
+   `literal.repeat(N)`. The fast path now requires a `Split`-free NFA (a genuine
+   concatenation), which subsumes the earlier alternation guard.
+8. (also) test `test_bestmatch_finds_best` updated: it asserted a
+   2-substitution match while naming only i/d (which forces s=0 per mrab); added
+   `s<=3` so the intended match is reachable.
+
+## 7. Final state & remaining divergences
+
+After all fixes: **0 panics, 0 over-permissive for core mrab semantics**, 786
+tests + 21 doctests green, clippy clean. Across seeds 12345/777/2024/555
+(20 000 cases each) ~110–140 REAL divergences remain, in three classes — none a
+crash, all niche:
+
+- **Zero-width whole-pattern deletion** (mrab emits empty match, fuzzy-regex
+  declines) — semantic policy choice; would match at every position of any text.
+- **Multi-piece fuzzy groups** (`(?:b{1,3}cabcab){d<=3}`) — over-match: the
+  group's edit budget should be *shared* across the concatenated `FuzzyLiteral`
+  pieces, but each piece currently honors the full budget independently. Fixing
+  needs `FuzzyLiteral` to enforce a global remaining budget
+  (`limit - thread.edits_so_far`); touches the core NFA + fuzzy-cache path.
+- **Fuzzy `FuzzyChar` insertion** (`^(?:[cd]){i<=1}$` on `"dz"`) — under-match:
+  the `FuzzyChar` NFA step (`matcher.rs`) implements substitution and deletion
+  but not insertion; trailing insertions before `$` are especially fiddly.
+
+Both engine-level classes are deep changes to perf-critical matching for
+uncommon patterns; deferred pending a priority/risk decision.
 
 ## 4. Performance vs mrab-regex (existing harness)
 
