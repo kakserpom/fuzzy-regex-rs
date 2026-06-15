@@ -313,6 +313,10 @@ impl FuzzyRegex {
         // This is checked at runtime for simple patterns
         let (can_use_repetition_fast_path, fast_path_repeated_literal) = if literals.len() >= 2
             && capture_count == 0
+            // A top-level alternation of identical branches (e.g. `bc|bc`) also yields
+            // N identical literals, but it is NOT the repetition `(?:bc){N}`. Excluding
+            // simple alternations prevents flattening `bc|bc` into the string "bcbc".
+            && !is_simple_alternation
             && !nfa
                 .states
                 .iter()

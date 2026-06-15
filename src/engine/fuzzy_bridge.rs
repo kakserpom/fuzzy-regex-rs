@@ -142,8 +142,29 @@ impl FuzzyBridge {
                 case_insensitive,
             ));
 
-            // Build Bitap matcher (only for short patterns)
-            bitap_matchers.push(BitapMatcher::new(&lit.text, edit_limits, case_insensitive));
+            // Bitap only enforces the *total* edit budget; it cannot attribute
+            // edits to operation types. If any per-operation cap is binding
+            // (Some(x) with x < max_edits) Bitap would over-match, so skip it and
+            // let every search path fall back to the Damerau-Levenshtein NFA,
+            // which tracks per-operation counts. Exception: when the pattern has
+            // an edit-character restriction, the matcher validates matches via
+            // the Bitap path (`validate_edit_chars`), which the NFA path does not
+            // do -- keep Bitap there.
+            let max_edits = edit_limits.max_edits as usize;
+            let has_binding_per_op = [
+                edit_limits.max_insertions,
+                edit_limits.max_deletions,
+                edit_limits.max_substitutions,
+                edit_limits.max_swaps,
+            ]
+            .iter()
+            .any(|cap| matches!(cap, Some(x) if (*x as usize) < max_edits));
+            let bitap = if has_binding_per_op && lit.edit_chars.is_none() {
+                None
+            } else {
+                BitapMatcher::new(&lit.text, edit_limits, case_insensitive)
+            };
+            bitap_matchers.push(bitap);
         }
 
         // Build Guard NFA for single pattern (fast path for find_first)

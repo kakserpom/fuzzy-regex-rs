@@ -186,11 +186,35 @@ impl MrabFuzziness {
 
         let mut limits = FuzzyLimits::new();
 
+        // mrab semantics: when individual operation limits are specified WITHOUT
+        // an explicit total budget, every UNSPECIFIED operation defaults to 0 --
+        // only the named operations are permitted. E.g. `{i<=2}` means i<=2,
+        // d=0, s=0 (total 2), so text lacking the pattern's characters cannot
+        // match by silently substituting/deleting.
+        //
+        // When an explicit total (`e<=`) or a cost constraint IS given, the
+        // total budget governs the unspecified operations instead (leave them
+        // unset), preserving specs like `{t<=1,e<=2}` where the e budget is the
+        // intended bound for substitutions/insertions/deletions.
+        let has_total =
+            self.max_errors.is_some() || self.unlimited_errors || self.max_cost.is_some();
+        let any_individual = !has_total
+            && (self.max_insertions.is_some()
+                || self.unlimited_insertions
+                || self.max_deletions.is_some()
+                || self.unlimited_deletions
+                || self.max_substitutions.is_some()
+                || self.unlimited_substitutions
+                || self.max_transpositions.is_some()
+                || self.unlimited_transpositions);
+
         // Handle insertions
         if let Some(i) = self.max_insertions {
             limits = limits.insertions(i);
         } else if self.unlimited_insertions {
             limits = limits.insertions(UNLIMITED);
+        } else if any_individual {
+            limits = limits.insertions(0);
         }
 
         // Handle deletions
@@ -198,6 +222,8 @@ impl MrabFuzziness {
             limits = limits.deletions(d);
         } else if self.unlimited_deletions {
             limits = limits.deletions(UNLIMITED);
+        } else if any_individual {
+            limits = limits.deletions(0);
         }
 
         // Handle substitutions
@@ -205,6 +231,8 @@ impl MrabFuzziness {
             limits = limits.substitutions(s);
         } else if self.unlimited_substitutions {
             limits = limits.substitutions(UNLIMITED);
+        } else if any_individual {
+            limits = limits.substitutions(0);
         }
 
         // Handle transpositions
@@ -212,6 +240,8 @@ impl MrabFuzziness {
             limits = limits.swaps(t);
         } else if self.unlimited_transpositions {
             limits = limits.swaps(UNLIMITED);
+        } else if any_individual {
+            limits = limits.swaps(0);
         }
 
         // Handle total errors
