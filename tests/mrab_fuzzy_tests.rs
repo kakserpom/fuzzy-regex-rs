@@ -633,10 +633,12 @@ fn test_unlimited_errors_with_per_type_limits() {
 
 #[test]
 fn test_bestmatch_finds_best() {
-    // (?b)(fuu){i<=3,d<=3,e<=5} should find BEST match, not first
-    // In "anaconda foo bar", first match might be empty at position 0
-    // but best match should be "foo" at position 9
-    let re = FuzzyRegex::new("(?b)(?:fuu){i<=3,d<=3,e<=5}").unwrap();
+    // (?b)(fuu){i<=3,d<=3,s<=3,e<=5} should find BEST match, not first.
+    // In "anaconda foo bar", the first match might be empty at position 0
+    // but the best match is "foo" at position 9 (fuu -> foo via 2 substitutions).
+    // Note: `s<=3` is required -- per mrab semantics, naming i/d without s forces
+    // s=0, which would make "foo" (a 2-substitution match) unreachable.
+    let re = FuzzyRegex::new("(?b)(?:fuu){i<=3,d<=3,s<=3,e<=5}").unwrap();
     let text = "anaconda foo bar baz smith anderson";
     let m = re.find(text);
     assert!(m.is_some(), "Should find a match");

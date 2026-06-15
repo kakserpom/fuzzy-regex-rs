@@ -186,27 +186,28 @@ impl MrabFuzziness {
 
         let mut limits = FuzzyLimits::new();
 
-        // mrab semantics: when individual operation limits are specified WITHOUT
-        // an explicit total budget, every UNSPECIFIED operation defaults to 0 --
-        // only the named operations are permitted. E.g. `{i<=2}` means i<=2,
-        // d=0, s=0 (total 2), so text lacking the pattern's characters cannot
-        // match by silently substituting/deleting.
+        // mrab semantics: when ANY of the core edit operations (insertion,
+        // deletion, substitution) is named, every UNSPECIFIED operation defaults
+        // to 0 -- only the named operations are permitted. E.g. `{i<=2}` means
+        // i<=2, d=0, s=0; `{i<=1,e<=3}` means i<=1, d=0, s=0, total<=3. This
+        // holds even when an explicit total `e<=` is given: `e<=` caps the total
+        // but never raises an unspecified operation above 0.
         //
-        // When an explicit total (`e<=`) or a cost constraint IS given, the
-        // total budget governs the unspecified operations instead (leave them
-        // unset), preserving specs like `{t<=1,e<=2}` where the e budget is the
-        // intended bound for substitutions/insertions/deletions.
-        let has_total =
-            self.max_errors.is_some() || self.unlimited_errors || self.max_cost.is_some();
-        let any_individual = !has_total
+        // Transposition (`t`) is a fuzzy-regex extension that mrab lacks, so it
+        // does NOT trigger this defaulting on its own: `{t<=1,e<=2}` leaves
+        // i/d/s governed by the `e` budget (1 transposition plus up to 2 total
+        // edits of any kind).
+        //
+        // A cost constraint (e.g. `{s<=1,1i+1d<2}`) also suppresses defaulting:
+        // the cost equation governs which operations are permitted (here i and d
+        // are in play), so they must not be forced to 0.
+        let any_individual = self.max_cost.is_none()
             && (self.max_insertions.is_some()
                 || self.unlimited_insertions
                 || self.max_deletions.is_some()
                 || self.unlimited_deletions
                 || self.max_substitutions.is_some()
-                || self.unlimited_substitutions
-                || self.max_transpositions.is_some()
-                || self.unlimited_transpositions);
+                || self.unlimited_substitutions);
 
         // Handle insertions
         if let Some(i) = self.max_insertions {

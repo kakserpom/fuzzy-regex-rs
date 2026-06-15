@@ -1065,13 +1065,18 @@ impl<'a> Matcher<'a> {
                 if let Some(m) = result {
                     let end = m.end;
                     matches.push(m);
-                    // Move past this match
-                    pos = if end > pos { end } else { pos + 1 };
-                    continue;
+                    // Move past this match. For a forward (non-empty) match jump
+                    // to its end; for a zero-width match fall through to the
+                    // char-boundary-safe advance below (a raw `pos + 1` could
+                    // land inside a multi-byte UTF-8 char and panic).
+                    if end > pos {
+                        pos = end;
+                        continue;
+                    }
                 }
             }
 
-            // Move to next character
+            // Move to next character (char-boundary safe)
             pos = text[pos..]
                 .char_indices()
                 .nth(1)
@@ -1125,12 +1130,16 @@ impl<'a> Matcher<'a> {
             if should_try && let Some(m) = self.find_at_with_cache(text, pos, cached.as_ref()) {
                 let end = m.end;
                 matches.push(m);
-                // Move past this match
-                pos = if end > pos { end } else { pos + 1 };
-                continue;
+                // For a forward match jump to its end; a zero-width match falls
+                // through to the char-boundary-safe advance below (`pos + 1`
+                // could land inside a multi-byte UTF-8 char and panic).
+                if end > pos {
+                    pos = end;
+                    continue;
+                }
             }
 
-            // Move to next character
+            // Move to next character (char-boundary safe)
             pos = text[pos..]
                 .char_indices()
                 .nth(1)
@@ -1187,16 +1196,20 @@ impl<'a> Matcher<'a> {
             if should_try && let Some(m) = self.find_at_with_cache(text, pos, Some(cached)) {
                 let end = m.end;
                 matches.push(m);
-                // Move past this match
-                pos = if end > pos { end } else { pos + 1 };
-                // Advance lit_idx past positions we've covered
-                while lit_idx < literal_positions.len() && literal_positions[lit_idx] < pos {
-                    lit_idx += 1;
+                // For a forward match jump to its end; a zero-width match falls
+                // through to the char-boundary-safe advance below (`pos + 1`
+                // could land inside a multi-byte UTF-8 char and panic).
+                if end > pos {
+                    pos = end;
+                    // Advance lit_idx past positions we've covered
+                    while lit_idx < literal_positions.len() && literal_positions[lit_idx] < pos {
+                        lit_idx += 1;
+                    }
+                    continue;
                 }
-                continue;
             }
 
-            // Move to next character
+            // Move to next character (char-boundary safe)
             let next_pos = text[pos..]
                 .char_indices()
                 .nth(1)

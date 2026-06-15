@@ -313,15 +313,19 @@ impl FuzzyRegex {
         // This is checked at runtime for simple patterns
         let (can_use_repetition_fast_path, fast_path_repeated_literal) = if literals.len() >= 2
             && capture_count == 0
-            // A top-level alternation of identical branches (e.g. `bc|bc`) also yields
-            // N identical literals, but it is NOT the repetition `(?:bc){N}`. Excluding
-            // simple alternations prevents flattening `bc|bc` into the string "bcbc".
-            && !is_simple_alternation
-            && !nfa
-                .states
-                .iter()
-                .any(|s| matches!(s, State::Lookahead { .. } | State::Lookbehind { .. }))
-        {
+            // The fast path flattens N identical literals into the string
+            // `literal.repeat(N)`, which is only valid when the pattern is a
+            // genuine concatenation `(?:lit){N}`. An alternation (`bc|bc`,
+            // `ab|a|ab`) or a variable repeat (`(?:ab){2,3}`) also yields
+            // identical literals but compiles to a `Split`, so reject any NFA
+            // containing one (this also subsumes the simple-alternation case,
+            // and `(?:lit){N}` itself compiles to a Split-free chain).
+            && !nfa.states.iter().any(|s| {
+                matches!(
+                    s,
+                    State::Lookahead { .. } | State::Lookbehind { .. } | State::Split { .. }
+                )
+            }) {
             if let Some(first) = literals.first() {
                 let first_text = &first.text;
                 if first_text.len() >= 2 {
