@@ -1498,6 +1498,10 @@ impl<'a> Matcher<'a> {
                     .as_ref()
                     .and_then(FuzzyLimits::get_substitutions)
                     .unwrap_or(max_edits);
+                let max_insertions = limits
+                    .as_ref()
+                    .and_then(FuzzyLimits::get_insertions)
+                    .unwrap_or(max_edits);
 
                 let current_edits = thread.edits.total();
 
@@ -1508,30 +1512,75 @@ impl<'a> Matcher<'a> {
                     1.0
                 };
 
+                // Emit a completed class-char match advancing to `next` at
+                // `base_pos`, then also emit "trailing insertion" variants that
+                // consume following text chars as insertions (within budget).
+                // Combined with the leading-insertion self-loop below, this lets
+                // a fuzzy class match extra characters on either side, e.g.
+                // `^(?:[cd]){i<=1}$` matching "dz" (trailing) or "zd" (leading).
+                let push_match_and_trailing =
+                    |next_threads: &mut Vec<Thread>,
+                     base_pos: usize,
+                     base_edits: EditCounts,
+                     base_sim: f32| {
+                        next_threads.push(Thread {
+                            state: *next,
+                            pos: base_pos,
+                            similarity: base_sim,
+                            edits: base_edits.clone(),
+                            captures: thread.captures.clone(),
+                            match_start: thread.match_start,
+                            handler_overrides: thread.handler_overrides.clone(),
+                        });
+                        let mut tpos = base_pos;
+                        let mut edits = base_edits;
+                        let mut sim = base_sim;
+                        while edits.total() < max_edits
+                            && edits.insertions < max_insertions
+                            && tpos < text.len()
+                        {
+                            let Some(tch) = text[tpos..].chars().next() else {
+                                break;
+                            };
+                            tpos += tch.len_utf8();
+                            edits.insertions += 1;
+                            sim *= 1.0 - edit_penalty;
+                            next_threads.push(Thread {
+                                state: *next,
+                                pos: tpos,
+                                similarity: sim,
+                                edits: edits.clone(),
+                                captures: thread.captures.clone(),
+                                match_start: thread.match_start,
+                                handler_overrides: thread.handler_overrides.clone(),
+                            });
+                        }
+                    };
+
                 // 1. Try exact match or substitution
                 if thread.pos < text.len()
                     && let Some(ch) = text[thread.pos..].chars().next()
                 {
                     if class.matches(ch) {
                         // Exact match - advance both pattern and text
-                        next_threads.push(Thread {
-                            state: *next,
-                            pos: thread.pos + ch.len_utf8(),
-                            ..thread.clone()
-                        });
+                        push_match_and_trailing(
+                            next_threads,
+                            thread.pos + ch.len_utf8(),
+                            thread.edits.clone(),
+                            thread.similarity,
+                        );
                     } else if current_edits < max_edits
                         && thread.edits.substitutions < max_substitutions
                     {
                         // Substitution - consume mismatched char
                         let mut new_edits = thread.edits.clone();
                         new_edits.substitutions += 1;
-                        next_threads.push(Thread {
-                            state: *next,
-                            pos: thread.pos + ch.len_utf8(),
-                            similarity: thread.similarity * (1.0 - edit_penalty),
-                            edits: new_edits,
-                            ..thread.clone()
-                        });
+                        push_match_and_trailing(
+                            next_threads,
+                            thread.pos + ch.len_utf8(),
+                            new_edits,
+                            thread.similarity * (1.0 - edit_penalty),
+                        );
                     }
                 }
 
@@ -1545,6 +1594,27 @@ impl<'a> Matcher<'a> {
                         similarity: thread.similarity * (1.0 - edit_penalty),
                         edits: new_edits,
                         ..thread.clone()
+                    });
+                }
+
+                // 3. Try leading insertion (consume an extra text char before the
+                // class char). Self-loop on this FuzzyChar state; the (state, pos)
+                // dedup in the driver keeps it terminating.
+                if thread.pos < text.len()
+                    && current_edits < max_edits
+                    && thread.edits.insertions < max_insertions
+                    && let Some(ch) = text[thread.pos..].chars().next()
+                {
+                    let mut new_edits = thread.edits.clone();
+                    new_edits.insertions += 1;
+                    next_threads.push(Thread {
+                        state: thread.state,
+                        pos: thread.pos + ch.len_utf8(),
+                        similarity: thread.similarity * (1.0 - edit_penalty),
+                        edits: new_edits,
+                        captures: thread.captures.clone(),
+                        match_start: thread.match_start,
+                        handler_overrides: thread.handler_overrides.clone(),
                     });
                 }
             }
