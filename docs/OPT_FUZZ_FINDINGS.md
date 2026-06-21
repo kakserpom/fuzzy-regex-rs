@@ -119,24 +119,34 @@ whole-pattern deletions separately so real bugs surface. This found:
 
 ## 7. Final state & remaining divergences
 
-After all fixes: **0 panics, 0 over-permissive for core mrab semantics**, 786
-tests + 21 doctests green, clippy clean. Across seeds 12345/777/2024/555
-(20 000 cases each) ~110–140 REAL divergences remain, in three classes — none a
-crash, all niche:
+9. **`FuzzyChar` insertion** (`matcher.rs`) — the per-char fuzzy-class step
+   implemented substitution and deletion but not insertion, so anchored patterns
+   needing it (`^(?:[cd]){i<=1}$` on `"dz"`/`"zd"`) missed. Added a leading
+   insertion (self-loop on the FuzzyChar state; the driver's `(state,pos)` dedup
+   keeps it terminating) and trailing insertions (emitted at `next` after the
+   class-char match), both within the per-op and total budgets. Non-zero-width
+   under-matches ~52 → 22, no new over-matches.
+
+After all fixes: **0 panics, 0 over-permissive for core (single-group) mrab
+semantics**, 786 tests + 21 doctests green, clippy clean. Across seeds
+12345/777/2024 (20 000 cases each) ~90–110 REAL divergences remain in two
+classes — none a crash, all niche:
 
 - **Zero-width whole-pattern deletion** (mrab emits empty match, fuzzy-regex
   declines) — semantic policy choice; would match at every position of any text.
-- **Multi-piece fuzzy groups** (`(?:b{1,3}cabcab){d<=3}`) — over-match: the
-  group's edit budget should be *shared* across the concatenated `FuzzyLiteral`
-  pieces, but each piece currently honors the full budget independently. Fixing
-  needs `FuzzyLiteral` to enforce a global remaining budget
-  (`limit - thread.edits_so_far`); touches the core NFA + fuzzy-cache path.
-- **Fuzzy `FuzzyChar` insertion** (`^(?:[cd]){i<=1}$` on `"dz"`) — under-match:
-  the `FuzzyChar` NFA step (`matcher.rs`) implements substitution and deletion
-  but not insertion; trailing insertions before `$` are especially fiddly.
-
-Both engine-level classes are deep changes to perf-critical matching for
-uncommon patterns; deferred pending a priority/risk decision.
+- **Multi-piece fuzzy groups** (`(?:b{1,3}cabcab){d<=3}`) — over-match (~84/run):
+  the group's edit budget must be *shared* across the concatenated
+  `FuzzyLiteral`/`FuzzyChar` pieces, but each currently honors the full budget
+  independently (`bridge.find_at` uses the piece's own limit;
+  `matcher.rs:~1620`). A correct fix needs per-fuzzy-group budget tracking — a
+  group id threaded HIR→NFA→`Thread`, with threads enforcing
+  `group_edits + match_edits <= group_budget`. A simpler global
+  `thread.edits.total() <= budget` filter is unsound: it regresses independent
+  same-budget groups (`(?:abc){e<=1}(?:def){e<=1}`, which must stay independent)
+  and fuzzy groups under repetition (`(?:(?:ab){e<=1})+`, per-iteration budget).
+  This is a deliberate feature with regression risk on the core matcher;
+  recommended as a focused follow-up with the repetition/composition semantics
+  decided up front.
 
 ## 4. Performance vs mrab-regex (existing harness)
 
