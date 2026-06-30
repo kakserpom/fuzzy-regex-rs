@@ -41,7 +41,7 @@ struct Thread {
     edits: EditCounts,
     /// Handler overrides: (`start_pos`, `end_pos`, `override_text`)
     handler_overrides: Vec<(usize, usize, String)>,
-    /// Per fuzzy-group cumulative edit counts (indexed by fuzzy_group_id).
+    /// Per fuzzy-group cumulative edit counts (indexed by `fuzzy_group_id`).
     group_edits: Vec<EditCounts>,
 }
 
@@ -153,50 +153,50 @@ fn check_group_budget(
     }
     let budget = &budgets[id];
     let merged = group_edits[id].merge(match_edits);
-    if let Some(max_total) = budget.get_edits() {
-        if merged.total() > max_total {
-            return false;
-        }
+    if let Some(max_total) = budget.get_edits()
+        && merged.total() > max_total
+    {
+        return false;
     }
-    if let Some(max_ins) = budget.get_insertions() {
-        if merged.insertions > max_ins {
-            return false;
-        }
+    if let Some(max_ins) = budget.get_insertions()
+        && merged.insertions > max_ins
+    {
+        return false;
     }
-    if let Some(max_del) = budget.get_deletions() {
-        if merged.deletions > max_del {
-            return false;
-        }
+    if let Some(max_del) = budget.get_deletions()
+        && merged.deletions > max_del
+    {
+        return false;
     }
-    if let Some(max_sub) = budget.get_substitutions() {
-        if merged.substitutions > max_sub {
-            return false;
-        }
+    if let Some(max_sub) = budget.get_substitutions()
+        && merged.substitutions > max_sub
+    {
+        return false;
     }
-    if let Some(max_swap) = budget.get_swaps() {
-        if merged.swaps > max_swap {
-            return false;
-        }
+    if let Some(max_swap) = budget.get_swaps()
+        && merged.swaps > max_swap
+    {
+        return false;
     }
     true
 }
 
-/// Merge match_edits into group_edits at the given group_id.
+/// Merge `match_edits` into `group_edits` at the given `group_id`.
 fn apply_group_edits(
     mut group_edits: Vec<EditCounts>,
     group_id: Option<usize>,
     match_edits: &EditCounts,
 ) -> Vec<EditCounts> {
-    if let Some(id) = group_id {
-        if id < group_edits.len() {
-            group_edits[id] = group_edits[id].merge(match_edits);
-        }
+    if let Some(id) = group_id
+        && id < group_edits.len()
+    {
+        group_edits[id] = group_edits[id].merge(match_edits);
     }
     group_edits
 }
 
 /// Extract fuzzy group budgets from the NFA states.
-/// Returns a vec indexed by fuzzy_group_id, mapping to the group's FuzzyLimits.
+/// Returns a vec indexed by `fuzzy_group_id`, mapping to the group's `FuzzyLimits`.
 fn extract_fuzzy_group_budgets(nfa: &Nfa) -> Vec<FuzzyLimits> {
     use std::collections::BTreeMap;
     let mut budgets: BTreeMap<usize, FuzzyLimits> = BTreeMap::new();
@@ -296,7 +296,7 @@ pub struct Matcher<'a> {
     /// Custom handlers for (?call:name) patterns.
     handlers: &'a HandlerMap,
     /// Per-group shared edit budgets for multi-piece fuzzy groups.
-    /// Indexed by fuzzy_group_id from the NFA states.
+    /// Indexed by `fuzzy_group_id` from the NFA states.
     fuzzy_group_budgets: Vec<FuzzyLimits>,
 }
 

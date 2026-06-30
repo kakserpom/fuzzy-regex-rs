@@ -406,10 +406,10 @@ impl HirLowering {
     }
 
     /// Allocate a new fuzzy group ID for shared budget tracking.
-    fn next_fuzzy_group_id(&self) -> Option<usize> {
+    fn next_fuzzy_group_id(&self) -> usize {
         let id = self.fuzzy_group_counter.get();
         self.fuzzy_group_counter.set(id + 1);
-        Some(id)
+        id
     }
 
     /// Convert `CharClass` to `HirClass` with unicode mode.
@@ -545,7 +545,7 @@ impl HirLowering {
                 } else {
                     // Assign a group ID for shared budget tracking across pieces
                     let group_id = self.next_fuzzy_group_id();
-                    self.lower_with_fuzziness(expr, fuzziness, group_id)
+                    self.lower_with_fuzziness(expr, fuzziness, Some(group_id))
                 }
             }
 
