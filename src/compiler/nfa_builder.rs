@@ -116,6 +116,7 @@ impl NfaBuilder {
                 min_edits,
                 cost_info,
                 edit_chars,
+                fuzzy_group_id,
             } => {
                 // Create a fuzzy literal state
                 let pattern_index = self.literal_index;
@@ -135,6 +136,7 @@ impl NfaBuilder {
                     limits: limits.clone(),
                     min_edits: *min_edits,
                     cost_constraint,
+                    fuzzy_group_id: *fuzzy_group_id,
                     next: 0, // Will be patched
                 });
                 NfaFragment::single(state, state)
@@ -164,6 +166,7 @@ impl NfaBuilder {
                 limits,
                 min_edits,
                 cost_info,
+                fuzzy_group_id,
             } => {
                 // Convert CostInfo to CostConstraint
                 let cost_constraint = cost_info.as_ref().and_then(convert_cost_info);
@@ -173,6 +176,7 @@ impl NfaBuilder {
                     limits: limits.clone(),
                     min_edits: *min_edits,
                     cost_constraint,
+                    fuzzy_group_id: *fuzzy_group_id,
                     next: 0,
                 });
                 NfaFragment::single(state, state)

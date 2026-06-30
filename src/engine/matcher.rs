@@ -41,6 +41,8 @@ struct Thread {
     edits: EditCounts,
     /// Handler overrides: (`start_pos`, `end_pos`, `override_text`)
     handler_overrides: Vec<(usize, usize, String)>,
+    /// Per fuzzy-group cumulative edit counts (indexed by fuzzy_group_id).
+    group_edits: Vec<EditCounts>,
 }
 
 impl Default for Thread {
@@ -53,6 +55,7 @@ impl Default for Thread {
             similarity: 1.0,
             edits: EditCounts::default(),
             handler_overrides: Vec::new(),
+            group_edits: Vec::new(),
         }
     }
 }
@@ -136,6 +139,87 @@ impl MatchResult {
     }
 }
 
+/// Check whether `match_edits` can be added to the group's cumulative edits
+/// without exceeding the group budget.
+fn check_group_budget(
+    group_edits: &[EditCounts],
+    group_id: Option<usize>,
+    match_edits: &EditCounts,
+    budgets: &[FuzzyLimits],
+) -> bool {
+    let Some(id) = group_id else { return true };
+    if id >= budgets.len() || id >= group_edits.len() {
+        return true;
+    }
+    let budget = &budgets[id];
+    let merged = group_edits[id].merge(match_edits);
+    if let Some(max_total) = budget.get_edits() {
+        if merged.total() > max_total {
+            return false;
+        }
+    }
+    if let Some(max_ins) = budget.get_insertions() {
+        if merged.insertions > max_ins {
+            return false;
+        }
+    }
+    if let Some(max_del) = budget.get_deletions() {
+        if merged.deletions > max_del {
+            return false;
+        }
+    }
+    if let Some(max_sub) = budget.get_substitutions() {
+        if merged.substitutions > max_sub {
+            return false;
+        }
+    }
+    if let Some(max_swap) = budget.get_swaps() {
+        if merged.swaps > max_swap {
+            return false;
+        }
+    }
+    true
+}
+
+/// Merge match_edits into group_edits at the given group_id.
+fn apply_group_edits(
+    mut group_edits: Vec<EditCounts>,
+    group_id: Option<usize>,
+    match_edits: &EditCounts,
+) -> Vec<EditCounts> {
+    if let Some(id) = group_id {
+        if id < group_edits.len() {
+            group_edits[id] = group_edits[id].merge(match_edits);
+        }
+    }
+    group_edits
+}
+
+/// Extract fuzzy group budgets from the NFA states.
+/// Returns a vec indexed by fuzzy_group_id, mapping to the group's FuzzyLimits.
+fn extract_fuzzy_group_budgets(nfa: &Nfa) -> Vec<FuzzyLimits> {
+    use std::collections::BTreeMap;
+    let mut budgets: BTreeMap<usize, FuzzyLimits> = BTreeMap::new();
+    for state in &nfa.states {
+        match state {
+            State::FuzzyLiteral {
+                fuzzy_group_id: Some(id),
+                limits: Some(lim),
+                ..
+            }
+            | State::FuzzyChar {
+                fuzzy_group_id: Some(id),
+                limits: Some(lim),
+                ..
+            } => {
+                budgets.entry(*id).or_insert_with(|| lim.clone());
+            }
+            _ => {}
+        }
+    }
+    budgets.into_values().collect()
+}
+
 /// Configuration for the matcher.
 #[derive(Debug, Clone)]
 pub struct MatcherConfig {
@@ -211,6 +295,9 @@ pub struct Matcher<'a> {
     max_simple_length: Option<usize>,
     /// Custom handlers for (?call:name) patterns.
     handlers: &'a HandlerMap,
+    /// Per-group shared edit budgets for multi-piece fuzzy groups.
+    /// Indexed by fuzzy_group_id from the NFA states.
+    fuzzy_group_budgets: Vec<FuzzyLimits>,
 }
 
 impl<'a> Matcher<'a> {
@@ -228,6 +315,7 @@ impl<'a> Matcher<'a> {
         let first_char_class = nfa.first_char_class();
         let ends_with_end_anchor = nfa.ends_with_end_anchor();
         let max_simple_length = Self::calculate_max_length(nfa, fuzzy_bridge);
+        let fuzzy_group_budgets = extract_fuzzy_group_budgets(nfa);
         Matcher {
             nfa,
             fuzzy_bridge,
@@ -241,6 +329,7 @@ impl<'a> Matcher<'a> {
             ends_with_end_anchor,
             max_simple_length,
             handlers,
+            fuzzy_group_budgets,
         }
     }
 
@@ -270,6 +359,7 @@ impl<'a> Matcher<'a> {
         // Get max length for end-anchor optimization
         let max_simple_length = Self::calculate_max_length(nfa, fuzzy_bridge);
 
+        let fuzzy_group_budgets = extract_fuzzy_group_budgets(nfa);
         Matcher {
             nfa,
             fuzzy_bridge,
@@ -283,6 +373,7 @@ impl<'a> Matcher<'a> {
             ends_with_end_anchor,
             max_simple_length,
             handlers,
+            fuzzy_group_budgets,
         }
     }
 
@@ -1260,6 +1351,7 @@ impl<'a> Matcher<'a> {
     ) -> Option<MatchResult> {
         use super::hash::FxHashSet;
 
+        let group_count = self.fuzzy_group_budgets.len();
         let mut threads = vec![Thread {
             state: self.nfa.start,
             pos: start,
@@ -1268,6 +1360,7 @@ impl<'a> Matcher<'a> {
             similarity: 1.0,
             edits: EditCounts::default(),
             handler_overrides: Vec::new(),
+            group_edits: vec![EditCounts::default(); group_count],
         }];
 
         let mut best_match: Option<MatchResult> = None;
@@ -1483,6 +1576,7 @@ impl<'a> Matcher<'a> {
                 limits,
                 min_edits: _,
                 cost_constraint: _,
+                fuzzy_group_id,
                 next,
             } => {
                 // Calculate edit budget
@@ -1523,17 +1617,36 @@ impl<'a> Matcher<'a> {
                      base_pos: usize,
                      base_edits: EditCounts,
                      base_sim: f32| {
-                        next_threads.push(Thread {
-                            state: *next,
-                            pos: base_pos,
-                            similarity: base_sim,
-                            edits: base_edits.clone(),
-                            captures: thread.captures.clone(),
-                            match_start: thread.match_start,
-                            handler_overrides: thread.handler_overrides.clone(),
-                        });
+                        let base_delta = EditCounts {
+                            insertions: base_edits.insertions - thread.edits.insertions,
+                            deletions: base_edits.deletions - thread.edits.deletions,
+                            substitutions: base_edits.substitutions - thread.edits.substitutions,
+                            swaps: base_edits.swaps - thread.edits.swaps,
+                        };
+                        if check_group_budget(
+                            &thread.group_edits,
+                            *fuzzy_group_id,
+                            &base_delta,
+                            &self.fuzzy_group_budgets,
+                        ) {
+                            next_threads.push(Thread {
+                                state: *next,
+                                pos: base_pos,
+                                similarity: base_sim,
+                                edits: base_edits.clone(),
+                                captures: thread.captures.clone(),
+                                match_start: thread.match_start,
+                                handler_overrides: thread.handler_overrides.clone(),
+                                group_edits: apply_group_edits(
+                                    thread.group_edits.clone(),
+                                    *fuzzy_group_id,
+                                    &base_delta,
+                                ),
+                            });
+                        }
                         let mut tpos = base_pos;
                         let mut edits = base_edits;
+                        let mut extra_insertions: u8 = 0;
                         let mut sim = base_sim;
                         while edits.total() < max_edits
                             && edits.insertions < max_insertions
@@ -1542,6 +1655,21 @@ impl<'a> Matcher<'a> {
                             let Some(tch) = text[tpos..].chars().next() else {
                                 break;
                             };
+                            extra_insertions += 1;
+                            let acc_delta = EditCounts {
+                                insertions: base_delta.insertions + extra_insertions,
+                                deletions: base_delta.deletions,
+                                substitutions: base_delta.substitutions,
+                                swaps: base_delta.swaps,
+                            };
+                            if !check_group_budget(
+                                &thread.group_edits,
+                                *fuzzy_group_id,
+                                &acc_delta,
+                                &self.fuzzy_group_budgets,
+                            ) {
+                                break;
+                            }
                             tpos += tch.len_utf8();
                             edits.insertions += 1;
                             sim *= 1.0 - edit_penalty;
@@ -1553,6 +1681,11 @@ impl<'a> Matcher<'a> {
                                 captures: thread.captures.clone(),
                                 match_start: thread.match_start,
                                 handler_overrides: thread.handler_overrides.clone(),
+                                group_edits: apply_group_edits(
+                                    thread.group_edits.clone(),
+                                    *fuzzy_group_id,
+                                    &acc_delta,
+                                ),
                             });
                         }
                     };
@@ -1572,29 +1705,57 @@ impl<'a> Matcher<'a> {
                     } else if current_edits < max_edits
                         && thread.edits.substitutions < max_substitutions
                     {
-                        // Substitution - consume mismatched char
-                        let mut new_edits = thread.edits.clone();
-                        new_edits.substitutions += 1;
-                        push_match_and_trailing(
-                            next_threads,
-                            thread.pos + ch.len_utf8(),
-                            new_edits,
-                            thread.similarity * (1.0 - edit_penalty),
-                        );
+                        // Check group budget for the substitution
+                        let sub_edit = EditCounts {
+                            substitutions: 1,
+                            ..EditCounts::default()
+                        };
+                        if check_group_budget(
+                            &thread.group_edits,
+                            *fuzzy_group_id,
+                            &sub_edit,
+                            &self.fuzzy_group_budgets,
+                        ) {
+                            // Substitution - consume mismatched char
+                            let mut new_edits = thread.edits.clone();
+                            new_edits.substitutions += 1;
+                            push_match_and_trailing(
+                                next_threads,
+                                thread.pos + ch.len_utf8(),
+                                new_edits,
+                                thread.similarity * (1.0 - edit_penalty),
+                            );
+                        }
                     }
                 }
 
                 // 2. Try deletion (skip this pattern char without consuming text)
                 if current_edits < max_edits && thread.edits.deletions < max_deletions {
-                    let mut new_edits = thread.edits.clone();
-                    new_edits.deletions += 1;
-                    next_threads.push(Thread {
-                        state: *next,
-                        pos: thread.pos, // Don't consume text
-                        similarity: thread.similarity * (1.0 - edit_penalty),
-                        edits: new_edits,
-                        ..thread.clone()
-                    });
+                    let del_edit = EditCounts {
+                        deletions: 1,
+                        ..EditCounts::default()
+                    };
+                    if check_group_budget(
+                        &thread.group_edits,
+                        *fuzzy_group_id,
+                        &del_edit,
+                        &self.fuzzy_group_budgets,
+                    ) {
+                        let mut new_edits = thread.edits.clone();
+                        new_edits.deletions += 1;
+                        next_threads.push(Thread {
+                            state: *next,
+                            pos: thread.pos,
+                            similarity: thread.similarity * (1.0 - edit_penalty),
+                            edits: new_edits,
+                            group_edits: apply_group_edits(
+                                thread.group_edits.clone(),
+                                *fuzzy_group_id,
+                                &del_edit,
+                            ),
+                            ..thread.clone()
+                        });
+                    }
                 }
 
                 // 3. Try leading insertion (consume an extra text char before the
@@ -1605,17 +1766,33 @@ impl<'a> Matcher<'a> {
                     && thread.edits.insertions < max_insertions
                     && let Some(ch) = text[thread.pos..].chars().next()
                 {
-                    let mut new_edits = thread.edits.clone();
-                    new_edits.insertions += 1;
-                    next_threads.push(Thread {
-                        state: thread.state,
-                        pos: thread.pos + ch.len_utf8(),
-                        similarity: thread.similarity * (1.0 - edit_penalty),
-                        edits: new_edits,
-                        captures: thread.captures.clone(),
-                        match_start: thread.match_start,
-                        handler_overrides: thread.handler_overrides.clone(),
-                    });
+                    let ins_edit = EditCounts {
+                        insertions: 1,
+                        ..EditCounts::default()
+                    };
+                    if check_group_budget(
+                        &thread.group_edits,
+                        *fuzzy_group_id,
+                        &ins_edit,
+                        &self.fuzzy_group_budgets,
+                    ) {
+                        let mut new_edits = thread.edits.clone();
+                        new_edits.insertions += 1;
+                        next_threads.push(Thread {
+                            state: thread.state,
+                            pos: thread.pos + ch.len_utf8(),
+                            similarity: thread.similarity * (1.0 - edit_penalty),
+                            edits: new_edits,
+                            captures: thread.captures.clone(),
+                            match_start: thread.match_start,
+                            handler_overrides: thread.handler_overrides.clone(),
+                            group_edits: apply_group_edits(
+                                thread.group_edits.clone(),
+                                *fuzzy_group_id,
+                                &ins_edit,
+                            ),
+                        });
+                    }
                 }
             }
 
@@ -1625,6 +1802,7 @@ impl<'a> Matcher<'a> {
                 limits,
                 min_edits,
                 cost_constraint,
+                fuzzy_group_id,
             } => {
                 if let Some(bridge) = self.fuzzy_bridge {
                     // Fast path for exact matching (no fuzzy edits)
@@ -1647,13 +1825,21 @@ impl<'a> Matcher<'a> {
                         {
                             let new_end = thread.pos + pattern_text.len();
                             // Only accept if we consume at least one character
-                            if new_end > thread.pos {
+                            if new_end > thread.pos
+                                && check_group_budget(
+                                    &thread.group_edits,
+                                    *fuzzy_group_id,
+                                    &EditCounts::default(),
+                                    &self.fuzzy_group_budgets,
+                                )
+                            {
                                 next_threads.push(Thread {
                                     state: *next,
                                     pos: new_end,
                                     similarity: thread.similarity,
                                     edits: thread.edits.clone(),
                                     captures: thread.captures.clone(),
+                                    group_edits: thread.group_edits.clone(),
                                     ..thread
                                 });
                             }
@@ -1711,34 +1897,57 @@ impl<'a> Matcher<'a> {
                                 )
                                 && meets_all_constraints(&boundary_result)
                             {
-                                next_threads.push(Thread {
-                                    state: *next,
-                                    pos: boundary_result.end,
-                                    similarity: thread.similarity * boundary_result.similarity,
-                                    edits: thread
-                                        .edits
-                                        .merge(&EditCounts::from_fuzzy_result(&boundary_result)),
-                                    captures: thread.captures.clone(),
-                                    match_start: thread.match_start,
-                                    handler_overrides: thread.handler_overrides.clone(),
-                                });
+                                let match_edits =
+                                    EditCounts::from_fuzzy_result(&boundary_result);
+                                if check_group_budget(
+                                    &thread.group_edits,
+                                    *fuzzy_group_id,
+                                    &match_edits,
+                                    &self.fuzzy_group_budgets,
+                                ) {
+                                    next_threads.push(Thread {
+                                        state: *next,
+                                        pos: boundary_result.end,
+                                        similarity: thread.similarity * boundary_result.similarity,
+                                        edits: thread.edits.merge(&match_edits),
+                                        captures: thread.captures.clone(),
+                                        match_start: thread.match_start,
+                                        handler_overrides: thread.handler_overrides.clone(),
+                                        group_edits: apply_group_edits(
+                                            thread.group_edits.clone(),
+                                            *fuzzy_group_id,
+                                            &match_edits,
+                                        ),
+                                    });
+                                }
                             }
 
                             // Only accept matches that consume at least one character
                             // to prevent infinite loops with quantifiers when fuzzy
                             // match can delete entire pattern
                             if meets_all_constraints(&result) && result.end > thread.pos {
-                                next_threads.push(Thread {
-                                    state: *next,
-                                    pos: result.end,
-                                    similarity: thread.similarity * result.similarity,
-                                    edits: thread
-                                        .edits
-                                        .merge(&EditCounts::from_fuzzy_result(&result)),
-                                    captures: thread.captures.clone(),
-                                    match_start: thread.match_start,
-                                    handler_overrides: thread.handler_overrides.clone(),
-                                });
+                                let match_edits = EditCounts::from_fuzzy_result(&result);
+                                if check_group_budget(
+                                    &thread.group_edits,
+                                    *fuzzy_group_id,
+                                    &match_edits,
+                                    &self.fuzzy_group_budgets,
+                                ) {
+                                    next_threads.push(Thread {
+                                        state: *next,
+                                        pos: result.end,
+                                        similarity: thread.similarity * result.similarity,
+                                        edits: thread.edits.merge(&match_edits),
+                                        captures: thread.captures.clone(),
+                                        match_start: thread.match_start,
+                                        handler_overrides: thread.handler_overrides.clone(),
+                                        group_edits: apply_group_edits(
+                                            thread.group_edits.clone(),
+                                            *fuzzy_group_id,
+                                            &match_edits,
+                                        ),
+                                    });
+                                }
                             }
                         } else {
                             let can_use_boundary = limits.as_ref().is_some_and(|l| {
@@ -1758,17 +1967,28 @@ impl<'a> Matcher<'a> {
                             {
                                 // Must consume at least one character
                                 if meets_all_constraints(&result) && result.end > thread.pos {
-                                    next_threads.push(Thread {
-                                        state: *next,
-                                        pos: result.end,
-                                        similarity: thread.similarity * result.similarity,
-                                        edits: thread
-                                            .edits
-                                            .merge(&EditCounts::from_fuzzy_result(&result)),
-                                        captures: thread.captures.clone(),
-                                        match_start: thread.match_start,
-                                        handler_overrides: thread.handler_overrides.clone(),
-                                    });
+                                    let match_edits = EditCounts::from_fuzzy_result(&result);
+                                    if check_group_budget(
+                                        &thread.group_edits,
+                                        *fuzzy_group_id,
+                                        &match_edits,
+                                        &self.fuzzy_group_budgets,
+                                    ) {
+                                        next_threads.push(Thread {
+                                            state: *next,
+                                            pos: result.end,
+                                            similarity: thread.similarity * result.similarity,
+                                            edits: thread.edits.merge(&match_edits),
+                                            captures: thread.captures.clone(),
+                                            match_start: thread.match_start,
+                                            handler_overrides: thread.handler_overrides.clone(),
+                                            group_edits: apply_group_edits(
+                                                thread.group_edits.clone(),
+                                                *fuzzy_group_id,
+                                                &match_edits,
+                                            ),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -1817,18 +2037,36 @@ impl<'a> Matcher<'a> {
                                     };
 
                                     if meets_all_constraints(&deletion_result) {
-                                        let mut new_edits = thread.edits.clone();
-                                        new_edits.deletions += pattern_len;
-                                        next_threads.push(Thread {
-                                            state: *next,
-                                            pos: thread.pos, // Don't consume any text
-                                            similarity: thread.similarity
-                                                * deletion_result.similarity,
-                                            edits: new_edits,
-                                            captures: thread.captures.clone(),
-                                            match_start: thread.match_start,
-                                            handler_overrides: thread.handler_overrides.clone(),
-                                        });
+                                        let match_edits = EditCounts {
+                                            insertions: 0,
+                                            deletions: pattern_len,
+                                            substitutions: 0,
+                                            swaps: 0,
+                                        };
+                                        if check_group_budget(
+                                            &thread.group_edits,
+                                            *fuzzy_group_id,
+                                            &match_edits,
+                                            &self.fuzzy_group_budgets,
+                                        ) {
+                                            let mut new_edits = thread.edits.clone();
+                                            new_edits.deletions += pattern_len;
+                                            next_threads.push(Thread {
+                                                state: *next,
+                                                pos: thread.pos,
+                                                similarity: thread.similarity
+                                                    * deletion_result.similarity,
+                                                edits: new_edits,
+                                                captures: thread.captures.clone(),
+                                                match_start: thread.match_start,
+                                                handler_overrides: thread.handler_overrides.clone(),
+                                                group_edits: apply_group_edits(
+                                                    thread.group_edits.clone(),
+                                                    *fuzzy_group_id,
+                                                    &match_edits,
+                                                ),
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -2017,6 +2255,7 @@ impl<'a> Matcher<'a> {
                                     captures: thread.captures.clone(),
                                     match_start: thread.match_start,
                                     handler_overrides: thread.handler_overrides.clone(),
+                                    group_edits: Vec::new(),
                                 });
                             }
                         }
@@ -2029,6 +2268,7 @@ impl<'a> Matcher<'a> {
                             similarity: thread.similarity,
                             edits: thread.edits.clone(),
                             handler_overrides: thread.handler_overrides.clone(),
+                            group_edits: thread.group_edits.clone(),
                         });
                     }
                 }

@@ -1780,6 +1780,8 @@ pub enum State {
         min_edits: Option<u8>,
         /// Cost constraint (optional).
         cost_constraint: Option<CostConstraint>,
+        /// Group ID for shared budget tracking across multi-piece fuzzy groups.
+        fuzzy_group_id: Option<usize>,
         /// Next state after matching.
         next: StateId,
     },
@@ -1795,6 +1797,8 @@ pub enum State {
         min_edits: Option<u8>,
         /// Cost constraint (optional).
         cost_constraint: Option<CostConstraint>,
+        /// Group ID for shared budget tracking across multi-piece fuzzy groups.
+        fuzzy_group_id: Option<usize>,
         /// Next state after matching.
         next: StateId,
     },
@@ -1967,6 +1971,7 @@ impl State {
         limits: Option<FuzzyLimits>,
         min_edits: Option<u8>,
         cost_constraint: Option<CostConstraint>,
+        fuzzy_group_id: Option<usize>,
         next: StateId,
     ) -> Self {
         State::FuzzyLiteral {
@@ -1974,6 +1979,7 @@ impl State {
             limits,
             min_edits,
             cost_constraint,
+            fuzzy_group_id,
             next,
         }
     }

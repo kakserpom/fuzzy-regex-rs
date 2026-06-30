@@ -6,6 +6,8 @@
 //! - Resolves fuzziness inheritance
 //! - Prepares for NFA construction
 
+use std::cell::Cell;
+
 use crate::types::FuzzyLimits;
 
 use crate::ir::EditCharRestriction;
@@ -52,6 +54,8 @@ pub enum Hir {
         cost_info: Option<CostInfo>,
         /// Character class restriction for edits (e.g., `{e<=1:[a-z]}`).
         edit_chars: Option<EditCharRestriction>,
+        /// Group ID for shared budget tracking across multi-piece fuzzy groups.
+        fuzzy_group_id: Option<usize>,
     },
 
     /// A single character (exact match).
@@ -71,6 +75,8 @@ pub enum Hir {
         min_edits: Option<u8>,
         /// Cost constraint info.
         cost_info: Option<CostInfo>,
+        /// Group ID for shared budget tracking across multi-piece fuzzy groups.
+        fuzzy_group_id: Option<usize>,
     },
 
     /// Concatenation of expressions.
@@ -190,6 +196,7 @@ impl Hir {
             min_edits,
             cost_info,
             edit_chars: None,
+            fuzzy_group_id: None,
         }
     }
 
@@ -207,6 +214,7 @@ impl Hir {
             min_edits,
             cost_info,
             edit_chars,
+            fuzzy_group_id: None,
         }
     }
 
@@ -366,6 +374,8 @@ pub struct HirLowering {
     default_edits: u8,
     /// Unicode mode - enable Unicode character classes.
     unicode: bool,
+    /// Counter for assigning unique fuzzy group IDs.
+    fuzzy_group_counter: Cell<usize>,
 }
 
 impl HirLowering {
@@ -375,6 +385,7 @@ impl HirLowering {
         HirLowering {
             default_edits,
             unicode: false,
+            fuzzy_group_counter: Cell::new(0),
         }
     }
 
@@ -384,6 +395,7 @@ impl HirLowering {
         HirLowering {
             default_edits,
             unicode,
+            fuzzy_group_counter: Cell::new(0),
         }
     }
 
@@ -391,6 +403,13 @@ impl HirLowering {
     #[must_use]
     pub fn lower(&self, ast: &Ast) -> Hir {
         self.lower_ast(ast)
+    }
+
+    /// Allocate a new fuzzy group ID for shared budget tracking.
+    fn next_fuzzy_group_id(&self) -> Option<usize> {
+        let id = self.fuzzy_group_counter.get();
+        self.fuzzy_group_counter.set(id + 1);
+        Some(id)
     }
 
     /// Convert `CharClass` to `HirClass` with unicode mode.
@@ -475,6 +494,7 @@ impl HirLowering {
                     min_edits,
                     cost_info,
                     edit_chars,
+                    fuzzy_group_id: None,
                 }
             }
 
@@ -523,7 +543,9 @@ impl HirLowering {
                     // Just inline the contents
                     self.lower_ast(expr)
                 } else {
-                    self.lower_with_fuzziness(expr, fuzziness)
+                    // Assign a group ID for shared budget tracking across pieces
+                    let group_id = self.next_fuzzy_group_id();
+                    self.lower_with_fuzziness(expr, fuzziness, group_id)
                 }
             }
 
@@ -591,33 +613,47 @@ impl HirLowering {
     }
 
     /// Lower an expression with specific fuzziness override.
-    fn lower_with_fuzziness(&self, ast: &Ast, fuzziness: &Fuzziness) -> Hir {
+    fn lower_with_fuzziness(
+        &self,
+        ast: &Ast,
+        fuzziness: &Fuzziness,
+        fuzzy_group_id: Option<usize>,
+    ) -> Hir {
         // Lower with the new default, but for detailed/mrab limits, inject them directly
         match fuzziness {
             Fuzziness::Exact => {
                 // Exact match - no edits allowed
-                let lowering = HirLowering::new(0);
+                let mut lowering = HirLowering::new(0);
+                lowering.fuzzy_group_counter = Cell::new(self.fuzzy_group_counter.get());
                 lowering.lower_ast(ast)
             }
             Fuzziness::Edits(n) => {
                 // Simple edit count - convert to FuzzyLimits and use detailed path
                 // This ensures character classes get FuzzyClass treatment
                 let limits = FuzzyLimits::new().edits(*n);
-                self.lower_with_detailed_limits(ast, &limits, None, None, None)
+                self.lower_with_detailed_limits(ast, &limits, None, None, None, fuzzy_group_id)
             }
             Fuzziness::Detailed(limits) => {
-                self.lower_with_detailed_limits(ast, limits, None, None, None)
+                self.lower_with_detailed_limits(ast, limits, None, None, None, fuzzy_group_id)
             }
             Fuzziness::MrabStyle(mrab) => {
                 let limits = mrab.to_limits();
                 let min_edits = mrab.min_errors;
                 let cost_info = extract_cost_info_from_mrab(mrab);
                 let edit_chars = extract_edit_chars_from_mrab(mrab);
-                self.lower_with_detailed_limits(ast, &limits, min_edits, cost_info, edit_chars)
+                self.lower_with_detailed_limits(
+                    ast,
+                    &limits,
+                    min_edits,
+                    cost_info,
+                    edit_chars,
+                    fuzzy_group_id,
+                )
             }
             Fuzziness::Inherited => {
                 // Use the default edits from self
-                let lowering = HirLowering::new(self.default_edits);
+                let mut lowering = HirLowering::new(self.default_edits);
+                lowering.fuzzy_group_counter = Cell::new(self.fuzzy_group_counter.get());
                 lowering.lower_ast(ast)
             }
         }
@@ -631,6 +667,7 @@ impl HirLowering {
         min_edits: Option<u8>,
         cost_info: Option<CostInfo>,
         edit_chars: Option<EditCharRestriction>,
+        fuzzy_group_id: Option<usize>,
     ) -> Hir {
         match ast {
             Ast::Literal { text, .. } => Hir::Literal {
@@ -639,6 +676,7 @@ impl HirLowering {
                 min_edits,
                 cost_info: cost_info.clone(),
                 edit_chars: edit_chars.clone(),
+                fuzzy_group_id,
             },
 
             Ast::Char(ch) => Hir::Literal {
@@ -647,6 +685,7 @@ impl HirLowering {
                 min_edits,
                 cost_info: cost_info.clone(),
                 edit_chars: edit_chars.clone(),
+                fuzzy_group_id,
             },
 
             Ast::Concat(parts) => {
@@ -659,6 +698,7 @@ impl HirLowering {
                             min_edits,
                             cost_info.clone(),
                             edit_chars.clone(),
+                            fuzzy_group_id,
                         )
                     })
                     .collect();
@@ -675,6 +715,7 @@ impl HirLowering {
                             min_edits,
                             cost_info.clone(),
                             edit_chars.clone(),
+                            fuzzy_group_id,
                         )
                     })
                     .collect();
@@ -710,6 +751,7 @@ impl HirLowering {
                                 min_edits,
                                 cost_info: cost_info.clone(),
                                 edit_chars: edit_chars.clone(),
+                                fuzzy_group_id,
                             }
                         }
                     };
@@ -720,7 +762,7 @@ impl HirLowering {
                     }
                 } else {
                     let inner = self
-                        .lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars);
+                        .lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars, fuzzy_group_id);
                     Hir::Repeat {
                         expr: Box::new(inner),
                         min,
@@ -734,12 +776,12 @@ impl HirLowering {
                 index: *index,
                 name: name.clone(),
                 expr: Box::new(
-                    self.lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars),
+                    self.lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars, fuzzy_group_id),
                 ),
             },
 
             Ast::NonCapturingGroup { expr, .. } => {
-                self.lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars)
+                self.lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars, fuzzy_group_id)
             }
 
             // Character class with fuzzy limits becomes FuzzyClass
@@ -748,6 +790,7 @@ impl HirLowering {
                 limits: Some(limits.clone()),
                 min_edits,
                 cost_info,
+                fuzzy_group_id,
             },
 
             // Backreference inside fuzzy group gets the fuzzy limits

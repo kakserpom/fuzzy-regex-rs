@@ -2165,6 +2165,7 @@ impl FuzzyRegex {
                             min_edits,
                             cost_constraint: _,
                             next: _,
+                            fuzzy_group_id: _,
                         } = next_state
                         && limits.is_none()
                         && min_edits.is_none()
@@ -2188,6 +2189,7 @@ impl FuzzyRegex {
                             min_edits,
                             cost_constraint: _,
                             next: next_state,
+                            fuzzy_group_id: _,
                         } = prev_state
                             && *next_state == lookahead_idx
                             && limits.is_none()

@@ -249,6 +249,7 @@ impl<'a> BacktrackMatcher<'a> {
                     limits: _,
                     min_edits: _,
                     cost_constraint: _,
+                    fuzzy_group_id: _,
                     next,
                 } => {
                     // For now, treat fuzzy char as exact match
