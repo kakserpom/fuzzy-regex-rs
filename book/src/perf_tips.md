@@ -99,7 +99,46 @@ fn main() {
 
 ## API Usage
 
-### 1. Use Streaming for Large Data
+### 1. Use find_iter for Simple Patterns
+
+`find_iter` has specialized fast paths for common pattern types:
+
+```rust
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
+
+    // Fast path for literal patterns
+    let re = FuzzyRegex::new("hello").unwrap();
+    let matches: Vec<_> = re.find_iter("hello world hello").collect();
+    assert_eq!(matches.len(), 2);
+}
+```
+
+```rust
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
+
+    // Fast path for alternations (uses Aho-Corasick)
+    let re = FuzzyRegex::new("(quick|brown|fox)").unwrap();
+    let matches: Vec<_> = re.find_iter("the quick brown fox").collect();
+    assert_eq!(matches.len(), 3);
+}
+```
+
+```rust
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
+
+    // Fast path for char class + literal patterns
+    let re = FuzzyRegex::new(r"\d+ test").unwrap();
+    let matches: Vec<_> = re.find_iter("123 test 456 test").collect();
+    assert_eq!(matches.len(), 2);
+}
+```
+
+These fast paths are selected automatically — no configuration needed.
+
+### 2. Use Streaming for Large Data
 
 ```rust
 fn main() {
@@ -120,7 +159,7 @@ fn main() {
 }
 ```
 
-### 2. Use find() for First Match
+### 3. Use find() for First Match
 
 ```rust
 fn main() {

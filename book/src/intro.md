@@ -7,6 +7,7 @@
 - **Fuzzy Matching**: Match strings with configurable edit distance tolerance (insertions, deletions, substitutions, transpositions)
 - **Full Regex Support**: Character classes, quantifiers, groups, alternation, anchors, lookahead/lookbehind
 - **Per-Segment Fuzziness**: Control fuzziness for individual parts of a pattern
+- **Shared Edit Budgets**: Constrain total edits across multi-piece expressions using group-level fuzziness
 - **Capture Groups**: Named and numbered capture groups with fuzzy matching
 - **Similarity Scoring**: Get match quality scores (0.0 - 1.0)
 - **Streaming API**: Process large files and network streams incrementally
@@ -38,6 +39,7 @@ fn main() {
 
 - **Bitap Algorithm**: O(n×k) time complexity for patterns ≤64 characters
 - **SIMD Optimizations**: ~2-10x speedup on supported platforms (AVX2, NEON)
+- **find_iter Fast Paths**: Specialized Aho-Corasick and literal search for iterating matches
 - **Hardened Mode**: Guaranteed O(n) worst-case for pathological patterns
 - **Streaming**: Process gigabytes of data without loading into memory
 

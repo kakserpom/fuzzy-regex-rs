@@ -82,3 +82,31 @@ fn main() {
     println!("{}", re.is_match("helo worled"));
 }
 ```
+
+## Shared Group Budget
+
+When a **non-capturing group** has its own fuzziness, the edit budget is shared across all pieces inside it:
+
+```rust
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
+
+    // Shared budget: total edits across "hello" and "world" combined ≤ 2
+    let re = FuzzyRegex::new("(?:hello world){e<=2}").unwrap();
+    // "hello" and "world" draw from the same pool of 2 edits
+
+    assert!(re.is_match("hello world"));   // 0 edits
+    assert!(re.is_match("helo world"));    // 1 deletion (hello) → 1 remaining
+    assert!(!re.is_match("helo worl"));    // 1 deletion each → 2 total, still OK
+    assert!(!re.is_match("hlo wrld"));     // 3 deletions → exceeds budget
+
+    // Per-type limits also shared across the group
+    let re2 = FuzzyRegex::new("(?:hello world){i<=1,d<=1}").unwrap();
+    // Maximum 1 insertion AND 1 deletion across all pieces
+    
+    assert!(re2.is_match("helo world"));   // 1 deletion
+    assert!(!re2.is_match("helo worl"));   // 2 deletions → exceeds budget
+}
+```
+
+This ensures that one piece doesn't exhaust the shared budget, giving predictable results for multi-segment fuzzy patterns.
