@@ -761,8 +761,14 @@ impl HirLowering {
                         Hir::Alt((min..=max).map(make).collect())
                     }
                 } else {
-                    let inner = self
-                        .lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars, fuzzy_group_id);
+                    let inner = self.lower_with_detailed_limits(
+                        expr,
+                        limits,
+                        min_edits,
+                        cost_info,
+                        edit_chars,
+                        fuzzy_group_id,
+                    );
                     Hir::Repeat {
                         expr: Box::new(inner),
                         min,
@@ -775,14 +781,24 @@ impl HirLowering {
             Ast::Group { index, name, expr } => Hir::Capture {
                 index: *index,
                 name: name.clone(),
-                expr: Box::new(
-                    self.lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars, fuzzy_group_id),
-                ),
+                expr: Box::new(self.lower_with_detailed_limits(
+                    expr,
+                    limits,
+                    min_edits,
+                    cost_info,
+                    edit_chars,
+                    fuzzy_group_id,
+                )),
             },
 
-            Ast::NonCapturingGroup { expr, .. } => {
-                self.lower_with_detailed_limits(expr, limits, min_edits, cost_info, edit_chars, fuzzy_group_id)
-            }
+            Ast::NonCapturingGroup { expr, .. } => self.lower_with_detailed_limits(
+                expr,
+                limits,
+                min_edits,
+                cost_info,
+                edit_chars,
+                fuzzy_group_id,
+            ),
 
             // Character class with fuzzy limits becomes FuzzyClass
             Ast::CharClass(class) => Hir::FuzzyClass {

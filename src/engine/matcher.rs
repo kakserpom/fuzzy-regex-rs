@@ -1897,8 +1897,7 @@ impl<'a> Matcher<'a> {
                                 )
                                 && meets_all_constraints(&boundary_result)
                             {
-                                let match_edits =
-                                    EditCounts::from_fuzzy_result(&boundary_result);
+                                let match_edits = EditCounts::from_fuzzy_result(&boundary_result);
                                 if check_group_budget(
                                     &thread.group_edits,
                                     *fuzzy_group_id,
