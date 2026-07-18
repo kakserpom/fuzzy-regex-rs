@@ -30,6 +30,7 @@ criterion = "0.8.2"
 regex = "1"
 arbitrary = { version = "1", features = ["derive"] }
 proptest = "1.10"
+fuzzy-aho-corasick = "0.3.7"
 
 [[bench]]
 name = "fuzzy_benchmarks"

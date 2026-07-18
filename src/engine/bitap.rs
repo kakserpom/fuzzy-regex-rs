@@ -3761,6 +3761,18 @@ impl MultiBitapMatcher {
         // Use FxHashMap for deduplication
         let mut matches: FxHashMap<(usize, usize, usize), MultiPatternMatch> = FxHashMap::default();
 
+        // Memoize the exact edit breakdown per (start, end, pattern). The
+        // breakdown is a deterministic function of the substring and the
+        // pattern, but the bitap flags the same (start, end) as a candidate at
+        // several edit levels `d` (and it stays a candidate for `d >= true
+        // edits`), so without memoization the expensive DP runs many times per
+        // window. This is the dominant cost for short text with a high edit
+        // budget.
+        // Keyed by (start_byte, end_byte, pattern) -> (ins, del, sub, swap).
+        type BreakdownKey = (usize, usize, usize);
+        type Breakdown = (u8, u8, u8, u8);
+        let mut breakdown_memo: FxHashMap<BreakdownKey, Breakdown> = FxHashMap::default();
+
         // Process each character once
         for (char_idx, &(_, text_char)) in text_chars.iter().enumerate() {
             let text_char = if self.case_insensitive {
@@ -3802,10 +3814,39 @@ impl MultiBitapMatcher {
                         for start_char in min_start_char..=max_start_char.min(char_idx) {
                             let start_byte = text_chars.get(start_char).map_or(0, |(b, _)| *b);
 
-                            let (insertions, deletions, substitutions, swaps) = matcher
-                                .compute_exact_edit_breakdown(
-                                    &text.as_bytes()[start_byte..end_byte],
-                                );
+                            // Cheap pre-DP prune. A window of char-length `L`
+                            // matched against a pattern of length `m` needs at
+                            // least `|L - m|` edits, so its best-possible
+                            // similarity is `1 - |L-m|/max(m,L)`. Skip the
+                            // expensive exact-breakdown DP when the window can
+                            // neither fit the current edit level nor reach the
+                            // similarity threshold. Both are exactly the
+                            // conditions checked (and rejected) after the DP.
+                            let win_len = char_idx - start_char + 1;
+                            let ldiff = win_len.abs_diff(matcher.pattern_len);
+                            if ldiff > d {
+                                continue;
+                            }
+                            let max_sim =
+                                1.0 - ldiff as f32 / matcher.pattern_len.max(win_len).max(1) as f32;
+                            if max_sim < threshold {
+                                continue;
+                            }
+
+                            let key = (start_byte, end_byte, p_idx);
+
+                            // Already accepted at a lower edit level -> the
+                            // (deterministic) result is identical, skip entirely.
+                            if matches.contains_key(&key) {
+                                continue;
+                            }
+
+                            let (insertions, deletions, substitutions, swaps) =
+                                *breakdown_memo.entry(key).or_insert_with(|| {
+                                    matcher.compute_exact_edit_breakdown(
+                                        &text.as_bytes()[start_byte..end_byte],
+                                    )
+                                });
 
                             let total_edits = insertions + deletions + substitutions + swaps;
                             if total_edits as usize > d {
@@ -3814,30 +3855,21 @@ impl MultiBitapMatcher {
 
                             let sim = matcher.calc_similarity(total_edits, insertions, deletions);
                             if sim >= threshold {
-                                let key = (start_byte, end_byte, p_idx);
-                                let m = MultiPatternMatch {
-                                    pattern_index: p_idx,
-                                    match_result: DamLevMatch {
-                                        start: start_byte,
-                                        end: end_byte,
-                                        insertions,
-                                        deletions,
-                                        substitutions,
-                                        swaps,
-                                        similarity: sim,
+                                matches.insert(
+                                    key,
+                                    MultiPatternMatch {
+                                        pattern_index: p_idx,
+                                        match_result: DamLevMatch {
+                                            start: start_byte,
+                                            end: end_byte,
+                                            insertions,
+                                            deletions,
+                                            substitutions,
+                                            swaps,
+                                            similarity: sim,
+                                        },
                                     },
-                                };
-
-                                matches
-                                    .entry(key)
-                                    .and_modify(|existing| {
-                                        if m.match_result.similarity
-                                            > existing.match_result.similarity
-                                        {
-                                            *existing = m.clone();
-                                        }
-                                    })
-                                    .or_insert(m);
+                                );
                             }
                         }
                     }

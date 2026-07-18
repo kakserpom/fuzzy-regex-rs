@@ -278,12 +278,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "fuzzy-aho-corasick"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6325894f63245ddbc52c939f918def6fbdea201bc1f7f301e2b68f695553dbe7"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "fuzzy-regex"
 version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "arbitrary",
  "criterion",
+ "fuzzy-aho-corasick",
  "memchr",
  "mimalloc",
  "proptest",
