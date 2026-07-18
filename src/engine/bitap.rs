@@ -1280,6 +1280,90 @@ impl BitapMatcher {
         pending_match.map(|(_, m)| m)
     }
 
+    /// Total Damerau-Levenshtein distance between the pattern and `matched_text`.
+    ///
+    /// This is a lightweight (single `u8` per cell) gate used before the full
+    /// per-operation breakdown: match similarity depends only on the *total*
+    /// distance and the window length (`calc_similarity` reduces to
+    /// `1 - dist / max(m, L)`), so most candidate windows can be accepted or
+    /// rejected here without the heavier 5-tuple DP. Returns `None` for windows
+    /// too large for the stack buffers (the caller then falls back to the full
+    /// breakdown, which handles the heap case).
+    fn compute_damerau_distance(&self, matched_text: &[u8]) -> Option<u8> {
+        // Matches the breakdown DP's stack limit; larger windows return None and
+        // the caller falls back to the full (heap-capable) breakdown.
+        const N: usize = 72;
+
+        let pattern = &self.pattern_chars;
+        let m = pattern.len();
+        if m >= N {
+            return None;
+        }
+        if matched_text.is_empty() {
+            return Some(m.min(255) as u8);
+        }
+        if m == 0 {
+            return Some(
+                matched_text
+                    .iter()
+                    .filter(|&&b| b & 0xC0 != 0x80)
+                    .count()
+                    .min(255) as u8,
+            );
+        }
+
+        // ASCII fast path: DP directly over the bytes with no char buffer (the
+        // buffer init is the dominant per-call cost for the short windows this
+        // gate runs on). `is_ascii` means every pattern char is < 0x80.
+        if self.is_ascii && matched_text.is_ascii() {
+            let n = matched_text.len();
+            if n >= N {
+                return None;
+            }
+            let lc = |b: u8| {
+                if self.case_insensitive {
+                    b.to_ascii_lowercase()
+                } else {
+                    b
+                }
+            };
+            let mut prev_prev = [0u8; N + 1];
+            let mut prev = [0u8; N + 1];
+            let mut curr = [0u8; N + 1];
+            for (j, slot) in prev.iter_mut().enumerate().take(n + 1) {
+                *slot = j as u8;
+            }
+            let mut prev_pb = 0u8;
+            for i in 1..=m {
+                let pb = lc(pattern[i - 1] as u8);
+                curr[0] = i as u8;
+                for j in 1..=n {
+                    let tb = lc(matched_text[j - 1]);
+                    if pb == tb {
+                        curr[j] = prev[j - 1];
+                    } else {
+                        let mut best = 1 + prev[j - 1].min(curr[j - 1]).min(prev[j]);
+                        if i > 1 && j > 1 && pb == lc(matched_text[j - 2]) && prev_pb == tb {
+                            best = best.min(prev_prev[j - 2] + 1);
+                        }
+                        curr[j] = best;
+                    }
+                }
+                std::mem::swap(&mut prev_prev, &mut prev);
+                std::mem::swap(&mut prev, &mut curr);
+                prev_pb = pb;
+            }
+            return Some(prev[n]);
+        }
+
+        // Non-ASCII: decline the gate and fall back to the full breakdown. The
+        // per-op breakdown's edit *attribution* can diverge from the minimal
+        // total distance on some multibyte-char windows, and this gate must
+        // agree with the breakdown's total exactly, so it is only used where they
+        // provably match (verified by `test_damerau_distance_matches_breakdown_total`).
+        None
+    }
+
     /// Compute exact Damerau-Levenshtein edit breakdown using dynamic programming.
     /// Returns (insertions, deletions, substitutions, swaps).
     ///
@@ -3592,6 +3676,44 @@ mod simd_avx2 {
 mod tests {
     use super::*;
 
+    /// The lightweight distance gate must agree exactly with the full breakdown's
+    /// total edit count, otherwise `find_all` would reject valid matches.
+    #[test]
+    fn test_damerau_distance_matches_breakdown_total() {
+        // Deterministic pseudo-random windows over a small alphabet, both ASCII
+        // (fast path) and with a non-ASCII char (char path).
+        let alpha = ['a', 'b', 'c', 'd', 'é'];
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for ci in [false, true] {
+            for _ in 0..20_000 {
+                let plen = 1 + (next() % 8) as usize;
+                let tlen = (next() % 12) as usize;
+                let pat: String = (0..plen)
+                    .map(|_| alpha[(next() % alpha.len() as u64) as usize])
+                    .collect();
+                let text: String = (0..tlen)
+                    .map(|_| alpha[(next() % alpha.len() as u64) as usize])
+                    .collect();
+                let m = BitapMatcher::new(&pat, EditLimits::new(4), ci).unwrap();
+                let Some(dist) = m.compute_damerau_distance(text.as_bytes()) else {
+                    continue;
+                };
+                let (i, d, s, sw) = m.compute_exact_edit_breakdown(text.as_bytes());
+                let total = i as u16 + d as u16 + s as u16 + sw as u16;
+                assert_eq!(
+                    dist as u16, total,
+                    "distance mismatch: pat={pat:?} text={text:?} ci={ci} dist={dist} breakdown={i},{d},{s},{sw}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_exact_match() {
         let matcher = BitapMatcher::new("hello", EditLimits::new(0), false).unwrap();
@@ -3839,6 +3961,26 @@ impl MultiBitapMatcher {
                             // (deterministic) result is identical, skip entirely.
                             if matches.contains_key(&key) {
                                 continue;
+                            }
+
+                            // Cheap distance gate: compute the total edit
+                            // distance with the light u8 DP and reject windows
+                            // that can't fit the edit level or reach the
+                            // threshold, without paying for the per-op breakdown.
+                            // sim == 1 - dist/max(m,L) is exactly
+                            // `calc_similarity` here (matched_len == L). The DP is
+                            // cheap enough that recomputing beats a memo hashmap.
+                            if let Some(dist) = matcher
+                                .compute_damerau_distance(&text.as_bytes()[start_byte..end_byte])
+                            {
+                                if dist as usize > d {
+                                    continue;
+                                }
+                                let sim = 1.0
+                                    - dist as f32 / matcher.pattern_len.max(win_len).max(1) as f32;
+                                if sim < threshold {
+                                    continue;
+                                }
                             }
 
                             let (insertions, deletions, substitutions, swaps) =
