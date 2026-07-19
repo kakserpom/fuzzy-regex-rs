@@ -1075,15 +1075,6 @@ impl<'a> Matcher<'a> {
         // This avoids the overhead of building and querying the cache for common characters.
         let is_all_exact = self.fuzzy_bridge.is_none_or(FuzzyBridge::is_all_exact);
 
-        // Search all fuzzy matches once upfront - O(N) instead of O(N²)
-        // Skip for exact patterns to avoid overhead
-        let cached = if is_all_exact {
-            None
-        } else {
-            self.fuzzy_bridge
-                .map(|b| b.search_all(text, self.config.threshold))
-        };
-
         let mut matches = Vec::new();
 
         // Optimization for end-anchored patterns: only check positions near the end
@@ -1105,6 +1096,22 @@ impl<'a> Matcher<'a> {
                     chars_counted += 1;
                 }
             }
+
+            // Build the fuzzy cache over ONLY the trailing window instead of the
+            // O(N) full search_all: search the suffix `text[start_byte..]` and
+            // shift positions back. bitap is local, so for matches ending at
+            // text.len() (all that a `$` anchor accepts) the suffix yields
+            // identical results to the full scan -- turning e.g.
+            // `(?:here){e<=1}$` on a long haystack from O(N) into O(max_len).
+            let start_byte = positions.last().copied().unwrap_or(0);
+            let cached = if is_all_exact {
+                None
+            } else {
+                self.fuzzy_bridge.map(|b| {
+                    b.search_all(&text[start_byte..], self.config.threshold)
+                        .shifted(start_byte)
+                })
+            };
 
             // Try positions from end (positions are already in reverse order)
             for &idx in &positions {
@@ -1129,6 +1136,15 @@ impl<'a> Matcher<'a> {
 
             return matches;
         }
+
+        // Non-end-anchored: search all fuzzy matches once upfront - O(N) instead
+        // of O(N^2). Skip for exact patterns to avoid overhead.
+        let cached = if is_all_exact {
+            None
+        } else {
+            self.fuzzy_bridge
+                .map(|b| b.search_all(text, self.config.threshold))
+        };
 
         // Optimization: Use cached literal positions to guide search
         // If we have literal matches in the cache, only try positions within

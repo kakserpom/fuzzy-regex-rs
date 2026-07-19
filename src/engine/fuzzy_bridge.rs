@@ -62,6 +62,26 @@ impl CachedMatches {
     pub fn is_empty(&self) -> bool {
         self.by_pattern_and_start.is_empty()
     }
+
+    /// Shift every match position by `offset`: start keys and result ends move
+    /// forward by `offset`. Used to reuse a search over a suffix `text[offset..]`
+    /// as if it had run on the full text (the end-anchor windowed search).
+    #[must_use]
+    pub fn shifted(self, offset: usize) -> Self {
+        if offset == 0 {
+            return self;
+        }
+        let mut out: FxHashMap<(usize, usize), Vec<FuzzyMatchResult>> = FxHashMap::default();
+        for ((pattern, start), mut results) in self.by_pattern_and_start {
+            for r in &mut results {
+                r.end += offset;
+            }
+            out.insert((pattern, start + offset), results);
+        }
+        CachedMatches {
+            by_pattern_and_start: out,
+        }
+    }
 }
 
 /// Bridge to Levenshtein automata for efficient fuzzy literal matching.
