@@ -1,0 +1,64 @@
+description = "mrab fuzzy syntax: cost equations, ranges, exclusive bounds, unlimited, edit-char restrictions. Verifies parse + match."
+
+[[test]]
+name = "cost_equation"
+pattern = "(?:foobar){2i+1d+1s<=4}"
+input = "foybar"
+is_match = true
+
+[[test]]
+name = "simple_cost"
+pattern = "(?:hello){c<=2}"
+input = "helo"
+is_match = true
+
+[[test]]
+name = "range_min_error_required"
+pattern = "(?:hello){1<=e<=3}"
+input = "hello"
+# needs >=1 error, so exact "hello" at 0 is excluded; matches a fuzzy substring
+is_match = true
+
+[[test]]
+name = "exclusive_upper"
+pattern = "(?:hello){e<3}"
+input = "haxlo"
+is_match = true
+fuzzy_counts = [2, 0, 0]
+
+[[test]]
+name = "exclusive_upper_reject"
+pattern = "(?:hello){e<2}"
+input = "haxlo"
+is_match = false
+
+[[test]]
+name = "unlimited_errors"
+pattern = "(?:foobar){e}"
+input = "xirefoabralfobarxie"
+is_match = true
+
+[[test]]
+name = "unlimited_insertions"
+pattern = "(?:hel){i}"
+input = "hxxel"
+is_match = true
+
+[[test]]
+name = "char_restriction_allows"
+pattern = "(?:hello){s<=1:[a-z]}"
+input = "hallo"
+is_match = true
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "char_restriction_rejects_non_class"
+pattern = "(?:hello){s<=1:[a-z]}"
+input = "h3llo"
+is_match = false
+
+[[test]]
+name = "char_restriction_general"
+pattern = "(?:hello){e<=1:[a-z]}"
+input = "hallo"
+is_match = true

@@ -1,0 +1,49 @@
+description = "Match metadata: fuzzy_counts order (mrab = subs,ins,dels), word-boundary metadata, optimal individual-limit match. Regression coverage for the 2026-06-21 parity fixes."
+
+# fuzzy_counts is (substitutions, insertions, deletions) to match mrab-regex.
+[[test]]
+name = "counts_substitution"
+pattern = "(?:foobar){e<=1}"
+input = "foobyr"
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "counts_insertion"
+pattern = "(?:foobar){e<=1}"
+input = "fooobar"
+fuzzy_counts = [0, 1, 0]
+
+[[test]]
+name = "counts_deletion"
+pattern = "(?:foobar){e<=1}"
+input = "fobar"
+fuzzy_counts = [0, 0, 1]
+
+[[test]]
+name = "counts_exact"
+pattern = "(?:foobar){e<=1}"
+input = "foobar"
+fuzzy_counts = [0, 0, 0]
+
+# Word-boundary fuzzy matches must carry real edit metadata (not zeros).
+[[test]]
+name = "word_boundary_keeps_counts"
+pattern = '\b(?:hello){e<=1}\b'
+input = "hallo world"
+span = [0, 5]
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "word_boundary_prefix_only"
+pattern = '\b(?:hello){e<=1}'
+input = "hallo world"
+fuzzy_counts = [1, 0, 0]
+
+# Individual-limit patterns must return the OPTIMAL (fewest-edit) match, not the
+# first-accepted alignment.
+[[test]]
+name = "individual_limits_optimal_match"
+pattern = "(?:hello){i<=1,d<=1,s<=1}"
+input = "hetlo"
+span = [0, 5]
+fuzzy_counts = [1, 0, 0]

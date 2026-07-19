@@ -1,0 +1,65 @@
+description = "Alternation, incl. identical/overlapping branches. Regression coverage for the repetition-fast-path bug that flattened (?:bc|bc) into 'bcbc'."
+
+[[test]]
+name = "duplicate_two_branches"
+pattern = "bc|bc"
+input = "abcd"
+is_match = true
+span = [1, 3]
+
+[[test]]
+name = "duplicate_named_group"
+pattern = "cat|cat"
+input = "my cat"
+is_match = true
+
+[[test]]
+name = "duplicate_three_branches"
+pattern = "bc|bc|bc"
+input = "xbcx"
+is_match = true
+
+[[test]]
+name = "mixed_len_with_duplicate"
+pattern = "ab|a|ab"
+input = "babaab"
+is_match = true
+
+[[test]]
+name = "single_char_branch_dropped"
+pattern = "c|bc|bc"
+input = "xcx"
+is_match = true
+
+[[test]]
+name = "anchored_duplicate"
+pattern = '^(?:bb|bb)'
+input = "bbcb"
+is_match = true
+
+[[test]]
+name = "real_repetition_still_works"
+pattern = "(?:bc){2}"
+input = "abcbcd"
+is_match = true
+span = [1, 5]
+
+[[test]]
+name = "real_repetition_no_match"
+pattern = "(?:bc){2}"
+input = "abcd"
+is_match = false
+
+[[test]]
+name = "fuzzy_alternation"
+pattern = "(?:cat|dog){e<=1}"
+input = "cot"
+is_match = true
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "distinct_branches"
+pattern = "cat|dog|bird"
+input = "a bird here"
+is_match = true
+span = [2, 6]

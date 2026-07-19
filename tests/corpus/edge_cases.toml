@@ -1,0 +1,65 @@
+description = "Unicode / quantifier-in-group / fuzzy-class regressions. Covers the UTF-8 char-boundary panics and the quantifier-budget and standalone-fuzzy-class fixes."
+
+# --- UTF-8: these used to panic (non-char-boundary slicing in find loops) ---
+[[test]]
+name = "utf8_class_deletion"
+pattern = "(?:[b]){d<=3}"
+input = "😀éc😀d"
+# just must not panic; a byte-position match may or may not exist
+is_match = true
+
+[[test]]
+name = "utf8_star_high_edits"
+pattern = "(?:c*){e<=3}"
+input = "é中中üc😀c"
+is_match = true
+
+[[test]]
+name = "utf8_plus_deletion"
+pattern = "(?:a+){d<=1}"
+input = "中ücc"
+is_match = true
+
+# --- quantifier inside a fuzzy group: budget is shared, not per-copy ---
+[[test]]
+name = "quant_group_no_overmatch"
+pattern = "(?:b{2}){e<=1}"
+input = "cdaadac"
+is_match = false
+
+[[test]]
+name = "quant_group_exact"
+pattern = "(?:b{2}){e<=1}"
+input = "bb"
+is_match = true
+
+[[test]]
+name = "quant_group_one_deletion"
+pattern = "(?:b{2}){e<=1}"
+input = "b"
+is_match = true
+
+# --- standalone fuzzy character class matches via substitution ---
+[[test]]
+name = "fuzzy_class_substitution"
+pattern = "(?:[a]){s<=1}"
+input = "d"
+is_match = true
+
+[[test]]
+name = "fuzzy_class_range_substitution"
+pattern = "(?:[a-c]){s<=1}"
+input = "z"
+is_match = true
+
+[[test]]
+name = "fuzzy_class_anchored_insertion"
+pattern = '^(?:[cd]){i<=1}$'
+input = "dz"
+is_match = true
+
+[[test]]
+name = "fuzzy_class_insertion_keeps_anchor"
+pattern = "(?:[a]){i<=1}"
+input = "xb"
+is_match = false

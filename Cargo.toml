@@ -31,6 +31,8 @@ regex = "1"
 arbitrary = { version = "1", features = ["derive"] }
 proptest = "1.10"
 fuzzy-aho-corasick = "0.3.7"
+toml = "0.8"
+serde = { version = "1.0.229", features = ["derive"] }
 
 [[bench]]
 name = "fuzzy_benchmarks"

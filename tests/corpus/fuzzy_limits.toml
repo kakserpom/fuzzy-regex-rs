@@ -1,0 +1,82 @@
+description = "Edit-limit semantics: total (e), per-operation (i/d/s), and mrab defaults."
+
+# --- total edit budget {e<=n} ---
+[[test]]
+name = "e1_substitution"
+pattern = "(?:hello){e<=1}"
+input = "hallo"
+span = [0, 5]
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "e1_too_many_edits"
+pattern = "(?:hello){e<=1}"
+input = "hxxlo"
+is_match = false
+
+[[test]]
+name = "e2_sub_plus_del"
+pattern = "(?:hello){e<=2}"
+input = "helo"
+is_match = true
+fuzzy_counts = [0, 0, 1]
+
+# --- individual operations ---
+[[test]]
+name = "i1_insertion"
+pattern = "(?:hello){i<=1}"
+input = "hellxo"
+span = [0, 6]
+fuzzy_counts = [0, 1, 0]
+
+[[test]]
+name = "d1_deletion"
+pattern = "(?:hello){d<=1}"
+input = "helo"
+fuzzy_counts = [0, 0, 1]
+
+[[test]]
+name = "s1_substitution"
+pattern = "(?:hello){s<=1}"
+input = "hallo"
+span = [0, 5]
+fuzzy_counts = [1, 0, 0]
+
+# --- mrab per-op default: unspecified ops default to 0 (no explicit e<=) ---
+[[test]]
+name = "i_only_forbids_deletion"
+pattern = "(?:abc){i<=1}"
+input = "ab"
+is_match = false
+
+[[test]]
+name = "i_only_forbids_substitution"
+pattern = "(?:abc){i<=2}"
+input = "xbc"
+is_match = false
+
+[[test]]
+name = "s_only_allows_sub"
+pattern = "(?:abc){s<=1}"
+input = "abx"
+is_match = true
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "explicit_zero_ops_enforced"
+pattern = "(?:test){i<=2,d<=0,s<=0}"
+input = "txst"
+is_match = false
+
+[[test]]
+name = "explicit_zero_ops_insertion_ok"
+pattern = "(?:test){i<=2,d<=0,s<=0}"
+input = "ttest"
+is_match = true
+
+# --- combined individual + explicit total (e caps, does not raise) ---
+[[test]]
+name = "i_and_e_defaults_others_zero"
+pattern = "(?:baba){i<=1,e<=3}"
+input = "ddcdbd"
+is_match = false
