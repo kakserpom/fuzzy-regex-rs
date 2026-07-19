@@ -20,7 +20,7 @@ pub mod prefilter;
 pub mod simd_class;
 
 pub use backtrack::BacktrackMatcher;
-pub use bitap::{MultiBitapMatcher, MultiPatternMatch};
+pub use bitap::{MultiBitapMatcher, MultiPatternCandidate, MultiPatternMatch};
 pub use captures::{CaptureState, CaptureStateBuilder};
 pub use dfa::{Dfa, DfaMatch};
 pub use fuzzy_bridge::{CachedMatches, FuzzyBridge, FuzzyMatchResult};

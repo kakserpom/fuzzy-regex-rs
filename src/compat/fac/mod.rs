@@ -396,7 +396,44 @@ impl FuzzyAhoCorasick {
             };
         }
 
-        // Multi-pattern: use full search with deduplication
+        // Multi-pattern: gather candidates without the per-op breakdown, select
+        // the non-overlapping set, then compute the breakdown only for the
+        // survivors. The breakdown does not affect selection (which sorts by
+        // similarity/length and picks by span), so results are identical to the
+        // eager path but the expensive 5-tuple DP runs only for the winners.
+        if let Some(ref multi) = self.multi_bitap {
+            let candidates = multi.find_all_candidates(haystack, similarity_threshold);
+            let inner: Vec<FuzzyMatch<'a>> = candidates
+                .iter()
+                .map(|c| FuzzyMatch {
+                    insertions: 0,
+                    deletions: 0,
+                    substitutions: 0,
+                    swaps: 0,
+                    edits: c.total_edits,
+                    pattern_index: c.pattern_index,
+                    pattern: &self.compiled[c.pattern_index].pattern,
+                    start: c.start,
+                    end: c.end,
+                    similarity: c.similarity,
+                    text: &haystack[c.start..c.end],
+                })
+                .collect();
+            let mut matches = FuzzyMatches { haystack, inner };
+            matches.default_sort();
+            matches.non_overlapping();
+            for m in &mut matches.inner {
+                let (i, d, s, sw) =
+                    multi.breakdown(m.pattern_index, &haystack.as_bytes()[m.start..m.end]);
+                m.insertions = i;
+                m.deletions = d;
+                m.substitutions = s;
+                m.swaps = sw;
+            }
+            return matches;
+        }
+
+        // Fallback (e.g. a pattern too long for Bitap): full search with dedup.
         let mut matches = self.search(haystack, similarity_threshold);
         matches.non_overlapping();
         matches

@@ -3892,6 +3892,25 @@ pub struct MultiPatternMatch {
     pub match_result: DamLevMatch,
 }
 
+/// A multi-pattern match candidate without the per-operation edit breakdown.
+///
+/// Produced by [`MultiBitapMatcher::find_all_candidates`]; the breakdown
+/// (insertions/deletions/substitutions/swaps) is computed later, only for the
+/// matches that are actually returned.
+#[derive(Debug, Clone, Copy)]
+pub struct MultiPatternCandidate {
+    /// Index of the pattern that matched.
+    pub pattern_index: usize,
+    /// Start byte offset (inclusive).
+    pub start: usize,
+    /// End byte offset (exclusive).
+    pub end: usize,
+    /// Total edit distance (Damerau) of the match.
+    pub total_edits: u8,
+    /// Similarity score (0.0..=1.0).
+    pub similarity: f32,
+}
+
 /// Multi-pattern Bitap matcher for searching multiple patterns in a single text pass.
 ///
 /// This is more efficient than running N separate Bitap searches because:
@@ -3927,11 +3946,15 @@ impl MultiBitapMatcher {
         })
     }
 
-    /// Find all matches for all patterns in a single text pass.
+    /// Find all match *candidates* for all patterns in a single text pass.
     ///
-    /// Returns matches with their pattern indices.
+    /// Returns `(pattern, start, end, total_edits, similarity)` per candidate
+    /// WITHOUT the per-operation breakdown. Computing the breakdown (the heavier
+    /// 5-tuple DP) is deferred to the caller, which for non-overlapping search
+    /// only needs it for the few matches that survive selection. `similarity`
+    /// here equals `calc_similarity` exactly (matched length == window length).
     #[must_use]
-    pub fn find_all(&self, text: &str, threshold: f32) -> Vec<MultiPatternMatch> {
+    pub fn find_all_candidates(&self, text: &str, threshold: f32) -> Vec<MultiPatternCandidate> {
         let text_chars: Vec<(usize, char)> = text.char_indices().collect();
 
         if text_chars.is_empty() || self.matchers.is_empty() {
@@ -3966,20 +3989,10 @@ impl MultiBitapMatcher {
             }
         }
 
-        // Use FxHashMap for deduplication
-        let mut matches: FxHashMap<(usize, usize, usize), MultiPatternMatch> = FxHashMap::default();
-
-        // Memoize the exact edit breakdown per (start, end, pattern). The
-        // breakdown is a deterministic function of the substring and the
-        // pattern, but the bitap flags the same (start, end) as a candidate at
-        // several edit levels `d` (and it stays a candidate for `d >= true
-        // edits`), so without memoization the expensive DP runs many times per
-        // window. This is the dominant cost for short text with a high edit
-        // budget.
-        // Keyed by (start_byte, end_byte, pattern) -> (ins, del, sub, swap).
-        type BreakdownKey = (usize, usize, usize);
-        type Breakdown = (u8, u8, u8, u8);
-        let mut breakdown_memo: FxHashMap<BreakdownKey, Breakdown> = FxHashMap::default();
+        // Deduplicate candidates by (start, end, pattern); first success wins
+        // (the total distance / similarity is deterministic per window).
+        let mut candidates: FxHashMap<(usize, usize, usize), MultiPatternCandidate> =
+            FxHashMap::default();
 
         // Process each character once
         for (char_idx, &(_, text_char)) in text_chars.iter().enumerate() {
@@ -4045,57 +4058,38 @@ impl MultiBitapMatcher {
 
                             // Already accepted at a lower edit level -> the
                             // (deterministic) result is identical, skip entirely.
-                            if matches.contains_key(&key) {
+                            if candidates.contains_key(&key) {
                                 continue;
                             }
 
-                            // Cheap distance gate: compute the total edit
-                            // distance with the light u8 DP and reject windows
-                            // that can't fit the edit level or reach the
-                            // threshold, without paying for the per-op breakdown.
-                            // sim == 1 - dist/max(m,L) is exactly
-                            // `calc_similarity` here (matched_len == L). The DP is
-                            // cheap enough that recomputing beats a memo hashmap.
-                            if let Some(dist) = matcher
-                                .compute_damerau_distance(&text.as_bytes()[start_byte..end_byte])
-                            {
-                                if dist as usize > d {
-                                    continue;
-                                }
-                                let sim = 1.0
-                                    - dist as f32 / matcher.pattern_len.max(win_len).max(1) as f32;
-                                if sim < threshold {
-                                    continue;
-                                }
-                            }
-
-                            let (insertions, deletions, substitutions, swaps) =
-                                *breakdown_memo.entry(key).or_insert_with(|| {
-                                    matcher.compute_exact_edit_breakdown(
-                                        &text.as_bytes()[start_byte..end_byte],
-                                    )
+                            // Total edit distance via the light distance-only DP
+                            // (no per-op breakdown). Falls back to the breakdown's
+                            // total for windows too large for the gate (rare).
+                            let window = &text.as_bytes()[start_byte..end_byte];
+                            let total_edits =
+                                matcher.compute_damerau_distance(window).unwrap_or_else(|| {
+                                    let (i, d2, s, sw) =
+                                        matcher.compute_exact_edit_breakdown(window);
+                                    i + d2 + s + sw
                                 });
-
-                            let total_edits = insertions + deletions + substitutions + swaps;
                             if total_edits as usize > d {
                                 continue;
                             }
-
-                            let sim = matcher.calc_similarity(total_edits, insertions, deletions);
+                            // sim == calc_similarity(total, ins, del): matched
+                            // length == window length, so it depends only on the
+                            // total distance and L.
+                            let sim = 1.0
+                                - total_edits as f32
+                                    / matcher.pattern_len.max(win_len).max(1) as f32;
                             if sim >= threshold {
-                                matches.insert(
+                                candidates.insert(
                                     key,
-                                    MultiPatternMatch {
+                                    MultiPatternCandidate {
                                         pattern_index: p_idx,
-                                        match_result: DamLevMatch {
-                                            start: start_byte,
-                                            end: end_byte,
-                                            insertions,
-                                            deletions,
-                                            substitutions,
-                                            swaps,
-                                            similarity: sim,
-                                        },
+                                        start: start_byte,
+                                        end: end_byte,
+                                        total_edits,
+                                        similarity: sim,
                                     },
                                 );
                             }
@@ -4105,7 +4099,44 @@ impl MultiBitapMatcher {
             }
         }
 
-        matches.into_values().collect()
+        candidates.into_values().collect()
+    }
+
+    /// Find all matches for all patterns, with the full per-operation breakdown.
+    ///
+    /// Thin wrapper over [`find_all_candidates`](Self::find_all_candidates) that
+    /// computes the exact edit breakdown for every candidate. Prefer
+    /// `find_all_candidates` + a post-selection breakdown when only a subset of
+    /// matches is ultimately returned (e.g. non-overlapping search).
+    #[must_use]
+    pub fn find_all(&self, text: &str, threshold: f32) -> Vec<MultiPatternMatch> {
+        self.find_all_candidates(text, threshold)
+            .into_iter()
+            .map(|c| {
+                let (insertions, deletions, substitutions, swaps) = self.matchers[c.pattern_index]
+                    .compute_exact_edit_breakdown(&text.as_bytes()[c.start..c.end]);
+                MultiPatternMatch {
+                    pattern_index: c.pattern_index,
+                    match_result: DamLevMatch {
+                        start: c.start,
+                        end: c.end,
+                        insertions,
+                        deletions,
+                        substitutions,
+                        swaps,
+                        similarity: c.similarity,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// Compute the exact edit breakdown for a candidate window of a given
+    /// pattern. Used to fill in the per-operation counts for the matches that
+    /// survive non-overlapping selection (see [`find_all_candidates`](Self::find_all_candidates)).
+    #[must_use]
+    pub fn breakdown(&self, pattern_index: usize, window: &[u8]) -> (u8, u8, u8, u8) {
+        self.matchers[pattern_index].compute_exact_edit_breakdown(window)
     }
 
     /// Get the number of patterns.
