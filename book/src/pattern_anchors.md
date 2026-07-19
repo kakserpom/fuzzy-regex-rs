@@ -30,6 +30,11 @@ fn main() {
 }
 ```
 
+> **Performance:** A fuzzy pattern ending in `$` (single-line mode) is
+> searched only in a small window near the end of the input rather than
+> scanned position by position, so its cost stays flat as the text grows.
+> See [Performance Tips](./perf_tips.md#5-end-anchor-fuzzy-patterns).
+
 ## Word Boundaries
 
 | Syntax | Description |

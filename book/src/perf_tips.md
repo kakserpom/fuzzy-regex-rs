@@ -65,6 +65,30 @@ fn main() {
 
 Patterns like `.*test` automatically use reverse search to find the suffix first, then match everything before it. This is O(n) instead of O(n²).
 
+### 5. End-Anchor Fuzzy Patterns
+
+```rust
+fn main() {
+    // Fast: the `$` anchor lets the engine search only near the end
+    let _ = fuzzy_regex::FuzzyRegex::new("(?:world){e<=1}$").unwrap();
+
+    // Unanchored: must scan the whole text for candidates
+    let _ = fuzzy_regex::FuzzyRegex::new("(?:world){e<=1}").unwrap();
+
+    println!("Done");
+}
+```
+
+When a fuzzy pattern ends in `$` (single-line, bounded length), both `find`
+and `find_iter` search only a small window near the end of the text instead
+of scanning every position. A match must finish at the end of the input, so
+only the last few bytes can start one.
+
+This makes the cost independent of input size: on a 200 KB input,
+`(?:here){e<=1}$` runs in a few microseconds regardless of length, while a
+naive full scan grows linearly with the text. The optimization does **not**
+apply in multi-line mode (`(?m)`), where `$` matches at every line break.
+
 ## Builder Options
 
 ### 1. Set Similarity Threshold

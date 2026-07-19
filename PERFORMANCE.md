@@ -86,6 +86,7 @@ fuzzy-regex is significantly faster than regex crate for:
 6. **NEON SIMD for ARM**: Vectorized character class and Teddy search on Apple Silicon
 7. **Two-pass algorithm**: Reverse prefilter + forward verification for all-matches
 8. **Hardened mode**: True O(n) for pathological patterns
+9. **End-anchor windowing**: Fuzzy patterns ending in `$` (single-line) search only a bounded window near the end of the text and shift results back, making `find`/`find_iter` cost independent of input size instead of a full O(n) scan
 
 ## Pathological Pattern Benchmark
 
