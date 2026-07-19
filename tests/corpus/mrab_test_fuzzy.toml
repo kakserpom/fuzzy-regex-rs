@@ -1,0 +1,1190 @@
+description = "Ported from mrab-regex tests/test_regex.py fuzzy assertions"
+
+# ---------------------------------------------------------------------------
+# Scattered fuzzy assertion in test_word_class (L654, L657): findall with
+# nested fuzzy inside a lookbehind plus \m / \M word boundaries.
+# ---------------------------------------------------------------------------
+[[test]]
+name = "L654 word e<=3 with fuzzy lookbehind (V0)"
+pattern = '(?iV0)\m(?:word){e<=3}\M(?<!\m(?:word){e<=1}\M)'
+ignore = true
+
+[[test]]
+name = "L657 word e<=3 with fuzzy lookbehind (V1) - fuzzy inside lookbehind + \\m/\\M unsupported"
+pattern = '(?iV1)\m(?:word){e<=3}\M(?<!\m(?:word){e<=1}\M)'
+ignore = true
+
+# ---------------------------------------------------------------------------
+# def test_fuzzy (L2612-2803)
+# ---------------------------------------------------------------------------
+
+# Compile-only cases (repr(type(compile(...))) == PATTERN_CLASS)
+[[test]]
+name = "L2614 compile (fou){s,e<=1}"
+pattern = "(?:fou){s,e<=1}"
+
+[[test]]
+name = "L2616 compile (fuu){s}"
+pattern = "(?:fuu){s}"
+
+[[test]]
+name = "L2618 compile (fuu){s,e}"
+pattern = "(?:fuu){s,e}"
+
+[[test]]
+name = "L2620 compile (anaconda){1i+1d<1,s<=1}"
+pattern = "(?:anaconda){1i+1d<1,s<=1}"
+
+[[test]]
+name = "L2622 compile (anaconda){1i+1d<1,s<=1,e<=10}"
+pattern = "(?:anaconda){1i+1d<1,s<=1,e<=10}"
+
+[[test]]
+name = "L2624 compile (anaconda){s<=1,e<=1,1i+1d<1}"
+pattern = "(?:anaconda){s<=1,e<=1,1i+1d<1}"
+
+# text = 'molasses anaconda foo bar baz smith anderson '
+[[test]]
+name = "L2628 znacnda s<=1,e<=3,1i+1d<1 no match"
+pattern = "(?:znacnda){s<=1,e<=3,1i+1d<1}"
+input = "molasses anaconda foo bar baz smith anderson "
+is_match = false
+
+[[test]]
+name = "L2630 znacnda s<=1,e<=3,1i+1d<2"
+pattern = "(?:znacnda){s<=1,e<=3,1i+1d<2}"
+input = "molasses anaconda foo bar baz smith anderson "
+span = [9, 17]
+
+[[test]]
+name = "L2632 ananda 1i+1d<2 no match"
+pattern = "(?:ananda){1i+1d<2}"
+input = "molasses anaconda foo bar baz smith anderson "
+is_match = false
+
+[[test]]
+name = "L2633 \\bznacnda e<=2 -> anaconda"
+pattern = '(?:\bznacnda){e<=2}'
+input = "molasses anaconda foo bar baz smith anderson "
+is_match = true
+span = [9, 17]
+
+[[test]]
+name = "L2635 \\bnacnda e<=2 -> anaconda"
+pattern = '(?:\bnacnda){e<=2}'
+input = "molasses anaconda foo bar baz smith anderson "
+is_match = true
+span = [9, 17]
+
+# text = 'anaconda foo bar baz smith anderson'
+[[test]]
+name = "[DIVERGENCE: minimal-vs-default-alignment] L2639 fuu i<=3,d<=3,e<=5"
+ignore = true
+pattern = "(?:fuu){i<=3,d<=3,e<=5}"
+input = "anaconda foo bar baz smith anderson"
+span = [0, 0]
+
+[[test]]
+name = "L2641 (?b) fuu i<=3,d<=3,e<=5"
+pattern = "(?b)(?:fuu){i<=3,d<=3,e<=5}"
+input = "anaconda foo bar baz smith anderson"
+span = [9, 10]
+
+[[test]]
+name = "L2643 fuu i<=2,d<=2,e<=5"
+pattern = "(?:fuu){i<=2,d<=2,e<=5}"
+input = "anaconda foo bar baz smith anderson"
+span = [7, 10]
+
+[[test]]
+name = "[GAP: (?e) enhancematch not globally minimizing] L2645 (?e) fuu i<=2,d<=2,e<=5"
+ignore = true
+pattern = "(?e)(?:fuu){i<=2,d<=2,e<=5}"
+input = "anaconda foo bar baz smith anderson"
+span = [9, 10]
+
+[[test]]
+name = "[DIVERGENCE: minimal-vs-default-alignment] L2647 fuu i<=3,d<=3,e"
+ignore = true
+pattern = "(?:fuu){i<=3,d<=3,e}"
+input = "anaconda foo bar baz smith anderson"
+span = [0, 0]
+
+[[test]]
+name = "L2649 (?b) fuu i<=3,d<=3,e"
+pattern = "(?b)(?:fuu){i<=3,d<=3,e}"
+input = "anaconda foo bar baz smith anderson"
+span = [9, 10]
+
+[[test]]
+name = "L2652 compile (approximate){s<=3,1i+1d<3}"
+pattern = "(?:approximate){s<=3,1i+1d<3}"
+
+# No cost limit
+[[test]]
+name = "[DIVERGENCE: minimal-vs-default-alignment] L2656 foobar e"
+ignore = true
+pattern = "(?:foobar){e}"
+input = "xirefoabralfobarxie"
+span = [0, 6]
+
+[[test]]
+name = "[GAP: (?e) enhancematch not globally minimizing] L2658 (?e) foobar e"
+ignore = true
+pattern = "(?e)(?:foobar){e}"
+input = "xirefoabralfobarxie"
+span = [0, 3]
+
+[[test]]
+name = "L2660 (?b) foobar e"
+pattern = "(?b)(?:foobar){e}"
+input = "xirefoabralfobarxie"
+span = [11, 16]
+
+# At most two errors
+[[test]]
+name = "L2664 foobar e<=2"
+pattern = "(?:foobar){e<=2}"
+input = "xirefoabrzlfd"
+span = [4, 9]
+
+[[test]]
+name = "L2666 foobar e<=2 no match"
+pattern = "(?:foobar){e<=2}"
+input = "xirefoabzlfd"
+is_match = false
+
+[[test]]
+name = "L2669 foobar i<=2,s<=2,e<=2"
+pattern = "(?:foobar){i<=2,s<=2,e<=2}"
+input = "oobargoobaploowap"
+span = [5, 11]
+
+# Best whole word match
+[[test]]
+name = "L2673 \\b foobar e \\b zfoobarz"
+pattern = '\b(?:foobar){e}\b'
+input = "zfoobarz"
+span = [0, 8]
+
+[[test]]
+name = "[DIVERGENCE: minimal-vs-default-alignment] L2675 \\b foobar e \\b sentence"
+ignore = true
+pattern = '\b(?:foobar){e}\b'
+input = "boing zfoobarz goobar woop"
+span = [0, 6]
+
+[[test]]
+name = "L2677 (?b) \\b foobar e \\b sentence"
+pattern = '(?b)\b(?:foobar){e}\b'
+input = "boing zfoobarz goobar woop"
+span = [15, 21]
+
+# Match whole string, allow only 1 error (search with ^...$)
+[[test]]
+name = "L2681 ^foobar e<=1$ foobar"
+pattern = "^(?:foobar){e<=1}$"
+input = "foobar"
+span = [0, 6]
+
+[[test]]
+name = "L2683 ^foobar e<=1$ xfoobar"
+pattern = "^(?:foobar){e<=1}$"
+input = "xfoobar"
+span = [0, 7]
+
+[[test]]
+name = "L2685 ^foobar e<=1$ foobarx"
+pattern = "^(?:foobar){e<=1}$"
+input = "foobarx"
+span = [0, 7]
+
+[[test]]
+name = "L2687 ^foobar e<=1$ fooxbar"
+pattern = "^(?:foobar){e<=1}$"
+input = "fooxbar"
+span = [0, 7]
+
+[[test]]
+name = "L2689 ^foobar e<=1$ foxbar"
+pattern = "^(?:foobar){e<=1}$"
+input = "foxbar"
+span = [0, 6]
+
+[[test]]
+name = "L2691 ^foobar e<=1$ xoobar"
+pattern = "^(?:foobar){e<=1}$"
+input = "xoobar"
+span = [0, 6]
+
+[[test]]
+name = "L2693 ^foobar e<=1$ foobax"
+pattern = "^(?:foobar){e<=1}$"
+input = "foobax"
+span = [0, 6]
+
+[[test]]
+name = "L2695 ^foobar e<=1$ oobar"
+pattern = "^(?:foobar){e<=1}$"
+input = "oobar"
+span = [0, 5]
+
+[[test]]
+name = "L2697 ^foobar e<=1$ fobar"
+pattern = "^(?:foobar){e<=1}$"
+input = "fobar"
+span = [0, 5]
+
+[[test]]
+name = "L2699 ^foobar e<=1$ fooba"
+pattern = "^(?:foobar){e<=1}$"
+input = "fooba"
+span = [0, 5]
+
+[[test]]
+name = "L2701 ^foobar e<=1$ xfoobarx no match"
+pattern = "^(?:foobar){e<=1}$"
+input = "xfoobarx"
+is_match = false
+
+[[test]]
+name = "L2702 ^foobar e<=1$ foobarxx no match"
+pattern = "^(?:foobar){e<=1}$"
+input = "foobarxx"
+is_match = false
+
+[[test]]
+name = "L2703 ^foobar e<=1$ xxfoobar no match"
+pattern = "^(?:foobar){e<=1}$"
+input = "xxfoobar"
+is_match = false
+
+[[test]]
+name = "L2704 ^foobar e<=1$ xfoxbar no match"
+pattern = "^(?:foobar){e<=1}$"
+input = "xfoxbar"
+is_match = false
+
+[[test]]
+name = "L2705 ^foobar e<=1$ foxbarx no match"
+pattern = "^(?:foobar){e<=1}$"
+input = "foxbarx"
+is_match = false
+
+# Weighted cost constraint
+[[test]]
+name = "[DIVERGENCE: minimal-vs-default-alignment] L2710 foobar i<=1,d<=2,s<=3,2d+1s<4"
+ignore = true
+pattern = "(?:foobar){i<=1,d<=2,s<=3,2d+1s<4}"
+input = "3oifaowefbaoraofuiebofasebfaobfaorfeoaro"
+span = [6, 13]
+
+[[test]]
+name = "L2713 (?b) foobar i<=1,d<=2,s<=3,2d+1s<4"
+pattern = "(?b)(?:foobar){i<=1,d<=2,s<=3,2d+1s<4}"
+input = "3oifaowefbaoraofuiebofasebfaobfaorfeoaro"
+span = [34, 39]
+
+# Partially fuzzy matches (span is group-0 span)
+[[test]]
+name = "L2718 foo(bar)e<=1 zap foobarzap"
+pattern = "foo(?:bar){e<=1}zap"
+input = "foobarzap"
+span = [0, 9]
+
+[[test]]
+name = "L2720 foo(bar)e<=1 zap fobarzap no match"
+pattern = "foo(?:bar){e<=1}zap"
+input = "fobarzap"
+is_match = false
+
+[[test]]
+name = "L2721 foo(bar)e<=1 zap foobrzap"
+pattern = "foo(?:bar){e<=1}zap"
+input = "foobrzap"
+span = [0, 8]
+
+# dot.org tests (multiline text); group-0 span used
+[[test]]
+name = "L2726 (?s) ^.*(dot.org)e.*$"
+pattern = "(?s)^.*(?:dot.org){e}.*$"
+input = "www.cnn.com 64.236.16.20\nwww.slashdot.org 66.35.250.150\nFor useful information, use www.slashdot.org\nthis is demo data!\n"
+span = [0, 120]
+
+[[test]]
+name = "[GAP: combined inline flags / fullcase not parsed] L2728 (?es) ^.*(dot.org)e.*$"
+ignore = true
+pattern = "(?es)^.*(?:dot.org){e}.*$"
+input = "www.cnn.com 64.236.16.20\nwww.slashdot.org 66.35.250.150\nFor useful information, use www.slashdot.org\nthis is demo data!\n"
+span = [0, 120]
+
+[[test]]
+name = "[DIVERGENCE: dot/anchor semantics or BESTMATCH start] L2730 ^.*(dot.org)e.*$ (no dotall)"
+ignore = true
+pattern = "^.*(?:dot.org){e}.*$"
+input = "www.cnn.com 64.236.16.20\nwww.slashdot.org 66.35.250.150\nFor useful information, use www.slashdot.org\nthis is demo data!\n"
+span = [0, 119]
+
+# \L<words> named word lists (unsupported)
+[[test]]
+name = "L2735 \\L<words> e<=1 - named word list unsupported"
+pattern = '\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2737 \\L<words> e<=1 (2) - named word list unsupported"
+pattern = '\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2739 (?e) \\L<words> e<=1 - named word list unsupported"
+pattern = '(?e)\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2741 (?r) \\L<words> e<=1 - named word list + reverse unsupported"
+pattern = '(?r)\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2743 (?er) \\L<words> e<=1 - named word list + reverse unsupported"
+pattern = '(?er)\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2745 (?r) \\L<words> e<=1 (2) - named word list + reverse unsupported"
+pattern = '(?r)\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2747 br \\L<words> e<=1 - byte pattern + named word list unsupported"
+pattern = '\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2749 br \\L<words> e<=1 (2) - byte pattern + named word list unsupported"
+pattern = '\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2751 br (?e) \\L<words> e<=1 - byte pattern + named word list unsupported"
+pattern = '(?e)\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2753 br (?r) \\L<words> e<=1 - byte pattern + word list + reverse unsupported"
+pattern = '(?r)\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2755 br (?er) \\L<words> e<=1 - byte pattern + word list + reverse unsupported"
+pattern = '(?er)\b\L<words>{e<=1}\b'
+ignore = true
+
+[[test]]
+name = "L2757 br (?r) \\L<words> e<=1 (2) - byte pattern + word list + reverse unsupported"
+pattern = '(?r)\b\L<words>{e<=1}\b'
+ignore = true
+
+# Backreference inside fuzzy (unsupported)
+[[test]]
+name = "L2760 (\\w+) (\\1 e<=1) - backreference inside fuzzy unsupported"
+pattern = '(\w+) (\1{e<=1})'
+ignore = true
+
+[[test]]
+name = "L2762 (?r) (\\2 e<=1) (\\w+) - backreference + reverse unsupported"
+pattern = '(?r)(\2{e<=1}) (\w+)'
+ignore = true
+
+[[test]]
+name = "L2764 br (\\w+) (\\1 e<=1) - byte pattern + backreference unsupported"
+pattern = '(\w+) (\1{e<=1})'
+ignore = true
+
+# Fuzzy over repeated groups (findall; first match)
+[[test]]
+name = "L2767 (?:(?:QR)+)e abcde -> first match abcde"
+pattern = "(?:(?:QR)+){e}"
+input = "abcde"
+is_match = true
+span = [0, 5]
+
+[[test]]
+name = "L2769 (?:Q+)e abc -> first match abc"
+pattern = "(?:Q+){e}"
+input = "abc"
+is_match = true
+span = [0, 3]
+
+# Hg issue 41: = for fuzzy matches; match -> ^ anchored
+[[test]]
+name = "L2772 issue41 service detection 0<e<5 servic detection"
+pattern = "^(?:service detection){0<e<5}"
+input = "servic detection"
+span = [0, 16]
+
+[[test]]
+name = "L2774 issue41 service detect"
+pattern = "^(?:service detection){0<e<5}"
+input = "service detect"
+span = [0, 14]
+
+[[test]]
+name = "L2776 issue41 service detecti"
+pattern = "^(?:service detection){0<e<5}"
+input = "service detecti"
+span = [0, 15]
+
+[[test]]
+name = "L2778 issue41 service detection no match (0 errors excluded)"
+pattern = "^(?:service detection){0<e<5}"
+input = "service detection"
+is_match = false
+
+[[test]]
+name = "L2780 issue41 in service detection"
+pattern = "^(?:service detection){0<e<5}"
+input = "in service detection"
+span = [0, 20]
+
+# Hg issue 109: edit distance / fuzzy_counts; fullmatch -> ^...$
+[[test]]
+name = "L2784 issue109 (cats|cat) e<=1 cat"
+pattern = "^(?:cats|cat){e<=1}$"
+input = "cat"
+fuzzy_counts = [0, 0, 1]
+
+[[test]]
+name = "L2786 issue109 (?e)(cats|cat) e<=1 cat"
+pattern = "(?e)^(?:cats|cat){e<=1}$"
+input = "cat"
+fuzzy_counts = [0, 0, 0]
+
+[[test]]
+name = "L2789 issue109 (cat|cats) e<=1 cats"
+pattern = "^(?:cat|cats){e<=1}$"
+input = "cats"
+fuzzy_counts = [0, 1, 0]
+
+[[test]]
+name = "L2791 issue109 (?e)(cat|cats) e<=1 cats"
+pattern = "(?e)^(?:cat|cats){e<=1}$"
+input = "cats"
+fuzzy_counts = [0, 0, 0]
+
+[[test]]
+name = "L2794 issue109 cat e<=1 cat e<=1"
+pattern = "^(?:cat){e<=1} (?:cat){e<=1}$"
+input = "cat cot"
+fuzzy_counts = [1, 0, 0]
+
+# Incorrect fuzzy changes (fuzzy_changes unsupported)
+[[test]]
+name = "L2798 issue fuzzy_changes GTTTTCATTCCTCATA - fuzzy_changes unsupported"
+pattern = "(?e)(GTTTTCATTCCTCATA){i<=4,d<=4,s<=4,i+d+s<=8}"
+ignore = true
+
+# Fuzzy constraints ignored when checking for prefix/suffix in branches
+[[test]]
+name = "L2802 (?:fo)e<=1|(?:fo)e<=2 FO match true"
+pattern = "^(?:fo){e<=1}|(?:fo){e<=2}"
+input = "FO"
+is_match = true
+
+# ---------------------------------------------------------------------------
+# Scattered fuzzy assertions in test_hg_bugs / test_git_bugs
+# ---------------------------------------------------------------------------
+
+# Hg issue 82: error range
+[[test]]
+name = "[DIVERGENCE: dot/anchor semantics or BESTMATCH start] L3287 issue82 (?b) CAGCC...{1<e<=2} BESTMATCH"
+ignore = true
+pattern = "(?b)(?:CAGCCTCCCATTTCAGAATATACATCC){1<e<=2}"
+input = "tcagacgagtgcgttgtaaaacgacggccagtCAGCCTCCCATTCAGAATATACATCCcgacggccagttaaaaacaatgccaaggaggtcatagctgtttcctgccagttaaaaacaatgccaaggaggtcatagctgtttcctgacgcactcgtctgagcgggctggcaagg"
+is_match = true
+span = [31, 58]
+
+# Hg issue 94: crash in findall
+[[test]]
+name = "L3315 issue94 \\bt(est)i<2 no match"
+pattern = '\bt(?:est){i<2}'
+input = "Some text"
+is_match = false
+
+# Hg issue 147: fuzzy match beyond buffer end (finditer; first match)
+[[test]]
+name = "[DIVERGENCE: minimal-vs-default-alignment] L3576 issue147 (?i)(?:error)e first match"
+ignore = true
+pattern = "(?i)(?:error){e}"
+input = "regex failure"
+is_match = true
+span = [0, 5]
+
+[[test]]
+name = "[GAP: combined inline flags / fullcase not parsed] L3578 issue147 (?fi)(?:error)e first match"
+ignore = true
+pattern = "(?fi)(?:error){e}"
+input = "regex failure"
+is_match = true
+span = [0, 5]
+
+# Hg issue 161: BESTMATCH -> (?b)
+[[test]]
+name = "L3731 issue161 abcdefgh e BESTMATCH"
+pattern = "(?b)(?:abcdefgh){e}"
+input = "******abcdefghijklmnopqrtuvwxyz"
+span = [6, 14]
+
+[[test]]
+name = "L3733 issue161 abcdefghi e BESTMATCH"
+pattern = "(?b)(?:abcdefghi){e}"
+input = "******abcdefghijklmnopqrtuvwxyz"
+span = [6, 15]
+
+# Hg issue 196: fuzzy on repeated regex; match + BESTMATCH -> (?b)^
+[[test]]
+name = "L3780 issue196 (x{6})e<=1 xxxxxx BESTMATCH"
+pattern = "(?b)^(?:x{6}){e<=1}"
+input = "xxxxxx"
+span = [0, 6]
+
+[[test]]
+name = "L3782 issue196 (x{6})e<=1 xxxxx BESTMATCH"
+pattern = "(?b)^(?:x{6}){e<=1}"
+input = "xxxxx"
+span = [0, 5]
+
+[[test]]
+name = "L3784 issue196 (x{6})e<=1 x BESTMATCH no match"
+pattern = "(?b)^(?:x{6}){e<=1}"
+input = "x"
+is_match = false
+
+[[test]]
+name = "L3786 issue196 (?r)(x{6})e<=1 xxxxxx - reverse unsupported"
+pattern = "(?r)(x{6}){e<=1}"
+ignore = true
+
+[[test]]
+name = "L3788 issue196 (?r)(x{6})e<=1 xxxxx - reverse unsupported"
+pattern = "(?r)(x{6}){e<=1}"
+ignore = true
+
+[[test]]
+name = "L3790 issue196 (?r)(x{6})e<=1 x - reverse unsupported"
+pattern = "(?r)(x{6}){e<=1}"
+ignore = true
+
+# Hg issue 198: malformed fuzzy fails to compile (mrab uses byte pattern)
+[[test]]
+name = "L3798 issue198 malformed {e<l must fail"
+pattern = "{e<l"
+expect_error = true
+
+# Hg issue 199/200: compile-only recursion inside fuzzy (unsupported)
+[[test]]
+name = "L3801 issue199 ((?0))e - recursion (?0) unsupported"
+pattern = "((?0)){e}"
+ignore = true
+
+[[test]]
+name = "L3804 issue200 \\x00?(?0)e - recursion (?0) unsupported"
+pattern = '\x00?(?0){e}'
+ignore = true
+
+# Hg issue 201: ENHANCEMATCH findall (first match; groups converted)
+[[test]]
+name = "[GAP: (?e) enhancematch not globally minimizing] L3807 issue201 (?e) (brown|lazy){1<=e<=3} (dog|fox){1<=e<=3} first match"
+ignore = true
+pattern = "(?e)(?:(?:brown)|(?:lazy)){1<=e<=3} (?:(?:dog)|(?:fox)){1<=e<=3}"
+input = "The quick borwn fax jumped over the lzy hog"
+is_match = true
+span = [10, 19]
+
+# Hg issue 210: fuzzy matching + backreference (unsupported)
+[[test]]
+name = "L3853 issue210 (2)(?:\\1{5})e<=1 - backreference inside fuzzy unsupported"
+pattern = '(2)(?:\1{5}){e<=1}'
+ignore = true
+
+[[test]]
+name = "L3855 issue210 (\\d)(?:\\1{5})e<=1 - backreference inside fuzzy unsupported"
+pattern = '(\d)(?:\1{5}){e<=1}'
+ignore = true
+
+# Hg issue 225: BESTMATCH in fuzzy match
+[[test]]
+name = "L3893 issue225 (^1234$){i,d} BESTMATCH"
+pattern = "(?b)(?:^1234$){i,d}"
+input = "12234"
+span = [0, 5]
+fuzzy_counts = [0, 1, 0]
+
+[[test]]
+name = "L3898 issue225 (^1234$){s,i,d} BESTMATCH"
+pattern = "(?b)(?:^1234$){s,i,d}"
+input = "12234"
+span = [0, 5]
+fuzzy_counts = [0, 1, 0]
+
+# Hg issue 226: error matching at start of string
+[[test]]
+name = "L3904 issue226 (^123$){s,i,d} BESTMATCH"
+pattern = "(?b)(?:^123$){s,i,d}"
+input = "xxxxxxxx123"
+span = [0, 11]
+fuzzy_counts = [0, 8, 0]
+
+# Hg issue 247: fuzzy + lookaround; group() substring
+[[test]]
+name = "[GAP: fuzzy over subpattern with lookaround] L3934 issue247 ESTONIA(?!\\w) e<=1 -> ESTONIAN"
+ignore = true
+pattern = '(?:ESTONIA(?!\w)){e<=1}'
+input = "ESTONIAN WORKERS"
+is_match = true
+span = [0, 8]
+
+[[test]]
+name = "[GAP: fuzzy over subpattern with lookaround] L3936 issue247 ESTONIA(?=\\W) e<=1 -> ESTONIAN"
+ignore = true
+pattern = '(?:ESTONIA(?=\W)){e<=1}'
+input = "ESTONIAN WORKERS"
+is_match = true
+span = [0, 8]
+
+[[test]]
+name = "L3939 issue247 (?<!\\w)ESTONIA e<=1 -> NESTONIA"
+pattern = '(?:(?<!\w)ESTONIA){e<=1}'
+input = "BLUB NESTONIA"
+is_match = true
+span = [5, 13]
+
+[[test]]
+name = "L3941 issue247 (?<=\\W)ESTONIA e<=1 -> NESTONIA"
+pattern = '(?:(?<=\W)ESTONIA){e<=1}'
+input = "BLUB NESTONIA"
+is_match = true
+span = [5, 13]
+
+[[test]]
+name = "L3944 issue247 (?r) ESTONIA(?!\\w) e<=1 - reverse unsupported"
+pattern = '(?r)(?:ESTONIA(?!\w)){e<=1}'
+ignore = true
+
+[[test]]
+name = "L3946 issue247 (?r) ESTONIA(?=\\W) e<=1 - reverse unsupported"
+pattern = '(?r)(?:ESTONIA(?=\W)){e<=1}'
+ignore = true
+
+[[test]]
+name = "L3949 issue247 (?r) (?<!\\w)ESTONIA e<=1 - reverse unsupported"
+pattern = '(?r)(?:(?<!\w)ESTONIA){e<=1}'
+ignore = true
+
+[[test]]
+name = "L3951 issue247 (?r) (?<=\\W)ESTONIA e<=1 - reverse unsupported"
+pattern = '(?r)(?:(?<=\W)ESTONIA){e<=1}'
+ignore = true
+
+# Hg issue 248: fuzzy + multiple non-greedy quantifiers; group() = whole
+[[test]]
+name = "[GAP: fuzzy over subpattern with wildcard/quantifier] L3956 issue248 A.*B.*CDE e<=2"
+ignore = true
+pattern = "(?:A.*B.*CDE){e<=2}"
+input = "A B CYZ"
+is_match = true
+span = [0, 7]
+
+[[test]]
+name = "[GAP: fuzzy over subpattern with wildcard/quantifier] L3958 issue248 A.*B.*?CDE e<=2"
+ignore = true
+pattern = "(?:A.*B.*?CDE){e<=2}"
+input = "A B CYZ"
+is_match = true
+span = [0, 7]
+
+[[test]]
+name = "[GAP: fuzzy over subpattern with wildcard/quantifier] L3960 issue248 A.*?B.*CDE e<=2"
+ignore = true
+pattern = "(?:A.*?B.*CDE){e<=2}"
+input = "A B CYZ"
+is_match = true
+span = [0, 7]
+
+[[test]]
+name = "[GAP: fuzzy over subpattern with wildcard/quantifier] L3962 issue248 A.*?B.*?CDE e<=2"
+ignore = true
+pattern = "(?:A.*?B.*?CDE){e<=2}"
+input = "A B CYZ"
+is_match = true
+span = [0, 7]
+
+# Hg issue 300: fuzzy_counts on large multi-region pattern (BESTMATCH)
+[[test]]
+name = "L4150 issue300 termini/gene/spacer/barcode BESTMATCH fuzzy_counts"
+pattern = "(?b)(?:GGCGTCACACTTTGCTATGCCATAGCAT[AG]TTTATCCATAAGATTAGCGGATCCTACCTGACGCTTTTTATCGCAACTCTCTACTGTTTCTCCATAACAGAACATATTGACTATCCGGTATTACCCGGCATGACAGGAGTAAAA){e<=1}(?:[ACGT]{1059}){e<=2}(?:TAATCGTCTTGTTTGATACACAAGGGTCGCATCTGCGGCCCTTTTGCTTTTTTAAGTTGTAAGGATATGCCATTCTAGA){e<=0}(?:[ACGT]{18}){e<=0}(?:AGATCGG[CT]AGAGCGTCGTGTAGGGAAAGAGTGTGG){e<=1}"
+input = "GCACGGCGTCACACTTTGCTATGCCATAGCATATTTATCCATAAGATTAGCGGATCCTACCTGACGCTTTTTATCGCAACTCTCTACTGTTTCTCCATAACAGAACATATTGACTATCCGGTATTACCCGGCATGACAGGAGTAAAAATGGCTATCGACGAAAACAAACAGAAAGCGTTGGCGGCAGCACTGGGCCAGATTGAGAAACAATTTGGTAAAGGCTCCATCATGCGCCTGGGTGAAGACCGTTCCATGGATGTGGAAACCATCTCTACCGGTTCGCTTTCACTGGATATCGCGCTTGGGGCAGGTGGTCTGCCGATGGGCCGTATCGTCGAAATCTACGGACCGGAATCTTCCGGTAAAACCACGCTGACGCTGCAGGTGATCGCCGCAGCGCAGCGTGAAGGTAAAACCTGTGCGTTTATCGATGCTGAACACGCGCTGGACCCAATCTACGCACGTAAACTGGGCGTCGATATCGACAACCTGCTGTGCTCCCAGCCGGACACCGGCGAGCAGGCACTGGAAATCTGTGACGCCCTGGCGCGTTCTGGCGCAGTAGACGTTATCGTCGTTGACTCCGTGGCGGCACTGACGCCGAAAGCGGAAATCGAAGGCGAAATCGGCGACTCTCATATGGGCCTTGCGGCACGTATGATGAGCCAGGCGATGCGTAAGCTGGCGGGTAACCTGAAGCAGTCCAACACGCTGCTGATCTTCATCAACCCCATCCGTATGAAAATTGGTGTGATGTTCGGCAACCCGGAAACCACTTACCGGTGGTAACGCGCTGAAATTCTACGCCTCTGTTCGTCTCGACATCCGTTAAATCGGCGCGGTGAAAGAGGGCGAAAACGTGGTGGGTAGCGAAACCCGCGTGAAAGTGGTGAAGAACAAAATCGCTGCGCCGTTTAAACAGGCTGAATTCCAGATCCTCTACGGCGAAGGTATCAACTTCTACCCCGAACTGGTTGACCTGGGCGTAAAAGAGAAGCTGATCGAGAAAGCAGGCGCGTGGTACAGCTACAAAGGTGAGAAGATCGGTCAGGGTAAAGCGAATGCGACTGCCTGGCTGAAATTTAACCCGGAAACCGCGAAAGAGATCGAGTGAAAAGTACGTGAGTTGCTGCTGAGCAACCCGAACTCAACGCCGGATTTCTCTGTAGATGATAGCGAAGGCGTAGCAGAAACTAACGAAGATTTTTAATCGTCTTGTTTGATACACAAGGGTCGCATCTGCGGCCCTTTTGCTTTTTTAAGTTGTAAGGATATGCCATTCTAGACAGTTAACACACCAACAAAGATCGGTAGAGCGTCGTGTAGGGAAAGAGTGTGGTACC"
+fuzzy_counts = [0, 1, 0]
+
+[[test]]
+name = "L4151 issue300 fuzzy_changes - unsupported"
+pattern = "(?b)(?:GGCGTCACACTTTGCTATGCCATAGCAT[AG]TTTATCCATAAGATTAGCGGATCCTACCTGACGCTTTTTATCGCAACTCTCTACTGTTTCTCCATAACAGAACATATTGACTATCCGGTATTACCCGGCATGACAGGAGTAAAA){e<=1}(?:[ACGT]{1059}){e<=2}(?:TAATCGTCTTGTTTGATACACAAGGGTCGCATCTGCGGCCCTTTTGCTTTTTTAAGTTGTAAGGATATGCCATTCTAGA){e<=0}(?:[ACGT]{18}){e<=0}(?:AGATCGG[CT]AGAGCGTCGTGTAGGGAAAGAGTGTGG){e<=1}"
+ignore = true
+
+# Hg issue 306: fuzzy scope on nested quantified groups
+[[test]]
+name = "L4154 issue306 (?e) dogf(oo|00 e<1)d e<2 dogfood"
+pattern = "(?e)(?:dogf(?:(?:(?:oo){e<1})|(?:(?:00){e<1}))d){e<2}"
+input = "dogfood"
+fuzzy_counts = [0, 0, 0]
+
+[[test]]
+name = "L4156 issue306 (?e) dogf(oo|00 e<1)d e<2 dogfoot"
+pattern = "(?e)(?:dogf(?:(?:(?:oo){e<1})|(?:(?:00){e<1}))d){e<2}"
+input = "dogfoot"
+fuzzy_counts = [1, 0, 0]
+
+# Hg issue 338: allowed characters when fuzzy matching (match -> ^)
+[[test]]
+name = "L4177 issue338 cat e<=1:[u] cut"
+pattern = "^(?:cat){e<=1:[u]}"
+input = "cut"
+is_match = true
+
+[[test]]
+name = "L4178 issue338 cat e<=1:u cut"
+pattern = "^(?:cat){e<=1:u}"
+input = "cut"
+is_match = true
+
+# Hg issue 353: fuzzy changes negative indexes (fuzzy_changes unsupported)
+[[test]]
+name = "L4181 issue353 (?be) AGTGT...{s<=5,i<=5,d<=5,s+i+d<=10} - fuzzy_changes unsupported"
+pattern = "(?be)(AGTGTTCCCCGCGCCAGCGGGGATAAACCG){s<=5,i<=5,d<=5,s+i+d<=10}"
+ignore = true
+
+# Git issue 364: fuzzy_counts vs fuzzy_changes (match -> ^)
+[[test]]
+name = "[DIVERGENCE: minimal-vs-default-alignment] L4185 issue364 (?:bc)e c fuzzy_counts"
+ignore = true
+pattern = "^(?:bc){e}"
+input = "c"
+fuzzy_counts = [1, 0, 1]
+
+[[test]]
+name = "L4187 issue364 (?:bc)e c fuzzy_changes - unsupported"
+pattern = "^(?:bc){e}"
+ignore = true
+
+[[test]]
+name = "L4189 issue364 (?e)(?:bc)e c fuzzy_counts"
+pattern = "(?e)^(?:bc){e}"
+input = "c"
+fuzzy_counts = [0, 0, 1]
+
+[[test]]
+name = "L4191 issue364 (?e)(?:bc)e c fuzzy_changes - unsupported"
+pattern = "(?e)^(?:bc){e}"
+ignore = true
+
+[[test]]
+name = "L4193 issue364 (?b)(?:bc)e c fuzzy_counts"
+pattern = "(?b)^(?:bc){e}"
+input = "c"
+fuzzy_counts = [0, 0, 1]
+
+[[test]]
+name = "L4195 issue364 (?b)(?:bc)e c fuzzy_changes - unsupported"
+pattern = "(?b)^(?:bc){e}"
+ignore = true
+
+# Git issue 370: fuzzy matching behavior (match -> ^; inner ^...$ kept)
+[[test]]
+name = "[GAP: (?e) enhancematch not globally minimizing] L4199 issue370 (?e) money e fuzzy_counts"
+ignore = true
+pattern = '(?e)^(?:^(?:\$ )?\d{1,3}(?:,\d{3})*(?:\.\d{2})$){e}'
+input = "$ 10,112.111.12"
+fuzzy_counts = [6, 0, 5]
+
+[[test]]
+name = "L4201 issue370 (?e) money s<=1 fuzzy_counts"
+pattern = '(?e)^(?:^(?:\$ )?\d{1,3}(?:,\d{3})*(?:\.\d{2})$){s<=1}'
+input = "$ 10,112.111.12"
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "[GAP: complex anchored pattern no-match] L4203 issue370 (?e) money s<=1,i<=1,d<=1 fuzzy_counts"
+ignore = true
+pattern = '(?e)^(?:^(?:\$ )?\d{1,3}(?:,\d{3})*(?:\.\d{2})$){s<=1,i<=1,d<=1}'
+input = "$ 10,112.111.12"
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "L4205 issue370 (?e) money s<=3 fuzzy_counts"
+pattern = '(?e)^(?:^(?:\$ )?\d{1,3}(?:,\d{3})*(?:\.\d{2})$){s<=3}'
+input = "$ 10,1a2.111.12"
+fuzzy_counts = [2, 0, 0]
+
+[[test]]
+name = "L4207 issue370 (?e) money s<=2 fuzzy_counts"
+pattern = '(?e)^(?:^(?:\$ )?\d{1,3}(?:,\d{3})*(?:\.\d{2})$){s<=2}'
+input = "$ 10,1a2.111.12"
+fuzzy_counts = [2, 0, 0]
+
+[[test]]
+name = "L4210 issue370 (?e) 0?,0(,0)? s<=1,d<=1 fullmatch"
+pattern = "(?e)^(?:0?,0(?:,0)?){s<=1,d<=1}$"
+input = ",0;0"
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "L4212 issue370 (?e) 0??,0(,0)? s<=1,d<=1 fullmatch"
+pattern = "(?e)^(?:0??,0(?:,0)?){s<=1,d<=1}$"
+input = ",0;0"
+fuzzy_counts = [1, 0, 0]
+
+# Git issue 371: character set restriction on insertions
+[[test]]
+name = "[GAP: fuzzy char-restriction insertion semantics] L4216 issue371 \\b(?e)(?:\\d{6,20}){i<=5:[...]}\\b no match"
+ignore = true
+pattern = '\b(?e)(?:\d{6,20}){i<=5:[\-\\\/]}\b'
+input = "cat dog starting at 00:01132.000. hello world"
+is_match = false
+
+# Git issue 394: char set + IGNORECASE (findall; first match)
+[[test]]
+name = "[GAP: fuzzy char-restriction insertion semantics] L4224 issue394 (\\d+){i<=2:[ab]} first match"
+ignore = true
+pattern = '(?:\d+){i<=2:[ab]}'
+input = "123X4Y5"
+is_match = true
+span = [0, 3]
+
+[[test]]
+name = "[GAP: fuzzy char-restriction insertion semantics] L4226 issue394 (?i)(\\d+){i<=2:[ab]} first match"
+ignore = true
+pattern = '(?i)(?:\d+){i<=2:[ab]}'
+input = "123X4Y5"
+is_match = true
+span = [0, 3]
+
+# Git issue 403: fuzzy matching wrong distance; match + BESTMATCH
+[[test]]
+name = "L4230 issue403 ^test e<=5$ terstin BESTMATCH fuzzy_counts"
+pattern = "(?b)^(?:test){e<=5}$"
+input = "terstin"
+fuzzy_counts = [0, 3, 0]
+
+# Git issue 415: char restrictions at right edge (match -> ^)
+[[test]]
+name = "L4238 issue415 t(?:es){s<=1:\\d}t te5t"
+pattern = '^t(?:es){s<=1:\d}t'
+input = "te5t"
+is_match = true
+span = [0, 4]
+
+[[test]]
+name = "L4240 issue415 t(?:es){s<=1:\\d}t tezt no match"
+pattern = '^t(?:es){s<=1:\d}t'
+input = "tezt"
+is_match = false
+
+[[test]]
+name = "[GAP: fuzzy char-restriction insertion semantics] L4241 issue415 t(?:es){i<=1:\\d}t tes5t"
+ignore = true
+pattern = '^t(?:es){i<=1:\d}t'
+input = "tes5t"
+is_match = true
+span = [0, 5]
+
+[[test]]
+name = "L4243 issue415 t(?:es){i<=1:\\d}t teszt no match"
+pattern = '^t(?:es){i<=1:\d}t'
+input = "teszt"
+is_match = false
+
+[[test]]
+name = "L4244 issue415 t(?:es){i<=1:\\d}t fuzzy_changes - unsupported"
+pattern = '^t(?:es){i<=1:\d}t'
+ignore = true
+
+[[test]]
+name = "[GAP: fuzzy char-restriction insertion semantics] L4246 issue415 t(es){i<=1,0<e<=1}t tes5t"
+ignore = true
+pattern = "^t(?:es){i<=1,0<e<=1}t"
+input = "tes5t"
+is_match = true
+span = [0, 5]
+
+[[test]]
+name = "L4248 issue415 t(?:es){i<=1,0<e<=1:\\d}t fuzzy_changes - unsupported"
+pattern = '^t(?:es){i<=1,0<e<=1:\d}t'
+ignore = true
+
+# Git issue 427: BESTMATCH / ENHANCEMATCH on multi-region pattern (match -> ^)
+[[test]]
+name = "L4269 issue427 anchor/umi/sid BESTMATCH span"
+pattern = "(?b)^(?:.*)(?:CTTCC){e<=1}(?:(?:[ACGT]){4,6})(?:CAATACCGACTCCTCACTGTGT){e<=2}(?:(?:[ACGT]){0,6}$)"
+input = "TTCAGACGTGTGCTCTTCCGATCTCAATACCGACTCCTCACTGTGTGTCT"
+span = [0, 50]
+
+[[test]]
+name = "L4273 issue427 anchor/umi/sid ENHANCEMATCH span"
+pattern = "(?e)^(?:.*)(?:CTTCC){e<=1}(?:(?:[ACGT]){4,6})(?:CAATACCGACTCCTCACTGTGT){e<=2}(?:(?:[ACGT]){0,6}$)"
+input = "TTCAGACGTGTGCTCTTCCGATCTCAATACCGACTCCTCACTGTGTGTCT"
+span = [0, 50]
+
+# Git issue 433: fuzzy_counts vs fuzzy_changes (match + BESTMATCH -> (?b)^)
+[[test]]
+name = "[GAP: BESTMATCH not minimizing insertions] L4282 issue433 anchor/umi/sid BESTMATCH fuzzy_counts exact"
+ignore = true
+pattern = "(?b)^(?:.*)(?:AACACTGG){e<=1}(?:(?:[AT][CG]){5}){e<=2}(?:GTAACCGAAG){e<=2}(?:(?:[ACGT]){0,6}$)"
+input = "GGAAAACACTGGTCTCAGTCTCGTAACCGAAGTGGTCG"
+fuzzy_counts = [0, 0, 0]
+
+[[test]]
+name = "L4283 issue433 fuzzy_changes exact - unsupported"
+pattern = "(?b)^(?:.*)(?:AACACTGG){e<=1}(?:(?:[AT][CG]){5}){e<=2}(?:GTAACCGAAG){e<=2}(?:(?:[ACGT]){0,6}$)"
+ignore = true
+
+[[test]]
+name = "[GAP: BESTMATCH not minimizing insertions] L4287 issue433 anchor/umi/sid BESTMATCH fuzzy_counts subs"
+ignore = true
+pattern = "(?b)^(?:.*)(?:AACACTGG){e<=1}(?:(?:[AT][CG]){5}){e<=2}(?:GTAACCGAAG){e<=2}(?:(?:[ACGT]){0,6}$)"
+input = "GGAAAACACTGGTCTCAGTCTCGTCCCCGAAGTGGTCG"
+fuzzy_counts = [2, 0, 0]
+
+[[test]]
+name = "L4288 issue433 fuzzy_changes subs - unsupported"
+pattern = "(?b)^(?:.*)(?:AACACTGG){e<=1}(?:(?:[AT][CG]){5}){e<=2}(?:GTAACCGAAG){e<=2}(?:(?:[ACGT]){0,6}$)"
+ignore = true
+
+# Git issue 442: fuzzy insertions with char set
+[[test]]
+name = "L4297 issue442 (?:\\bha\\b){i:[ ]} having no match"
+pattern = '(?:\bha\b){i:[ ]}'
+input = "having"
+is_match = false
+
+[[test]]
+name = "L4298 issue442 (?:\\bha\\b){i:[ ]} having (?i) no match"
+pattern = '(?:\bha\b){i:[ ]}'
+input = "having"
+case_insensitive = true
+is_match = false
+
+# Git issue 525: fuzzy matching empty word list (unsupported)
+[[test]]
+name = "L4330 issue525 (\\L<foo>)e<=5 empty list - named word list unsupported"
+pattern = '(\L<foo>){e<=5}'
+ignore = true
+
+# ---------------------------------------------------------------------------
+# def test_fuzzy_ext (L4411-4497): fullmatch bool cases
+# ---------------------------------------------------------------------------
+[[test]]
+name = "L4412 (?r)(?:a){e<=1:[a-z]} e - reverse unsupported"
+pattern = "(?:a){e<=1:[a-z]}"
+ignore = true
+
+[[test]]
+name = "L4414 (?:a){e<=1:[a-z]} e"
+pattern = "^(?:a){e<=1:[a-z]}$"
+input = "e"
+is_match = true
+
+[[test]]
+name = "L4416 (?:a){e<=1:[a-z]} - dash no match"
+pattern = "^(?:a){e<=1:[a-z]}$"
+input = "-"
+is_match = false
+
+[[test]]
+name = "L4418 (?r)(?:a){e<=1:[a-z]} dash - reverse unsupported"
+pattern = "(?:a){e<=1:[a-z]}"
+ignore = true
+
+[[test]]
+name = "L4421 (?:a){e<=1:[a-z]} ae"
+pattern = "^(?:a){e<=1:[a-z]}$"
+input = "ae"
+is_match = true
+
+[[test]]
+name = "L4423 (?r)(?:a){e<=1:[a-z]} ae - reverse unsupported"
+pattern = "(?:a){e<=1:[a-z]}"
+ignore = true
+
+[[test]]
+name = "L4425 (?:a){e<=1:[a-z]} a- no match"
+pattern = "^(?:a){e<=1:[a-z]}$"
+input = "a-"
+is_match = false
+
+[[test]]
+name = "L4427 (?r)(?:a){e<=1:[a-z]} a- - reverse unsupported"
+pattern = "(?:a){e<=1:[a-z]}"
+ignore = true
+
+[[test]]
+name = "L4430 (?:ab){e<=1:[a-z]} ae"
+pattern = "^(?:ab){e<=1:[a-z]}$"
+input = "ae"
+is_match = true
+
+[[test]]
+name = "L4432 (?r)(?:ab){e<=1:[a-z]} ae - reverse unsupported"
+pattern = "(?:ab){e<=1:[a-z]}"
+ignore = true
+
+[[test]]
+name = "L4434 (?:ab){e<=1:[a-z]} a- no match"
+pattern = "^(?:ab){e<=1:[a-z]}$"
+input = "a-"
+is_match = false
+
+[[test]]
+name = "L4436 (?r)(?:ab){e<=1:[a-z]} a- - reverse unsupported"
+pattern = "(?:ab){e<=1:[a-z]}"
+ignore = true
+
+[[test]]
+name = "L4439 (a)\\1{e<=1:[a-z]} ae - backreference inside fuzzy unsupported"
+pattern = '(a)\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4441 (?r)\\1{e<=1:[a-z]}(a) ea - backreference + reverse unsupported"
+pattern = '(?r)\1{e<=1:[a-z]}(a)'
+ignore = true
+
+[[test]]
+name = "L4443 (a)\\1{e<=1:[a-z]} a- - backreference inside fuzzy unsupported"
+pattern = '(a)\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4445 (?r)\\1{e<=1:[a-z]}(a) -a - backreference + reverse unsupported"
+pattern = '(?r)\1{e<=1:[a-z]}(a)'
+ignore = true
+
+[[test]]
+name = "L4448 (?fiu) sharp-s e<=1:[a-z] ts - \\N{} + fullcase unsupported"
+pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4450 (?fiu) sharp-s e<=1:[a-z] st - \\N{} + fullcase unsupported"
+pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4452 (?firu) sharp-s e<=1:[a-z] st - \\N{} + fullcase + reverse unsupported"
+pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4454 (?firu) sharp-s e<=1:[a-z] ts - \\N{} + fullcase + reverse unsupported"
+pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4456 (?fiu) sharp-s e<=1:[a-z] -s - \\N{} + fullcase unsupported"
+pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4458 (?fiu) sharp-s e<=1:[a-z] s- - \\N{} + fullcase unsupported"
+pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4460 (?firu) sharp-s e<=1:[a-z] s- - \\N{} + fullcase + reverse unsupported"
+pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4462 (?firu) sharp-s e<=1:[a-z] -s - \\N{} + fullcase + reverse unsupported"
+pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4465 (?fiu)(sharp-s)\\1 e<=1:[a-z] ssst - backreference + \\N{} unsupported"
+pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4467 (?fiu)(sharp-s)\\1 e<=1:[a-z] ssts - backreference + \\N{} unsupported"
+pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4469 (?firu)\\1(sharp-s) stss - backreference + \\N{} + reverse unsupported"
+pattern = '(?firu)\1{e<=1:[a-z]}(\N{LATIN SMALL LETTER SHARP S})'
+ignore = true
+
+[[test]]
+name = "L4471 (?firu)\\1(sharp-s) tsss - backreference + \\N{} + reverse unsupported"
+pattern = '(?firu)\1{e<=1:[a-z]}(\N{LATIN SMALL LETTER SHARP S})'
+ignore = true
+
+[[test]]
+name = "L4473 (?fiu)(sharp-s)\\1 ss-s - backreference + \\N{} unsupported"
+pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4475 (?fiu)(sharp-s)\\1 sss- - backreference + \\N{} unsupported"
+pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4477 (?firu)(sharp-s)\\1 -s - backreference + \\N{} + reverse unsupported"
+pattern = '(?firu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4479 (?firu)(sharp-s)\\1 s- - backreference + \\N{} + reverse unsupported"
+pattern = '(?firu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4482 (?fiu)(ss)\\1 e<=1:[a-z] sharp-s ts - backreference + \\N{} unsupported"
+pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4484 (?fiu)(ss)\\1 e<=1:[a-z] sharp-s st - backreference + \\N{} unsupported"
+pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4486 (?firu)\\1(ss) st sharp-s - backreference + \\N{} + reverse unsupported"
+pattern = '(?firu)\1{e<=1:[a-z]}(ss)'
+ignore = true
+
+[[test]]
+name = "L4488 (?firu)\\1(ss) ts sharp-s - backreference + \\N{} + reverse unsupported"
+pattern = '(?firu)\1{e<=1:[a-z]}(ss)'
+ignore = true
+
+[[test]]
+name = "L4490 (?fiu)(ss)\\1 sharp-s -s - backreference + \\N{} unsupported"
+pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4492 (?fiu)(ss)\\1 sharp-s s- - backreference + \\N{} unsupported"
+pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4494 (?firu)(ss)\\1 s- sharp-s - backreference + \\N{} + reverse unsupported"
+pattern = '(?firu)(ss)\1{e<=1:[a-z]}'
+ignore = true
+
+[[test]]
+name = "L4496 (?firu)(ss)\\1 -s sharp-s - backreference + \\N{} + reverse unsupported"
+pattern = '(?firu)(ss)\1{e<=1:[a-z]}'
+ignore = true

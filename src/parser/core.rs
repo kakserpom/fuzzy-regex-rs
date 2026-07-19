@@ -949,8 +949,11 @@ impl<'a> Parser<'a> {
                                 _ => {}
                             }
                         }
-                        Token::Char(',') | Token::CloseBrace => {
-                            // Just the type allowed (unlimited)
+                        Token::Char(',' | ':') | Token::CloseBrace => {
+                            // Just the type allowed (unlimited); `:` introduces a
+                            // char restriction on that unlimited op, e.g. `{i:[ ]}`
+                            // (mrab Hg issue 442). The ':' is left for the
+                            // restriction handler below.
                             // {i} means insertions allowed (unlimited)
                             match key {
                                 'i' => mrab.unlimited_insertions = true,
@@ -1032,6 +1035,12 @@ impl<'a> Parser<'a> {
                     }
                 };
                 Ok(CharClass::new(false, items))
+            }
+            // Bare single character, e.g. `{e<=1:u}` (mrab Hg issue 338).
+            // Equivalent to the bracketed form `{e<=1:[u]}`.
+            Token::Char(c) if c != ',' && c != '}' => {
+                self.lexer.next_token()?;
+                Ok(CharClass::new(false, vec![CharClassItem::Single(c)]))
             }
             _ => Err(Error::invalid_fuzziness(
                 self.lexer.position(),
