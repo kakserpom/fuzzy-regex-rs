@@ -1,6 +1,6 @@
 [package]
 name = "fuzzy-regex"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "High-performance fuzzy regular expression engine combining regex with Damerau-Levenshtein distance"
@@ -11,6 +11,7 @@ categories = ["text-processing", "algorithms"]
 homepage = "https://github.com/kakserpom/fuzzy-regex-rs"
 repository = "https://github.com/kakserpom/fuzzy-regex-rs"
 documentation = "https://kakserpom.github.io/fuzzy-regex-rs/"
+include = ["/src/**/*.rs", "/Cargo.toml", "/README.md", "/CHANGELOG.md"]
 
 [features]
 default = ["simd"]
