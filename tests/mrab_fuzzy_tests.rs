@@ -1019,8 +1019,9 @@ fn test_fuzzy_counts_method() {
     let re = FuzzyRegex::new(r"(?:foobar){e<=1}").unwrap();
     let m = re.find("fooxbar").unwrap();
 
-    // fooxbar has 1 insertion (the 'x' is extra in text vs pattern)
-    assert_eq!(m.fuzzy_counts(), (1, 0, 0));
+    // fooxbar has 1 insertion (the 'x' is extra in text vs pattern).
+    // mrab order is (substitutions, insertions, deletions).
+    assert_eq!(m.fuzzy_counts(), (0, 1, 0));
 }
 
 #[test]
@@ -1029,8 +1030,8 @@ fn test_fuzzy_counts_insertion() {
     let re = FuzzyRegex::new(r"(?:foobar){e<=1}").unwrap();
     let m = re.find("fooobar").unwrap();
 
-    // fooobar has 1 insertion (extra o)
-    assert_eq!(m.fuzzy_counts(), (1, 0, 0));
+    // fooobar has 1 insertion (extra o). mrab order (subs, ins, dels).
+    assert_eq!(m.fuzzy_counts(), (0, 1, 0));
 }
 
 #[test]
@@ -1039,8 +1040,8 @@ fn test_fuzzy_counts_deletion() {
     let re = FuzzyRegex::new(r"(?:foobar){e<=1}").unwrap();
     let m = re.find("fobar").unwrap();
 
-    // fobar has 1 deletion (missing o)
-    assert_eq!(m.fuzzy_counts(), (0, 1, 0));
+    // fobar has 1 deletion (missing o). mrab order (subs, ins, dels).
+    assert_eq!(m.fuzzy_counts(), (0, 0, 1));
 }
 
 #[test]
@@ -1060,7 +1061,7 @@ fn test_fuzzy_changes_method() {
     let m = re.find("fooxbar").unwrap();
 
     // fuzzy_changes returns position lists (empty for now - detailed tracking not implemented)
-    let (ins, del, sub) = m.fuzzy_changes();
+    let (sub, ins, del) = m.fuzzy_changes(); // mrab order (subs, ins, dels)
     assert!(ins.is_empty() || !ins.is_empty()); // Just check it returns something
     assert!(del.is_empty() || !del.is_empty());
     assert!(sub.is_empty() || !sub.is_empty());

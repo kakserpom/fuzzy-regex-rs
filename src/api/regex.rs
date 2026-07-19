@@ -2063,20 +2063,27 @@ impl FuzzyRegex {
         let mut matches = Vec::new();
         let mut prev_end = 0;
 
-        // Get all literal match positions sorted by start
-        let mut literal_positions: Vec<(usize, usize)> = Vec::new();
+        // Get all literal match positions sorted by start, keeping the fuzzy
+        // edit counts and similarity so the returned Match carries correct
+        // metadata (fuzzy_counts / similarity), not defaults.
+        let mut literal_positions: Vec<(usize, usize, crate::engine::EditCounts, f32)> = Vec::new();
         for ((pattern_idx, start), results) in cached.iter() {
             if pattern_idx != 0 {
                 continue;
             }
             for result in results {
-                literal_positions.push((start, result.end));
+                literal_positions.push((
+                    start,
+                    result.end,
+                    crate::engine::EditCounts::from_fuzzy_result(result),
+                    result.similarity,
+                ));
             }
         }
-        literal_positions.sort_by_key(|(start, _)| *start);
+        literal_positions.sort_by_key(|(start, _, _, _)| *start);
 
         // Filter to word-bounded matches
-        for (literal_start, literal_end) in literal_positions {
+        for (literal_start, literal_end, edits, similarity) in literal_positions {
             // Skip overlapping matches
             if literal_start < prev_end {
                 continue;
@@ -2090,8 +2097,8 @@ impl FuzzyRegex {
                     text,
                     literal_start,
                     literal_end,
-                    1.0,
-                    crate::engine::EditCounts::default(),
+                    similarity,
+                    edits,
                 ));
                 prev_end = literal_end;
             }

@@ -400,11 +400,18 @@ impl DamLevNfa {
     /// Returns the earliest match found, or None if no match exists.
     #[must_use]
     pub fn find_first(&self, text: &str, threshold: f32) -> Option<DamLevMatch> {
-        // For NFA fallback, we use find_all and take the first result
-        // This is not optimal but NFA is only used as a fallback for >64 char patterns
-        self.find_all(text, threshold)
-            .into_iter()
-            .min_by_key(|m| m.start)
+        // Pick the leftmost match, and among matches starting at the same
+        // position prefer the best one: fewest edits, then shortest span. This
+        // mirrors mrab-regex's default `search` (which reports the minimal-error
+        // match at the leftmost position) rather than whichever alignment the
+        // NFA happens to accept first (e.g. a 2-edit "hetl" over a 1-edit
+        // "hetlo" for `(?:hello){i<=1,d<=1,s<=1}`).
+        self.find_all(text, threshold).into_iter().min_by(|a, b| {
+            a.start
+                .cmp(&b.start)
+                .then_with(|| a.total_edits().cmp(&b.total_edits()))
+                .then_with(|| a.end.cmp(&b.end))
+        })
     }
 
     /// Find all matches in the text.

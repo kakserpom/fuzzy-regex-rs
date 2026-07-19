@@ -241,32 +241,33 @@ impl<'t> Match<'t> {
         self.edits.total()
     }
 
-    /// Get fuzzy counts as (insertions, deletions, substitutions).
+    /// Get fuzzy counts as (substitutions, insertions, deletions).
     ///
-    /// This matches the API of mrab-regex's `fuzzy_counts` property.
+    /// This matches mrab-regex's `fuzzy_counts` property exactly (mrab orders the
+    /// tuple substitutions-first).
+    /// - substitutions: characters that differ between pattern and text
     /// - insertions: characters in the text not in the pattern
     /// - deletions: characters in the pattern not in the text
-    /// - substitutions: characters that differ between pattern and text
     #[must_use]
     pub fn fuzzy_counts(&self) -> (u32, u32, u32) {
         (
+            u32::from(self.edits.substitutions),
             u32::from(self.edits.insertions),
             u32::from(self.edits.deletions),
-            u32::from(self.edits.substitutions),
         )
     }
 
-    /// Get fuzzy changes as (insertions, deletions, substitutions).
+    /// Get fuzzy changes as (substitutions, insertions, deletions).
     ///
-    /// This matches the API of mrab-regex's `fuzzy_changes` property.
-    /// Returns positions within the matched text where edits occurred.
+    /// This matches mrab-regex's `fuzzy_changes` property (positions within the
+    /// matched text where each kind of edit occurred, substitutions first).
     ///
     /// Note: This requires the original pattern to compute accurately.
     /// If the pattern was not provided during matching, returns empty vectors.
     #[must_use]
     pub fn fuzzy_changes(&self) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
-        if let Some(changes) = &self.fuzzy_changes {
-            return changes.clone();
+        if let Some((ins, del, sub)) = &self.fuzzy_changes {
+            return (sub.clone(), ins.clone(), del.clone());
         }
 
         // If we don't have pre-computed changes, return empty
@@ -277,14 +278,16 @@ impl<'t> Match<'t> {
     /// Get fuzzy changes given the original pattern.
     ///
     /// This computes the edit positions by comparing the matched text
-    /// against the original pattern.
+    /// against the original pattern. Returned as (substitutions, insertions,
+    /// deletions), matching mrab-regex.
     #[must_use]
     pub fn fuzzy_changes_with_pattern(
         &self,
         pattern: &str,
     ) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
         let matched_text = self.as_str();
-        compute_fuzzy_changes(pattern, matched_text.as_ref())
+        let (ins, del, sub) = compute_fuzzy_changes(pattern, matched_text.as_ref());
+        (sub, ins, del)
     }
 
     /// Check if this is a partial match.
@@ -498,21 +501,21 @@ impl<'t> Captures<'t> {
         &self.edits
     }
 
-    /// Get fuzzy counts as (insertions, deletions, substitutions).
+    /// Get fuzzy counts as (substitutions, insertions, deletions).
     ///
-    /// This matches the API of mrab-regex's `fuzzy_counts` property.
+    /// This matches mrab-regex's `fuzzy_counts` property exactly.
     #[must_use]
     pub fn fuzzy_counts(&self) -> (u32, u32, u32) {
         (
+            u32::from(self.edits.substitutions),
             u32::from(self.edits.insertions),
             u32::from(self.edits.deletions),
-            u32::from(self.edits.substitutions),
         )
     }
 
-    /// Get fuzzy changes as (insertions, deletions, substitutions).
+    /// Get fuzzy changes as (substitutions, insertions, deletions).
     ///
-    /// This matches the API of mrab-regex's `fuzzy_changes` property.
+    /// This matches mrab-regex's `fuzzy_changes` property.
     #[must_use]
     pub fn fuzzy_changes(&self) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
         (Vec::new(), Vec::new(), Vec::new())
