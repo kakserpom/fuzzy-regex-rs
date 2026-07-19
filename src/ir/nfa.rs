@@ -596,12 +596,11 @@ impl Nfa {
                 }
                 State::Char { class, next } => {
                     // Only handle single character literals (not ranges)
-                    if let Some(ch) = class.to_first_char() {
+                    {
+                        let ch = class.to_first_char()?;
                         let mut new_literal = literal.clone();
                         new_literal.push(ch);
                         stack.push((*next, new_literal, count));
-                    } else {
-                        return None; // Not a simple literal
                     }
                 }
                 State::Split { branches, greedy }

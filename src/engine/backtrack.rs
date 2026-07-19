@@ -194,7 +194,8 @@ impl<'a> BacktrackMatcher<'a> {
                     } else {
                         // Empty epsilon - dead state
                         // Try to backtrack
-                        if let Some(frame) = backtrack_stack.pop() {
+                        {
+                            let frame = backtrack_stack.pop()?;
                             state = frame.state;
                             pos = frame.pos;
                             captures = frame.captures;
@@ -202,8 +203,6 @@ impl<'a> BacktrackMatcher<'a> {
                             edits = frame.edits;
                             match_start = frame.match_start;
                             depth = frame.recursion_depth;
-                        } else {
-                            return None;
                         }
                     }
                 }
@@ -216,7 +215,8 @@ impl<'a> BacktrackMatcher<'a> {
                             state = *next;
                         } else {
                             // Try to backtrack
-                            if let Some(frame) = backtrack_stack.pop() {
+                            {
+                                let frame = backtrack_stack.pop()?;
                                 state = frame.state;
                                 pos = frame.pos;
                                 captures = frame.captures;
@@ -224,13 +224,12 @@ impl<'a> BacktrackMatcher<'a> {
                                 edits = frame.edits;
                                 match_start = frame.match_start;
                                 depth = frame.recursion_depth;
-                            } else {
-                                return None;
                             }
                         }
                     } else {
                         // End of input - try to backtrack
-                        if let Some(frame) = backtrack_stack.pop() {
+                        {
+                            let frame = backtrack_stack.pop()?;
                             state = frame.state;
                             pos = frame.pos;
                             captures = frame.captures;
@@ -238,8 +237,6 @@ impl<'a> BacktrackMatcher<'a> {
                             edits = frame.edits;
                             match_start = frame.match_start;
                             depth = frame.recursion_depth;
-                        } else {
-                            return None;
                         }
                     }
                 }
@@ -257,25 +254,23 @@ impl<'a> BacktrackMatcher<'a> {
                         if class.matches(ch) {
                             pos += ch.len_utf8();
                             state = *next;
-                        } else if let Some(frame) = backtrack_stack.pop() {
+                        } else {
+                            let frame = backtrack_stack.pop()?;
                             state = frame.state;
                             pos = frame.pos;
                             captures = frame.captures;
                             similarity = frame.similarity;
                             edits = frame.edits;
                             match_start = frame.match_start;
-                        } else {
-                            return None;
                         }
-                    } else if let Some(frame) = backtrack_stack.pop() {
+                    } else {
+                        let frame = backtrack_stack.pop()?;
                         state = frame.state;
                         pos = frame.pos;
                         captures = frame.captures;
                         similarity = frame.similarity;
                         edits = frame.edits;
                         match_start = frame.match_start;
-                    } else {
-                        return None;
                     }
                 }
 
@@ -295,15 +290,14 @@ impl<'a> BacktrackMatcher<'a> {
                             } else {
                                 // Try fuzzy match
                                 // For simplicity, treat as no match for now
-                                if let Some(frame) = backtrack_stack.pop() {
+                                {
+                                    let frame = backtrack_stack.pop()?;
                                     state = frame.state;
                                     pos = frame.pos;
                                     captures = frame.captures;
                                     similarity = frame.similarity;
                                     edits = frame.edits;
                                     match_start = frame.match_start;
-                                } else {
-                                    return None;
                                 }
                             }
                         } else {
@@ -338,15 +332,14 @@ impl<'a> BacktrackMatcher<'a> {
 
                     if matches {
                         state = *next;
-                    } else if let Some(frame) = backtrack_stack.pop() {
+                    } else {
+                        let frame = backtrack_stack.pop()?;
                         state = frame.state;
                         pos = frame.pos;
                         captures = frame.captures;
                         similarity = frame.similarity;
                         edits = frame.edits;
                         match_start = frame.match_start;
-                    } else {
-                        return None;
                     }
                 }
 
@@ -410,15 +403,14 @@ impl<'a> BacktrackMatcher<'a> {
                         if remaining.starts_with(captured_text) {
                             pos += captured_text.len();
                             state = *next;
-                        } else if let Some(frame) = backtrack_stack.pop() {
+                        } else {
+                            let frame = backtrack_stack.pop()?;
                             state = frame.state;
                             pos = frame.pos;
                             captures = frame.captures;
                             similarity = frame.similarity;
                             edits = frame.edits;
                             match_start = frame.match_start;
-                        } else {
-                            return None;
                         }
                     } else {
                         state = *next;
@@ -500,15 +492,14 @@ impl<'a> BacktrackMatcher<'a> {
                     } else {
                         // Recursion failed - pop our frame and backtrack
                         backtrack_stack.pop();
-                        if let Some(frame) = backtrack_stack.pop() {
+                        {
+                            let frame = backtrack_stack.pop()?;
                             state = frame.state;
                             pos = frame.pos;
                             captures = frame.captures;
                             similarity = frame.similarity;
                             edits = frame.edits;
                             match_start = frame.match_start;
-                        } else {
-                            return None;
                         }
                     }
                 }

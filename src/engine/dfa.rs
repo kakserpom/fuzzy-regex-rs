@@ -1388,18 +1388,15 @@ impl Dfa {
         let first_byte = lit_bytes[0];
         let mut pos = bytes.len();
         while pos >= lit_len {
-            match memrchr(first_byte, &bytes[..pos]) {
-                Some(start) => {
-                    if start + lit_len <= bytes.len() && &bytes[start..start + lit_len] == lit_bytes
-                    {
-                        return Some(DfaMatch {
-                            start,
-                            end: start + lit_len,
-                        });
-                    }
-                    pos = start;
+            {
+                let start = memrchr(first_byte, &bytes[..pos])?;
+                if start + lit_len <= bytes.len() && &bytes[start..start + lit_len] == lit_bytes {
+                    return Some(DfaMatch {
+                        start,
+                        end: start + lit_len,
+                    });
                 }
-                None => return None,
+                pos = start;
             }
         }
         None
