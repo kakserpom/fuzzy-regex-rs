@@ -1356,12 +1356,62 @@ impl BitapMatcher {
             return Some(prev[n]);
         }
 
-        // Non-ASCII: decline the gate and fall back to the full breakdown. The
-        // per-op breakdown's edit *attribution* can diverge from the minimal
-        // total distance on some multibyte-char windows, and this gate must
-        // agree with the breakdown's total exactly, so it is only used where they
-        // provably match (verified by `test_damerau_distance_matches_breakdown_total`).
-        None
+        // Non-ASCII: decode to a char buffer and run the same distance-only DP.
+        // The breakdown DP now yields the exact Damerau distance for every window
+        // (see `compute_exact_edit_breakdown`), so this gate matches it here too
+        // (verified by `test_breakdown_is_valid_and_exact`).
+        let text_str = std::str::from_utf8(matched_text).ok()?;
+        let mut text_chars_buf: [char; N] = ['\0'; N];
+        let mut n = 0;
+        for c in text_str.chars() {
+            if n >= N {
+                return None;
+            }
+            text_chars_buf[n] = if self.case_insensitive {
+                c.to_ascii_lowercase()
+            } else {
+                c
+            };
+            n += 1;
+        }
+        let text_chars = &text_chars_buf[..n];
+
+        let mut prev_prev = [0u8; N + 1];
+        let mut prev = [0u8; N + 1];
+        let mut curr = [0u8; N + 1];
+        for (j, slot) in prev.iter_mut().enumerate().take(n + 1) {
+            *slot = j as u8;
+        }
+        let mut prev_pattern_char = '\0';
+        for i in 1..=m {
+            let pattern_char = if self.case_insensitive {
+                pattern[i - 1].to_ascii_lowercase()
+            } else {
+                pattern[i - 1]
+            };
+            curr[0] = i as u8;
+            for j in 1..=n {
+                let text_char = text_chars[j - 1];
+                if pattern_char == text_char {
+                    curr[j] = prev[j - 1];
+                } else {
+                    let mut best = 1 + prev[j - 1].min(curr[j - 1]).min(prev[j]);
+                    if i > 1
+                        && j > 1
+                        && pattern_char == text_chars[j - 2]
+                        && prev_pattern_char == text_char
+                    {
+                        best = best.min(prev_prev[j - 2] + 1);
+                    }
+                    curr[j] = best;
+                }
+            }
+            std::mem::swap(&mut prev_prev, &mut prev);
+            std::mem::swap(&mut prev, &mut curr);
+            prev_pattern_char = pattern_char;
+        }
+
+        Some(prev[n])
     }
 
     /// Compute exact Damerau-Levenshtein edit breakdown using dynamic programming.

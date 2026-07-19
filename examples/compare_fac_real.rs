@@ -138,6 +138,26 @@ fn main() {
         );
     }
 
+    // 3b. unicode text (exercises the non-ASCII distance gate)
+    {
+        let text = "Съешь же ещё этих мягких французских булок да выпей чаю. Ελληνικά κείμενο εδώ. 日本語のテキストもここにある。café résumé naïve";
+        let pats = ["французских", "κείμενο", "résumé"];
+        let real = RealBuilder::new()
+            .fuzzy(RealLimits::new().edits(2))
+            .case_insensitive(true)
+            .build(pats);
+        let fr = FrBuilder::new()
+            .fuzzy(FrLimits::new().edits(2))
+            .case_insensitive(true)
+            .build(pats);
+        row(
+            "unicode (3 pat, e<=2)",
+            5_000,
+            || real.search_non_overlapping(black_box(text), 0.7).len(),
+            || fr.search_non_overlapping(black_box(text), 0.7).len(),
+        );
+    }
+
     // 4. fuzzy levels
     {
         let text = "this is a saddamhu example with multiple saddam matches";
