@@ -565,8 +565,12 @@ impl<'a> Matcher<'a> {
             }
         });
 
-        if self.config.best_match {
-            // BESTMATCH mode needs full search to find the best match
+        if self.config.best_match || self.config.enhance_match {
+            // BESTMATCH and ENHANCEMATCH both need a full search to minimize the
+            // error count. The per-position NFA sim already keeps the lowest-cost
+            // thread when enhance_match is set (see step dedup); scanning all start
+            // positions here turns that into global error minimization instead of
+            // returning the first position that happens to match.
             self.find_best_with_cache(text, cached.as_ref())
         } else if self.config.posix {
             // POSIX mode: find longest match at leftmost position
