@@ -1400,35 +1400,17 @@ impl BitapMatcher {
             text_str.chars().count()
         };
 
+        // Always run the exact DP: it yields a valid Damerau breakdown whose
+        // op counts describe a real alignment (`insertions - deletions ==
+        // char_len - pattern_len`). A previous Myers early-reject returned
+        // `(myers_dist, 0, 0, 0)` for over-budget windows, which is *not* a valid
+        // breakdown (Levenshtein rather than Damerau, and an impossible
+        // ins/del split). It only ever fired when the window was genuinely over
+        // budget, so removing it never changes accept/reject outcomes; callers
+        // that reject on `total_edits > limit` still reject (Damerau distance is
+        // also over budget), but now with a consistent breakdown. Windows are
+        // shorter than STACK_LIMIT, so the distance stays well within `u8`.
         if n < STACK_LIMIT {
-            // Fast early rejection using Myers
-            // Since Myers doesn't support transpositions (counts as 2 subs instead of 1),
-            // we can only reject if Myers distance > max_edits + potential_transpositions
-            // Conservative: reject if Myers distance > max_edits + max_possible_transpositions
-            let max_possible_trans = (m.min(n) / 2) as u8;
-
-            // Build text chars for Myers check
-            let mut text_chars_buf: [char; STACK_LIMIT] = ['\0'; STACK_LIMIT];
-            for (idx, c) in text_str.chars().take(STACK_LIMIT).enumerate() {
-                text_chars_buf[idx] = if self.case_insensitive {
-                    c.to_ascii_lowercase()
-                } else {
-                    c
-                };
-            }
-            let text_chars = &text_chars_buf[..n];
-
-            let myers_dist = self.compute_edit_distance_myers(text_chars);
-
-            // If Myers distance is low enough that no transpositions could make it invalid,
-            // we still need full DP for exact breakdown
-            // If Myers distance is very high, reject early
-            // Use saturating_add to avoid overflow when max_edits is u8::MAX (unlimited)
-            if myers_dist > self.limits.max_edits.saturating_add(max_possible_trans) {
-                // Definitely too many edits - return high value for rejection
-                return (myers_dist, 0, 0, 0);
-            }
-
             self.compute_edit_breakdown_small::<STACK_LIMIT>(pattern, text_str, m, n)
         } else {
             self.compute_edit_breakdown_large(pattern, text_str, m, n)
@@ -3676,13 +3658,42 @@ mod simd_avx2 {
 mod tests {
     use super::*;
 
-    /// The lightweight distance gate must agree exactly with the full breakdown's
-    /// total edit count, otherwise `find_all` would reject valid matches.
+    /// Reference optimal-string-alignment (restricted Damerau) distance over
+    /// chars, matching the breakdown DP's transposition rule.
+    fn reference_osa(pattern: &[char], text: &[char]) -> u16 {
+        let m = pattern.len();
+        let n = text.len();
+        let mut d = vec![vec![0u16; n + 1]; m + 1];
+        for (i, row) in d.iter_mut().enumerate() {
+            row[0] = i as u16;
+        }
+        for j in 0..=n {
+            d[0][j] = j as u16;
+        }
+        for i in 1..=m {
+            for j in 1..=n {
+                let cost = u16::from(pattern[i - 1] != text[j - 1]);
+                let mut best = (d[i - 1][j] + 1)
+                    .min(d[i][j - 1] + 1)
+                    .min(d[i - 1][j - 1] + cost);
+                if i > 1 && j > 1 && pattern[i - 1] == text[j - 2] && pattern[i - 2] == text[j - 1]
+                {
+                    best = best.min(d[i - 2][j - 2] + 1);
+                }
+                d[i][j] = best;
+            }
+        }
+        d[m][n]
+    }
+
+    /// The exact breakdown must (a) equal the reference OSA distance and (b) be a
+    /// valid alignment (`insertions - deletions == char_len - pattern_len`), for
+    /// ASCII and non-ASCII, including over-budget windows. This guards the fixed
+    /// early-reject that used to return an invalid `(myers, 0, 0, 0)` tuple. It
+    /// also confirms the lightweight distance gate agrees on ASCII.
     #[test]
-    fn test_damerau_distance_matches_breakdown_total() {
-        // Deterministic pseudo-random windows over a small alphabet, both ASCII
-        // (fast path) and with a non-ASCII char (char path).
-        let alpha = ['a', 'b', 'c', 'd', 'é'];
+    fn test_breakdown_is_valid_and_exact() {
+        let alpha = ['a', 'b', 'c', 'd', 'é', '中'];
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = || {
             state ^= state << 13;
@@ -3694,22 +3705,47 @@ mod tests {
             for _ in 0..20_000 {
                 let plen = 1 + (next() % 8) as usize;
                 let tlen = (next() % 12) as usize;
-                let pat: String = (0..plen)
+                let pat: Vec<char> = (0..plen)
                     .map(|_| alpha[(next() % alpha.len() as u64) as usize])
                     .collect();
-                let text: String = (0..tlen)
+                let txt: Vec<char> = (0..tlen)
                     .map(|_| alpha[(next() % alpha.len() as u64) as usize])
                     .collect();
-                let m = BitapMatcher::new(&pat, EditLimits::new(4), ci).unwrap();
-                let Some(dist) = m.compute_damerau_distance(text.as_bytes()) else {
-                    continue;
+                let pat_s: String = pat.iter().collect();
+                let text_s: String = txt.iter().collect();
+
+                // Fold case for the reference when case-insensitive.
+                let fold = |v: &[char]| -> Vec<char> {
+                    if ci {
+                        v.iter().map(|c| c.to_ascii_lowercase()).collect()
+                    } else {
+                        v.to_vec()
+                    }
                 };
-                let (i, d, s, sw) = m.compute_exact_edit_breakdown(text.as_bytes());
-                let total = i as u16 + d as u16 + s as u16 + sw as u16;
+                let reference = reference_osa(&fold(&pat), &fold(&txt));
+
+                let matcher = BitapMatcher::new(&pat_s, EditLimits::new(4), ci).unwrap();
+                let (i, d, s, sw) = matcher.compute_exact_edit_breakdown(text_s.as_bytes());
+                let total = u16::from(i) + u16::from(d) + u16::from(s) + u16::from(sw);
+
                 assert_eq!(
-                    dist as u16, total,
-                    "distance mismatch: pat={pat:?} text={text:?} ci={ci} dist={dist} breakdown={i},{d},{s},{sw}"
+                    total, reference,
+                    "total != OSA: pat={pat_s:?} text={text_s:?} ci={ci} got {i},{d},{s},{sw}"
                 );
+                // Valid alignment: net length change matches.
+                assert_eq!(
+                    i as i32 - d as i32,
+                    txt.len() as i32 - pat.len() as i32,
+                    "invalid alignment: pat={pat_s:?} text={text_s:?} ci={ci} got {i},{d},{s},{sw}"
+                );
+                // ASCII distance gate must agree with the breakdown total.
+                if let Some(dist) = matcher.compute_damerau_distance(text_s.as_bytes()) {
+                    assert_eq!(
+                        u16::from(dist),
+                        total,
+                        "gate != breakdown for {pat_s:?}/{text_s:?}"
+                    );
+                }
             }
         }
     }
