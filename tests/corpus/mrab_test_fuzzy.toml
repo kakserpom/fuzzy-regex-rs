@@ -844,7 +844,7 @@ fuzzy_counts = [1, 0, 0]
 
 # Git issue 371: character set restriction on insertions
 [[test]]
-name = "[GAP: fuzzy char-restriction insertion semantics] L4216 issue371 \\b(?e)(?:\\d{6,20}){i<=5:[...]}\\b no match"
+name = "[GAP: fuzzy over quantified class subpattern; restriction not enforced -> over-permissive] L4216 issue371 \\b(?e)(?:\\d{6,20}){i<=5:[...]}\\b no match"
 ignore = true
 pattern = '\b(?e)(?:\d{6,20}){i<=5:[\-\\\/]}\b'
 input = "cat dog starting at 00:01132.000. hello world"
@@ -852,7 +852,7 @@ is_match = false
 
 # Git issue 394: char set + IGNORECASE (findall; first match)
 [[test]]
-name = "[GAP: fuzzy char-restriction insertion semantics] L4224 issue394 (\\d+){i<=2:[ab]} first match"
+name = "[GAP: fuzzy over quantified class subpattern (\\d+) breaks greedy match] L4224 issue394 (\\d+){i<=2:[ab]} first match"
 ignore = true
 pattern = '(?:\d+){i<=2:[ab]}'
 input = "123X4Y5"
@@ -860,7 +860,7 @@ is_match = true
 span = [0, 3]
 
 [[test]]
-name = "[GAP: fuzzy char-restriction insertion semantics] L4226 issue394 (?i)(\\d+){i<=2:[ab]} first match"
+name = "[GAP: fuzzy over quantified class subpattern (\\d+) breaks greedy match] L4226 issue394 (?i)(\\d+){i<=2:[ab]} first match"
 ignore = true
 pattern = '(?i)(?:\d+){i<=2:[ab]}'
 input = "123X4Y5"
@@ -889,8 +889,7 @@ input = "tezt"
 is_match = false
 
 [[test]]
-name = "[GAP: fuzzy char-restriction insertion semantics] L4241 issue415 t(?:es){i<=1:\\d}t tes5t"
-ignore = true
+name = "L4241 issue415 t(?:es){i<=1:\\d}t tes5t (trailing restricted insertion)"
 pattern = '^t(?:es){i<=1:\d}t'
 input = "tes5t"
 is_match = true
@@ -908,8 +907,7 @@ pattern = '^t(?:es){i<=1:\d}t'
 ignore = true
 
 [[test]]
-name = "[GAP: fuzzy char-restriction insertion semantics] L4246 issue415 t(es){i<=1,0<e<=1}t tes5t"
-ignore = true
+name = "L4246 issue415 t(es){i<=1,0<e<=1}t tes5t (trailing insertion)"
 pattern = "^t(?:es){i<=1,0<e<=1}t"
 input = "tes5t"
 is_match = true

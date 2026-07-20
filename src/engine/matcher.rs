@@ -1968,6 +1968,67 @@ impl<'a> Matcher<'a> {
                                     });
                                 }
                             }
+
+                            // Trailing boundary insertions: when more pattern must
+                            // still consume text after this fuzzy literal (not `$`,
+                            // which the boundary path above already handles), also
+                            // emit threads that absorb up to the remaining insertion
+                            // budget of chars right after the match, so a following
+                            // literal can match past inserted chars (e.g.
+                            // `t(?:es){i<=1}t` on "tesxt"). Honours `{i<=N:[...]}`.
+                            if expected_end.is_none() && self.next_consumes(*next) {
+                                let max_ins = limits.as_ref().map_or(0u8, |l| {
+                                    l.get_insertions().or_else(|| l.get_edits()).unwrap_or(0)
+                                });
+                                let max_e = max_edits.unwrap_or(0);
+                                let rem_ins = max_ins.saturating_sub(result.insertions);
+                                let rem_e = max_e.saturating_sub(result.total_edits());
+                                let budget = rem_ins.min(rem_e);
+                                let mut pos = result.end;
+                                let mut added: u8 = 0;
+                                for ch in text[result.end..].chars() {
+                                    if added >= budget
+                                        || !bridge.boundary_insertion_allowed(*pattern_index, ch)
+                                    {
+                                        break;
+                                    }
+                                    pos += ch.len_utf8();
+                                    added += 1;
+                                    let ext = FuzzyMatchResult {
+                                        end: pos,
+                                        similarity: result.similarity,
+                                        insertions: result.insertions + added,
+                                        deletions: result.deletions,
+                                        substitutions: result.substitutions,
+                                        swaps: result.swaps,
+                                    };
+                                    if !meets_all_constraints(&ext) {
+                                        continue;
+                                    }
+                                    let ext_edits = EditCounts::from_fuzzy_result(&ext);
+                                    if check_group_budget(
+                                        &thread.group_edits,
+                                        *fuzzy_group_id,
+                                        &ext_edits,
+                                        &self.fuzzy_group_budgets,
+                                    ) {
+                                        next_threads.push(Thread {
+                                            state: *next,
+                                            pos,
+                                            similarity: thread.similarity * result.similarity,
+                                            edits: thread.edits.merge(&ext_edits),
+                                            captures: thread.captures.clone(),
+                                            match_start: thread.match_start,
+                                            handler_overrides: thread.handler_overrides.clone(),
+                                            group_edits: apply_group_edits(
+                                                thread.group_edits.clone(),
+                                                *fuzzy_group_id,
+                                                &ext_edits,
+                                            ),
+                                        });
+                                    }
+                                }
+                            }
                         } else {
                             let can_use_boundary = limits.as_ref().is_some_and(|l| {
                                 l.get_insertions().unwrap_or(0) > 0
@@ -2393,6 +2454,61 @@ impl<'a> Matcher<'a> {
     fn find_expected_end(&self, state_id: StateId, text_len: usize) -> Option<usize> {
         let mut visited = vec![false; self.nfa.states.len()];
         self.find_expected_end_recursive(state_id, text_len, &mut visited)
+    }
+
+    /// Whether the state following a fuzzy literal reaches a *consuming* state
+    /// (another literal/char/backreference) before it can accept or hit `$`.
+    ///
+    /// Used to decide whether to emit trailing boundary insertions: when more
+    /// pattern must still consume text (e.g. the final `t` in `t(?:es){i<=1}t`),
+    /// inserted chars between the fuzzy literal and that pattern are worth
+    /// exploring. When the next stop is `Accept`/`$`, the base match (and, for
+    /// `$`, the existing boundary path) already covers it.
+    fn next_consumes(&self, state_id: StateId) -> bool {
+        let mut visited = vec![false; self.nfa.states.len()];
+        self.next_consumes_recursive(state_id, &mut visited)
+    }
+
+    fn next_consumes_recursive(&self, state_id: StateId, visited: &mut Vec<bool>) -> bool {
+        if visited[state_id] {
+            return false;
+        }
+        visited[state_id] = true;
+
+        match &self.nfa.states[state_id] {
+            // Consuming states: more text must be matched.
+            State::Char { .. }
+            | State::FuzzyChar { .. }
+            | State::FuzzyLiteral { .. }
+            | State::Backreference { .. } => true,
+
+            // Non-consuming: follow through to the next state(s).
+            State::CaptureStart { next, .. }
+            | State::CaptureEnd { next, .. }
+            | State::ResetMatchStart { next, .. }
+            | State::Lookahead { next, .. }
+            | State::LookaheadLiteral { next, .. }
+            | State::Lookbehind { next, .. }
+            | State::LookbehindLiteral { next, .. }
+            | State::Handler { next, .. } => self.next_consumes_recursive(*next, visited),
+
+            // A non-end anchor (e.g. word boundary) doesn't consume; keep going.
+            // An end anchor means no further text is consumed.
+            State::Anchor { kind, next, .. } => {
+                !matches!(kind, Anchor::End) && self.next_consumes_recursive(*next, visited)
+            }
+
+            State::Epsilon { targets }
+            | State::Split {
+                branches: targets, ..
+            } => targets
+                .clone()
+                .into_iter()
+                .any(|t| self.next_consumes_recursive(t, visited)),
+
+            // Accept and constructs we don't reason about: treat as non-consuming.
+            _ => false,
+        }
     }
 
     /// Recursive helper for `find_expected_end`.

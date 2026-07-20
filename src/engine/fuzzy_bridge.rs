@@ -1964,6 +1964,19 @@ impl FuzzyBridge {
         None
     }
 
+    /// Whether `ch` may be used as a boundary insertion for `pattern_index`.
+    ///
+    /// Returns `true` when the pattern has no edit-character restriction, or when
+    /// the restriction allows `ch`. Used to gate trailing insertions emitted at a
+    /// fuzzy literal's boundary so they honour `{i<=N:[...]}` restrictions.
+    #[must_use]
+    pub fn boundary_insertion_allowed(&self, pattern_index: usize, ch: char) -> bool {
+        self.edit_char_restrictions
+            .get(pattern_index)
+            .and_then(|r| r.as_ref())
+            .is_none_or(|restriction| restriction.allows(ch))
+    }
+
     /// Find a fuzzy match that allows boundary insertions (for anchored patterns).
     /// Uses cached results to avoid O(N) per-call overhead.
     pub fn find_with_boundary_insertions(
