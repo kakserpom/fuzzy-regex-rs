@@ -1369,7 +1369,7 @@ impl<'a> Matcher<'a> {
         start: usize,
         cached: Option<&CachedMatches>,
     ) -> Option<MatchResult> {
-        use super::hash::FxHashSet;
+        use super::hash::FxHashMap;
 
         let group_count = self.fuzzy_group_budgets.len();
         let mut threads = vec![Thread {
@@ -1385,9 +1385,15 @@ impl<'a> Matcher<'a> {
 
         let mut best_match: Option<MatchResult> = None;
 
-        // Track visited (state, pos) pairs to avoid redundant exploration
-        let mut visited: FxHashSet<(StateId, usize)> = FxHashSet::default();
-        visited.insert((self.nfa.start, start));
+        // Track the lowest edit-cost reached at each (state, pos). A thread is
+        // re-explored only when it arrives at a key with strictly lower cost than
+        // seen before (or the key is new), so the minimal-edit alignment always
+        // wins. Crucially, a greedy *exact* continuation can reclaim a (state,
+        // pos) that a higher-cost insertion self-loop touched first — a plain
+        // "visited" set would block it, breaking greedy quantifiers over fuzzy
+        // classes (e.g. `(?:\d+){i<=2}` matching one digit instead of all).
+        let mut best_cost: FxHashMap<(StateId, usize), u16> = FxHashMap::default();
+        best_cost.insert((self.nfa.start, start), 0);
 
         while !threads.is_empty() {
             // Early termination for lazy quantifiers: once we have a match, stop exploring
@@ -1408,43 +1414,42 @@ impl<'a> Matcher<'a> {
                 );
             }
 
-            // Deduplicate threads by (state, pos)
-            // In ENHANCEMATCH mode: keep the thread with LOWEST COST (fewest edits) at each position
-            // In normal mode: keep the FIRST thread (for performance and correct "first match" semantics)
-            let mut deduped = Vec::with_capacity(next_threads.len());
-            if self.config.enhance_match {
-                // ENHANCEMATCH: keep best thread at each (state, pos)
-                // Best = lowest cost (using default cost of 1 for all edit types)
-                use super::hash::FxHashMap;
-                let mut best_at_pos: FxHashMap<(StateId, usize), usize> = FxHashMap::default();
-                for (idx, thread) in next_threads.iter().enumerate() {
-                    let key = (thread.state, thread.pos);
-                    if let Some(&existing_idx) = best_at_pos.get(&key) {
-                        // Keep the one with lower cost (fewer edits)
-                        // Using cost(1,1,1,1) is equivalent to total() but more explicit
-                        let new_cost = thread.edits.cost(1, 1, 1, 1);
-                        let existing_cost = next_threads[existing_idx].edits.cost(1, 1, 1, 1);
-                        if new_cost < existing_cost {
-                            best_at_pos.insert(key, idx);
-                        }
-                    } else if visited.insert(key) {
+            // Collapse to the lowest-cost thread per (state, pos) within this
+            // batch (ties keep the earliest thread — a stable "first match"
+            // tie-break), then admit it only if it beats the best cost recorded
+            // so far at that key, or the key is new. Strictly-lower cost
+            // supersedes; equal or higher cost is dropped. This keeps the
+            // minimal-edit alignment while letting exact continuations reclaim a
+            // key a costlier path reached earlier.
+            let mut best_at_pos: FxHashMap<(StateId, usize), usize> = FxHashMap::default();
+            for (idx, thread) in next_threads.iter().enumerate() {
+                let key = (thread.state, thread.pos);
+                let cost = thread.edits.cost(1, 1, 1, 1);
+                match best_at_pos.get(&key) {
+                    Some(&existing_idx)
+                        if next_threads[existing_idx].edits.cost(1, 1, 1, 1) <= cost => {}
+                    _ => {
                         best_at_pos.insert(key, idx);
                     }
                 }
-                // Collect the best threads
-                let mut indices: Vec<_> = best_at_pos.values().copied().collect();
-                indices.sort_unstable();
-                for idx in indices {
-                    deduped.push(next_threads[idx].clone());
-                }
-            } else {
-                // Normal mode: keep first thread at each (state, pos)
-                for thread in next_threads {
-                    let key = (thread.state, thread.pos);
-                    if visited.insert(key) {
-                        deduped.push(thread);
+            }
+            let mut admitted: Vec<usize> = best_at_pos
+                .iter()
+                .filter_map(|(key, &idx)| {
+                    let cost = next_threads[idx].edits.cost(1, 1, 1, 1);
+                    match best_cost.get(key) {
+                        Some(&prev) if cost >= prev => None,
+                        _ => {
+                            best_cost.insert(*key, cost);
+                            Some(idx)
+                        }
                     }
-                }
+                })
+                .collect();
+            admitted.sort_unstable();
+            let mut deduped = Vec::with_capacity(admitted.len());
+            for idx in admitted {
+                deduped.push(next_threads[idx].clone());
             }
             next_threads = deduped;
 
