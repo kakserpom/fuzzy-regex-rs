@@ -1779,6 +1779,8 @@ pub enum State {
         min_edits: Option<u8>,
         /// Cost constraint (optional).
         cost_constraint: Option<CostConstraint>,
+        /// Restriction on characters usable for edits, e.g. `{i<=1:[ab]}`.
+        edit_chars: Option<EditCharRestriction>,
         /// Group ID for shared budget tracking across multi-piece fuzzy groups.
         fuzzy_group_id: Option<usize>,
         /// Next state after matching.

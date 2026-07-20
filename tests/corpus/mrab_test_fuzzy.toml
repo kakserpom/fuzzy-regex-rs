@@ -846,8 +846,7 @@ fuzzy_counts = [1, 0, 0]
 
 # Git issue 371: character set restriction on insertions
 [[test]]
-name = "[GAP: fuzzy over quantified class subpattern; restriction not enforced -> over-permissive] L4216 issue371 \\b(?e)(?:\\d{6,20}){i<=5:[...]}\\b no match"
-ignore = true
+name = "L4216 issue371 \\b(?e)(?:\\d{6,20}){i<=5:[...]}\\b no match (restriction enforced on class)"
 pattern = '\b(?e)(?:\d{6,20}){i<=5:[\-\\\/]}\b'
 input = "cat dog starting at 00:01132.000. hello world"
 is_match = false

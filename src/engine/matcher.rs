@@ -1601,9 +1601,14 @@ impl<'a> Matcher<'a> {
                 limits,
                 min_edits: _,
                 cost_constraint: _,
+                edit_chars,
                 fuzzy_group_id,
                 next,
             } => {
+                // A char may be used for an edit (insertion/substitution) only if
+                // there is no restriction, or the restriction allows it. mrab's
+                // `{i<=1:[ab]}` limits which characters an edit may involve.
+                let edit_allows = |c: char| edit_chars.as_ref().is_none_or(|r| r.allows(c));
                 // Calculate edit budget
                 let max_edits = limits
                     .as_ref()
@@ -1680,6 +1685,9 @@ impl<'a> Matcher<'a> {
                             let Some(tch) = text[tpos..].chars().next() else {
                                 break;
                             };
+                            if !edit_allows(tch) {
+                                break;
+                            }
                             extra_insertions += 1;
                             let acc_delta = EditCounts {
                                 insertions: base_delta.insertions + extra_insertions,
@@ -1729,6 +1737,7 @@ impl<'a> Matcher<'a> {
                         );
                     } else if current_edits < max_edits
                         && thread.edits.substitutions < max_substitutions
+                        && edit_allows(ch)
                     {
                         // Check group budget for the substitution
                         let sub_edit = EditCounts {
@@ -1790,6 +1799,7 @@ impl<'a> Matcher<'a> {
                     && current_edits < max_edits
                     && thread.edits.insertions < max_insertions
                     && let Some(ch) = text[thread.pos..].chars().next()
+                    && edit_allows(ch)
                 {
                     let ins_edit = EditCounts {
                         insertions: 1,

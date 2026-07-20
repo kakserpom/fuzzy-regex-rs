@@ -246,6 +246,7 @@ impl<'a> BacktrackMatcher<'a> {
                     limits: _,
                     min_edits: _,
                     cost_constraint: _,
+                    edit_chars: _,
                     fuzzy_group_id: _,
                     next,
                 } => {

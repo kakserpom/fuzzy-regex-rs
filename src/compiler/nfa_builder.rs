@@ -166,6 +166,7 @@ impl NfaBuilder {
                 limits,
                 min_edits,
                 cost_info,
+                edit_chars,
                 fuzzy_group_id,
             } => {
                 // Convert CostInfo to CostConstraint
@@ -176,6 +177,7 @@ impl NfaBuilder {
                     limits: limits.clone(),
                     min_edits: *min_edits,
                     cost_constraint,
+                    edit_chars: edit_chars.clone(),
                     fuzzy_group_id: *fuzzy_group_id,
                     next: 0,
                 });

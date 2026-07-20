@@ -75,6 +75,8 @@ pub enum Hir {
         min_edits: Option<u8>,
         /// Cost constraint info.
         cost_info: Option<CostInfo>,
+        /// Restriction on characters usable for edits, e.g. `{i<=1:[ab]}`.
+        edit_chars: Option<EditCharRestriction>,
         /// Group ID for shared budget tracking across multi-piece fuzzy groups.
         fuzzy_group_id: Option<usize>,
     },
@@ -806,6 +808,7 @@ impl HirLowering {
                 limits: Some(limits.clone()),
                 min_edits,
                 cost_info,
+                edit_chars,
                 fuzzy_group_id,
             },
 
