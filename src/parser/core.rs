@@ -551,6 +551,21 @@ impl<'a> Parser<'a> {
                 Ok(Ast::Empty)
             }
 
+            // A run of inline flags, e.g. `(?es)`, `(?ims)`. Apply each set flag.
+            Token::InlineFlags(f) => {
+                self.flags.best_match |= f.best_match;
+                self.flags.enhance_match |= f.enhance_match;
+                self.flags.posix |= f.posix;
+                self.flags.verbose |= f.verbose;
+                self.flags.dot_all |= f.dot_all;
+                self.flags.multi_line |= f.multi_line;
+                self.flags.ungreedy |= f.ungreedy;
+                self.flags.case_insensitive |= f.case_insensitive;
+                self.flags.global |= f.global;
+                self.flags.unicode |= f.unicode;
+                Ok(Ast::Empty)
+            }
+
             Token::OpenBracket => self.parse_char_class(),
 
             Token::Caret => Ok(Ast::Anchor(Anchor::Start)),

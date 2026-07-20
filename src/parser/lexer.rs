@@ -2,6 +2,31 @@
 
 use crate::error::{Error, Result};
 
+/// A set of inline flags parsed from a group like `(?ims)` / `(?es)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InlineFlags {
+    /// `b` - BESTMATCH.
+    pub best_match: bool,
+    /// `e` - ENHANCEMATCH.
+    pub enhance_match: bool,
+    /// `p` - POSIX leftmost-longest.
+    pub posix: bool,
+    /// `x` - verbose.
+    pub verbose: bool,
+    /// `s` - dot-all.
+    pub dot_all: bool,
+    /// `m` - multi-line.
+    pub multi_line: bool,
+    /// `U` - ungreedy.
+    pub ungreedy: bool,
+    /// `i` - case-insensitive.
+    pub case_insensitive: bool,
+    /// `g` - global.
+    pub global: bool,
+    /// `u` - unicode.
+    pub unicode: bool,
+}
+
 /// Token produced by the lexer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -83,6 +108,9 @@ pub enum Token {
     Global,
     /// `(?u)` - Unicode mode (enable Unicode character classes).
     Unicode,
+    /// A run of inline flags, e.g. `(?es)` or `(?im)`. Each `true` field sets
+    /// the corresponding flag. Single-flag groups like `(?i)` also use this.
+    InlineFlags(InlineFlags),
     /// `\K` - Reset match start (keep everything before it out of the match).
     ResetMatchStart,
     /// `(?>` - Atomic group (prevent backtracking).
@@ -307,101 +335,10 @@ impl<'a> Lexer<'a> {
                         )),
                     }
                 }
-                Some('b') => {
-                    self.next_char();
-                    // Expect closing paren for flag
-                    if self.peek_char() == Some(')') {
-                        self.next_char();
-                        Ok(Token::BestMatch)
-                    } else {
-                        Err(Error::parse(self.position, "expected ')' after '(?b'"))
-                    }
-                }
-                Some('e') => {
-                    self.next_char();
-                    // Expect closing paren for flag
-                    if self.peek_char() == Some(')') {
-                        self.next_char();
-                        Ok(Token::EnhanceMatch)
-                    } else {
-                        Err(Error::parse(self.position, "expected ')' after '(?e'"))
-                    }
-                }
-                Some('p') => {
-                    self.next_char();
-                    // Expect closing paren for flag
-                    if self.peek_char() == Some(')') {
-                        self.next_char();
-                        Ok(Token::PosixMatch)
-                    } else {
-                        Err(Error::parse(self.position, "expected ')' after '(?p'"))
-                    }
-                }
-                Some('x') => {
-                    self.next_char();
-                    if self.peek_char() == Some(')') {
-                        self.next_char();
-                        // Switch to verbose mode for subsequent tokens
-                        self.verbose = true;
-                        Ok(Token::Verbose)
-                    } else {
-                        Err(Error::parse(self.position, "expected ')' after '(?x'"))
-                    }
-                }
-                Some('s') => {
-                    self.next_char();
-                    if self.peek_char() == Some(')') {
-                        self.next_char();
-                        Ok(Token::DotAll)
-                    } else {
-                        Err(Error::parse(self.position, "expected ')' after '(?s'"))
-                    }
-                }
-                Some('m') => {
-                    self.next_char();
-                    if self.peek_char() == Some(')') {
-                        self.next_char();
-                        Ok(Token::MultiLine)
-                    } else {
-                        Err(Error::parse(self.position, "expected ')' after '(?m'"))
-                    }
-                }
-                Some('U') => {
-                    self.next_char();
-                    if self.peek_char() == Some(')') {
-                        self.next_char();
-                        Ok(Token::Ungreedy)
-                    } else {
-                        Err(Error::parse(self.position, "expected ')' after '(?U'"))
-                    }
-                }
-                Some('i') => {
-                    self.next_char();
-                    if self.peek_char() == Some(')') {
-                        self.next_char();
-                        Ok(Token::CaseInsensitive)
-                    } else {
-                        Err(Error::parse(self.position, "expected ')' after '(?i'"))
-                    }
-                }
-                Some('g') => {
-                    self.next_char();
-                    if self.peek_char() == Some(')') {
-                        self.next_char();
-                        Ok(Token::Global)
-                    } else {
-                        Err(Error::parse(self.position, "expected ')' after '(?g'"))
-                    }
-                }
-                Some('u') => {
-                    self.next_char();
-                    if self.peek_char() == Some(')') {
-                        self.next_char();
-                        Ok(Token::Unicode)
-                    } else {
-                        Err(Error::parse(self.position, "expected ')' after '(?u'"))
-                    }
-                }
+                // A run of one or more inline flags, e.g. `(?i)`, `(?es)`,
+                // `(?ims)`. Combined flags are parsed together and applied by
+                // the parser.
+                Some(c) if Self::is_inline_flag_char(c) => self.lex_flag_run(),
                 Some('>') => {
                     // Atomic group: (?>...)
                     self.next_char();
@@ -470,6 +407,57 @@ impl<'a> Lexer<'a> {
         } else {
             Ok(Token::OpenParen)
         }
+    }
+
+    /// Whether `c` is a recognized inline-flag letter.
+    /// `f` (mrab FULLCASE) is accepted but treated as a no-op: full Unicode case
+    /// folding isn't implemented, so `(?fi)` degrades to plain `(?i)`.
+    fn is_inline_flag_char(c: char) -> bool {
+        matches!(
+            c,
+            'b' | 'e' | 'p' | 'x' | 's' | 'm' | 'U' | 'i' | 'g' | 'u' | 'f'
+        )
+    }
+
+    /// Lex a run of inline flags after `(?`, e.g. `i`, `es`, `ims`, up to `)`.
+    /// The leading `(?` has been consumed; the first char is a flag letter.
+    fn lex_flag_run(&mut self) -> Result<Token> {
+        let mut flags = InlineFlags::default();
+        while let Some(c) = self.peek_char() {
+            match c {
+                'b' => flags.best_match = true,
+                'e' => flags.enhance_match = true,
+                'p' => flags.posix = true,
+                'x' => flags.verbose = true,
+                's' => flags.dot_all = true,
+                'm' => flags.multi_line = true,
+                'U' => flags.ungreedy = true,
+                'i' => flags.case_insensitive = true,
+                'g' => flags.global = true,
+                'u' => flags.unicode = true,
+                // FULLCASE: accepted, no-op (see is_inline_flag_char).
+                'f' => {}
+                ')' => {
+                    self.next_char();
+                    // Verbose must take effect for the rest of this lex pass.
+                    if flags.verbose {
+                        self.verbose = true;
+                    }
+                    return Ok(Token::InlineFlags(flags));
+                }
+                _ => {
+                    return Err(Error::parse(
+                        self.position,
+                        "unexpected character in inline flags; expected a flag or ')'",
+                    ));
+                }
+            }
+            self.next_char();
+        }
+        Err(Error::parse(
+            self.position,
+            "unterminated inline flags: expected ')'",
+        ))
     }
 
     /// Lex a named group name.

@@ -311,8 +311,7 @@ input = "www.cnn.com 64.236.16.20\nwww.slashdot.org 66.35.250.150\nFor useful in
 span = [0, 120]
 
 [[test]]
-name = "[GAP: combined inline flags / fullcase not parsed] L2728 (?es) ^.*(dot.org)e.*$"
-ignore = true
+name = "L2728 (?es) ^.*(dot.org)e.*$ (combined inline flags)"
 pattern = "(?es)^.*(?:dot.org){e}.*$"
 input = "www.cnn.com 64.236.16.20\nwww.slashdot.org 66.35.250.150\nFor useful information, use www.slashdot.org\nthis is demo data!\n"
 span = [0, 120]
@@ -523,7 +522,7 @@ is_match = true
 span = [0, 5]
 
 [[test]]
-name = "[GAP: combined inline flags / fullcase not parsed] L3578 issue147 (?fi)(?:error)e first match"
+name = "[GAP: unlimited {e} first-match span; (?fi) now parses but span diverges [0,8] vs mrab [0,5]] L3578 issue147 (?fi)(?:error)e first match"
 ignore = true
 pattern = "(?fi)(?:error){e}"
 input = "regex failure"
