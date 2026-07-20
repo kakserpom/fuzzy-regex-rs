@@ -1991,7 +1991,7 @@ impl<'a> Matcher<'a> {
                             // budget of chars right after the match, so a following
                             // literal can match past inserted chars (e.g.
                             // `t(?:es){i<=1}t` on "tesxt"). Honours `{i<=N:[...]}`.
-                            if expected_end.is_none() && self.next_consumes(*next) {
+                            if expected_end.is_none() && self.next_consumes_or_asserts(*next) {
                                 let max_ins = limits.as_ref().map_or(0u8, |l| {
                                     l.get_insertions().or_else(|| l.get_edits()).unwrap_or(0)
                                 });
@@ -1999,6 +1999,11 @@ impl<'a> Matcher<'a> {
                                 let rem_ins = max_ins.saturating_sub(result.insertions);
                                 let rem_e = max_e.saturating_sub(result.total_edits());
                                 let budget = rem_ins.min(rem_e);
+                                // Each trailing insertion lowers similarity so a
+                                // shorter, lower-edit match (e.g. the exact base
+                                // that already satisfies a following lookahead)
+                                // outranks a longer inserted one.
+                                let edit_penalty = 1.0 / (f32::from(max_e) + 1.0);
                                 let mut pos = result.end;
                                 let mut added: u8 = 0;
                                 for ch in text[result.end..].chars() {
@@ -2030,7 +2035,9 @@ impl<'a> Matcher<'a> {
                                         next_threads.push(Thread {
                                             state: *next,
                                             pos,
-                                            similarity: thread.similarity * result.similarity,
+                                            similarity: thread.similarity
+                                                * result.similarity
+                                                * (1.0 - edit_penalty).powi(i32::from(added)),
                                             edits: thread.edits.merge(&ext_edits),
                                             captures: thread.captures.clone(),
                                             match_start: thread.match_start,
@@ -2479,12 +2486,18 @@ impl<'a> Matcher<'a> {
     /// inserted chars between the fuzzy literal and that pattern are worth
     /// exploring. When the next stop is `Accept`/`$`, the base match (and, for
     /// `$`, the existing boundary path) already covers it.
-    fn next_consumes(&self, state_id: StateId) -> bool {
+    /// Whether the state following a fuzzy literal reaches a consuming state or
+    /// a forward lookaround assertion before it can accept/hit `$`. Used to gate
+    /// trailing boundary insertions: a fuzzy literal followed by `(?!\w)`/`(?=\W)`
+    /// needs to explore trailing insertions so the assertion is evaluated at the
+    /// right position (e.g. `(?:ESTONIA(?!\w)){e<=1}` matching "ESTONIAN"; issue
+    /// 247). When the next stop is `Accept`/`$`, the base match already covers it.
+    fn next_consumes_or_asserts(&self, state_id: StateId) -> bool {
         let mut visited = vec![false; self.nfa.states.len()];
-        self.next_consumes_recursive(state_id, &mut visited)
+        self.next_reaches(state_id, true, &mut visited)
     }
 
-    fn next_consumes_recursive(&self, state_id: StateId, visited: &mut Vec<bool>) -> bool {
+    fn next_reaches(&self, state_id: StateId, assert_stops: bool, visited: &mut Vec<bool>) -> bool {
         if visited[state_id] {
             return false;
         }
@@ -2497,20 +2510,24 @@ impl<'a> Matcher<'a> {
             | State::FuzzyLiteral { .. }
             | State::Backreference { .. } => true,
 
+            // Forward assertions: count as a reason to explore trailing
+            // insertions when `assert_stops` is set (see next_consumes_or_asserts).
+            State::Lookahead { next, .. } | State::LookaheadLiteral { next, .. } => {
+                assert_stops || self.next_reaches(*next, assert_stops, visited)
+            }
+
             // Non-consuming: follow through to the next state(s).
             State::CaptureStart { next, .. }
             | State::CaptureEnd { next, .. }
             | State::ResetMatchStart { next, .. }
-            | State::Lookahead { next, .. }
-            | State::LookaheadLiteral { next, .. }
             | State::Lookbehind { next, .. }
             | State::LookbehindLiteral { next, .. }
-            | State::Handler { next, .. } => self.next_consumes_recursive(*next, visited),
+            | State::Handler { next, .. } => self.next_reaches(*next, assert_stops, visited),
 
             // A non-end anchor (e.g. word boundary) doesn't consume; keep going.
             // An end anchor means no further text is consumed.
             State::Anchor { kind, next, .. } => {
-                !matches!(kind, Anchor::End) && self.next_consumes_recursive(*next, visited)
+                !matches!(kind, Anchor::End) && self.next_reaches(*next, assert_stops, visited)
             }
 
             State::Epsilon { targets }
@@ -2519,7 +2536,7 @@ impl<'a> Matcher<'a> {
             } => targets
                 .clone()
                 .into_iter()
-                .any(|t| self.next_consumes_recursive(t, visited)),
+                .any(|t| self.next_reaches(t, assert_stops, visited)),
 
             // Accept and constructs we don't reason about: treat as non-consuming.
             _ => false,

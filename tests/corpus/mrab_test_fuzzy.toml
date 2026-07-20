@@ -637,16 +637,14 @@ fuzzy_counts = [0, 8, 0]
 
 # Hg issue 247: fuzzy + lookaround; group() substring
 [[test]]
-name = "[GAP: fuzzy over subpattern with lookaround] L3934 issue247 ESTONIA(?!\\w) e<=1 -> ESTONIAN"
-ignore = true
+name = "L3934 issue247 ESTONIA(?!\\w) e<=1 -> ESTONIAN (trailing insertion before lookahead)"
 pattern = '(?:ESTONIA(?!\w)){e<=1}'
 input = "ESTONIAN WORKERS"
 is_match = true
 span = [0, 8]
 
 [[test]]
-name = "[GAP: fuzzy over subpattern with lookaround] L3936 issue247 ESTONIA(?=\\W) e<=1 -> ESTONIAN"
-ignore = true
+name = "L3936 issue247 ESTONIA(?=\\W) e<=1 -> ESTONIAN (trailing insertion before lookahead)"
 pattern = '(?:ESTONIA(?=\W)){e<=1}'
 input = "ESTONIAN WORKERS"
 is_match = true
@@ -688,32 +686,28 @@ ignore = true
 
 # Hg issue 248: fuzzy + multiple non-greedy quantifiers; group() = whole
 [[test]]
-name = "[GAP: fuzzy over subpattern with wildcard/quantifier] L3956 issue248 A.*B.*CDE e<=2"
-ignore = true
+name = "L3956 issue248 A.*B.*CDE e<=2 (fuzzy over .* subpattern)"
 pattern = "(?:A.*B.*CDE){e<=2}"
 input = "A B CYZ"
 is_match = true
 span = [0, 7]
 
 [[test]]
-name = "[GAP: fuzzy over subpattern with wildcard/quantifier] L3958 issue248 A.*B.*?CDE e<=2"
-ignore = true
+name = "L3958 issue248 A.*B.*?CDE e<=2 (fuzzy over .* subpattern)"
 pattern = "(?:A.*B.*?CDE){e<=2}"
 input = "A B CYZ"
 is_match = true
 span = [0, 7]
 
 [[test]]
-name = "[GAP: fuzzy over subpattern with wildcard/quantifier] L3960 issue248 A.*?B.*CDE e<=2"
-ignore = true
+name = "L3960 issue248 A.*?B.*CDE e<=2 (fuzzy over .* subpattern)"
 pattern = "(?:A.*?B.*CDE){e<=2}"
 input = "A B CYZ"
 is_match = true
 span = [0, 7]
 
 [[test]]
-name = "[GAP: fuzzy over subpattern with wildcard/quantifier] L3962 issue248 A.*?B.*?CDE e<=2"
-ignore = true
+name = "L3962 issue248 A.*?B.*?CDE e<=2 (fuzzy over .* subpattern)"
 pattern = "(?:A.*?B.*?CDE){e<=2}"
 input = "A B CYZ"
 is_match = true
