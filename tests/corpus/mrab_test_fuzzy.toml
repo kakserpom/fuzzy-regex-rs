@@ -932,8 +932,7 @@ span = [0, 50]
 
 # Git issue 433: fuzzy_counts vs fuzzy_changes (match + BESTMATCH -> (?b)^)
 [[test]]
-name = "[GAP: BESTMATCH not minimizing insertions] L4282 issue433 anchor/umi/sid BESTMATCH fuzzy_counts exact"
-ignore = true
+name = "L4282 issue433 anchor/umi/sid BESTMATCH fuzzy_counts exact"
 pattern = "(?b)^(?:.*)(?:AACACTGG){e<=1}(?:(?:[AT][CG]){5}){e<=2}(?:GTAACCGAAG){e<=2}(?:(?:[ACGT]){0,6}$)"
 input = "GGAAAACACTGGTCTCAGTCTCGTAACCGAAGTGGTCG"
 fuzzy_counts = [0, 0, 0]
@@ -944,8 +943,7 @@ pattern = "(?b)^(?:.*)(?:AACACTGG){e<=1}(?:(?:[AT][CG]){5}){e<=2}(?:GTAACCGAAG){
 ignore = true
 
 [[test]]
-name = "[GAP: BESTMATCH not minimizing insertions] L4287 issue433 anchor/umi/sid BESTMATCH fuzzy_counts subs"
-ignore = true
+name = "L4287 issue433 anchor/umi/sid BESTMATCH fuzzy_counts subs"
 pattern = "(?b)^(?:.*)(?:AACACTGG){e<=1}(?:(?:[AT][CG]){5}){e<=2}(?:GTAACCGAAG){e<=2}(?:(?:[ACGT]){0,6}$)"
 input = "GGAAAACACTGGTCTCAGTCTCGTCCCCGAAGTGGTCG"
 fuzzy_counts = [2, 0, 0]
