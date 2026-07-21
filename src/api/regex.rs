@@ -53,6 +53,9 @@ use crate::parser::{Anchor, Ast, parse_with_flags};
 pub struct FuzzyRegex {
     /// Original pattern string.
     pattern: String,
+    /// Parsed AST before `\L<name>` expansion. Retained so `set_word_list` can
+    /// re-expand named lists into alternations and rebuild the compiled struct.
+    base_ast: Ast,
     /// Compiled NFA.
     nfa: Nfa,
     /// Fuzzy bridge for literal matching.
@@ -195,6 +198,30 @@ impl FuzzyRegex {
         if result.flags.unicode {
             config.match_flags.unicode = true;
         }
+
+        Ok(Self::assemble(pattern, config, ast, FxHashMap::default()))
+    }
+
+    /// Build a `FuzzyRegex` from a parsed base AST and the current word lists.
+    ///
+    /// Any resolved `\L<name>` reference is expanded into an alternation of its
+    /// words (inside its original fuzzy group) so the named list becomes a
+    /// first-class part of the NFA and is matched uniformly by every engine path
+    /// (`find`, `find_iter`, `captures`, `find_at`, …). Unresolved or empty lists
+    /// are left as placeholders; the entry points short-circuit them to no match.
+    ///
+    /// Called by `compile` (empty word lists) and by `set_word_list` (after a
+    /// list is added), so all the compile-time analysis below runs against the
+    /// expanded pattern.
+    fn assemble(
+        pattern: String,
+        config: RegexConfig,
+        base_ast: Ast,
+        word_lists: FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
+    ) -> Self {
+        // Expand resolved \L<name> references into (?:w1|w2|...) alternations,
+        // preserving each reference's wrapping group fuzziness.
+        let ast = expand_named_lists_ast(&base_ast, &word_lists);
 
         // Count captures and collect named groups
         let (capture_count, named_groups) = collect_captures(&ast);
@@ -443,8 +470,9 @@ impl FuzzyRegex {
             None
         };
 
-        Ok(FuzzyRegex {
+        FuzzyRegex {
             pattern,
+            base_ast,
             nfa,
             fuzzy_bridge,
             literals,
@@ -480,10 +508,10 @@ impl FuzzyRegex {
             fast_path_repeated_literal,
             lookbehind_fast,
             lookahead_fast,
-            word_lists: FxHashMap::default(),
+            word_lists,
             named_list_names,
             handlers: config.handlers,
-        })
+        }
     }
 
     /// Whether the pattern references a `\L<name>` list that has not yet been
@@ -494,7 +522,7 @@ impl FuzzyRegex {
     fn has_unresolved_named_lists(&self) -> bool {
         self.named_list_names
             .iter()
-            .any(|name| !self.word_lists.contains_key(name))
+            .any(|name| self.word_lists.get(name).is_none_or(Vec::is_empty))
     }
 
     /// Get the original pattern string.
@@ -579,8 +607,16 @@ impl FuzzyRegex {
         name: impl Into<SmartStr>,
         words: Vec<impl Into<Cow<'static, str>>>,
     ) {
-        self.word_lists
-            .insert(name.into(), words.into_iter().map(Into::into).collect());
+        let mut word_lists = self.word_lists.clone();
+        word_lists.insert(name.into(), words.into_iter().map(Into::into).collect());
+        // Rebuild the compiled struct so the resolved list is expanded into the
+        // NFA and matched uniformly by every engine path.
+        *self = Self::assemble(
+            self.pattern.clone(),
+            self.config.clone(),
+            self.base_ast.clone(),
+            word_lists,
+        );
     }
 
     /// Get a named word list.
@@ -1220,11 +1256,6 @@ impl FuzzyRegex {
         }
         */
 
-        // Word list fast path: handle \L<name> patterns
-        if !self.word_lists.is_empty() {
-            return self.find_word_list_first(text, self.config.similarity_threshold);
-        }
-
         // Fast path for simple fuzzy patterns (single pattern only)
         // Note: We don't use fast path for alternation patterns because the
         // NFA-based matching produces different (more correct) results than
@@ -1369,323 +1400,6 @@ impl FuzzyRegex {
         longest
     }
 
-    /// Find first match against word lists (for \L<name> patterns).
-    /// This is a simple implementation that iterates over word lists.
-    fn find_word_list_first<'a>(&self, text: &'a str, threshold: f32) -> Option<Match<'a>> {
-        if self.word_lists.is_empty() {
-            return None;
-        }
-
-        // Get edit limits from the bridge if available
-        let max_edits = self
-            .fuzzy_bridge
-            .as_ref()
-            .and_then(|b| b.limits().first())
-            .and_then(|l| l.as_ref())
-            .and_then(super::super::types::FuzzyLimits::get_edits)
-            .unwrap_or(1) as usize;
-
-        // Build set of first characters from all words for quick filtering
-        let first_chars: std::collections::HashSet<char> = self
-            .word_lists
-            .values()
-            .flat_map(|words| words.iter().filter_map(|w| w.chars().next()))
-            .collect();
-
-        // Quick check: if none of the first chars are in text, return early
-        let has_candidate = text.chars().any(|c| first_chars.contains(&c));
-        if !has_candidate {
-            return None;
-        }
-
-        // Search against all words in all word lists
-        let mut best_match: Option<(usize, usize, f32, crate::engine::EditCounts)> = None;
-
-        for words in self.word_lists.values() {
-            for word in words {
-                let pattern_len = word.len();
-                if pattern_len == 0 {
-                    continue;
-                }
-
-                // Quick filter: skip if first char not in text
-                if let Some(first) = word.chars().next()
-                    && !text.contains(first)
-                {
-                    continue;
-                }
-
-                // Simple substring search first (exact match)
-                if let Some(pos) = text.find(AsRef::<str>::as_ref(word)) {
-                    let end = pos + pattern_len;
-                    // Exact match - similarity = 1.0
-                    if threshold <= 1.0 && end > pos {
-                        return Some(Match::new(
-                            text,
-                            pos,
-                            end,
-                            1.0,
-                            crate::engine::EditCounts::default(),
-                        ));
-                    }
-                } else if max_edits > 0 {
-                    // Fuzzy match - iterate through all positions in text and check edit distance
-                    let start_max = text
-                        .len()
-                        .saturating_sub(pattern_len.saturating_sub(max_edits));
-
-                    for start in 0..=start_max {
-                        let max_end = (start + pattern_len + max_edits).min(text.len());
-                        let min_end =
-                            (start + pattern_len.saturating_sub(max_edits)).max(start + 1);
-
-                        for end in min_end..=max_end {
-                            let substr = &text[start..end];
-                            if substr.is_empty() {
-                                continue;
-                            }
-                            let edits = simple_levenshtein(word, substr);
-                            if edits <= max_edits as u32 && edits > 0 {
-                                let sim =
-                                    1.0 - (edits as f32 / pattern_len.max(substr.len()) as f32);
-                                if sim >= threshold {
-                                    match &best_match {
-                                        None => {
-                                            best_match = Some((
-                                                start,
-                                                end,
-                                                sim,
-                                                crate::engine::EditCounts {
-                                                    insertions: if substr.len() > pattern_len {
-                                                        (substr.len() - pattern_len) as u8
-                                                    } else {
-                                                        0
-                                                    },
-                                                    deletions: if pattern_len > substr.len() {
-                                                        (pattern_len - substr.len()) as u8
-                                                    } else {
-                                                        0
-                                                    },
-                                                    substitutions: edits.min(pattern_len as u32)
-                                                        as u8,
-                                                    swaps: 0,
-                                                },
-                                            ));
-                                        }
-                                        Some((_, _, best_sim, _)) if sim > *best_sim => {
-                                            best_match = Some((
-                                                start,
-                                                end,
-                                                sim,
-                                                crate::engine::EditCounts {
-                                                    insertions: if substr.len() > pattern_len {
-                                                        (substr.len() - pattern_len) as u8
-                                                    } else {
-                                                        0
-                                                    },
-                                                    deletions: if pattern_len > substr.len() {
-                                                        (pattern_len - substr.len()) as u8
-                                                    } else {
-                                                        0
-                                                    },
-                                                    substitutions: edits.min(pattern_len as u32)
-                                                        as u8,
-                                                    swaps: 0,
-                                                },
-                                            ));
-                                        }
-                                        _ => {}
-                                    }
-                                    // Early termination on perfect match
-                                    if sim >= 1.0 {
-                                        return best_match.map(|(start, end, sim, edits)| {
-                                            Match::new(text, start, end, sim, edits)
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        best_match.map(|(start, end, sim, edits)| Match::new(text, start, end, sim, edits))
-    }
-
-    /// Find all non-overlapping matches using word lists.
-    fn find_all_word_list<'a>(&self, text: &'a str) -> Vec<Match<'a>> {
-        if self.word_lists.is_empty() {
-            return Vec::new();
-        }
-
-        let threshold = self.config.similarity_threshold;
-
-        // Get edit limits from the bridge if available
-        let max_edits = self
-            .fuzzy_bridge
-            .as_ref()
-            .and_then(|b| b.limits().first())
-            .and_then(|l| l.as_ref())
-            .and_then(super::super::types::FuzzyLimits::get_edits)
-            .unwrap_or(1) as usize;
-
-        // Build set of first characters from all words for quick filtering
-        let first_chars: std::collections::HashSet<char> = self
-            .word_lists
-            .values()
-            .flat_map(|words| words.iter().filter_map(|w| w.chars().next()))
-            .collect();
-
-        // Quick check: if none of the first chars are in text, return early
-        let has_candidate = text.chars().any(|c| first_chars.contains(&c));
-        if !has_candidate {
-            return Vec::new();
-        }
-
-        let mut matches = Vec::new();
-        let mut last_end = 0;
-
-        // Search for matches, advancing past each found match
-        while last_end < text.len() {
-            let search_text = &text[last_end..];
-            let mut found_match: Option<(usize, usize, f32, crate::engine::EditCounts)> = None;
-            let mut found_exact_match: Option<(usize, usize)> = None;
-
-            for words in self.word_lists.values() {
-                for word in words {
-                    let pattern_len = word.len();
-                    if pattern_len == 0 {
-                        continue;
-                    }
-
-                    // Quick filter: skip if first char not in search_text
-                    if let Some(first) = word.chars().next()
-                        && !search_text.contains(first)
-                    {
-                        continue;
-                    }
-
-                    // Exact match
-                    if let Some(pos) = search_text.find(AsRef::<str>::as_ref(word)) {
-                        let end = pos + pattern_len;
-                        if end > pos {
-                            // Store the earliest exact match
-                            match found_exact_match {
-                                None => {
-                                    found_exact_match = Some((pos, end));
-                                }
-                                Some((existing_pos, _)) if pos < existing_pos => {
-                                    found_exact_match = Some((pos, end));
-                                }
-                                _ => {}
-                            }
-                        }
-                    } else if max_edits > 0 {
-                        // Fuzzy match
-                        let start_max = search_text
-                            .len()
-                            .saturating_sub(pattern_len.saturating_sub(max_edits));
-
-                        for start in 0..=start_max {
-                            let max_end = (start + pattern_len + max_edits).min(search_text.len());
-                            let min_end =
-                                (start + pattern_len.saturating_sub(max_edits)).max(start + 1);
-
-                            for end in min_end..=max_end {
-                                let substr = &search_text[start..end];
-                                if substr.is_empty() {
-                                    continue;
-                                }
-                                let edits = simple_levenshtein(word, substr);
-                                if edits <= max_edits as u32 && edits > 0 {
-                                    let sim =
-                                        1.0 - (edits as f32 / pattern_len.max(substr.len()) as f32);
-                                    if sim >= threshold {
-                                        match &found_match {
-                                            None => {
-                                                found_match = Some((
-                                                    start,
-                                                    end,
-                                                    sim,
-                                                    crate::engine::EditCounts {
-                                                        insertions: if substr.len() > pattern_len {
-                                                            (substr.len() - pattern_len) as u8
-                                                        } else {
-                                                            0
-                                                        },
-                                                        deletions: if pattern_len > substr.len() {
-                                                            (pattern_len - substr.len()) as u8
-                                                        } else {
-                                                            0
-                                                        },
-                                                        substitutions: edits.min(pattern_len as u32)
-                                                            as u8,
-                                                        swaps: 0,
-                                                    },
-                                                ));
-                                            }
-                                            Some((_, _, best_sim, _)) if sim > *best_sim => {
-                                                found_match = Some((
-                                                    start,
-                                                    end,
-                                                    sim,
-                                                    crate::engine::EditCounts {
-                                                        insertions: if substr.len() > pattern_len {
-                                                            (substr.len() - pattern_len) as u8
-                                                        } else {
-                                                            0
-                                                        },
-                                                        deletions: if pattern_len > substr.len() {
-                                                            (pattern_len - substr.len()) as u8
-                                                        } else {
-                                                            0
-                                                        },
-                                                        substitutions: edits.min(pattern_len as u32)
-                                                            as u8,
-                                                        swaps: 0,
-                                                    },
-                                                ));
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if let Some((pos, end)) = found_exact_match {
-                let abs_start = last_end + pos;
-                let abs_end = last_end + end;
-                matches.push(Match::new(
-                    text,
-                    abs_start,
-                    abs_end,
-                    1.0,
-                    crate::engine::EditCounts::default(),
-                ));
-                last_end = abs_end.max(abs_start + 1);
-                continue;
-            }
-
-            if let Some((start, end, sim, edits)) = found_match {
-                let abs_start = last_end + start;
-                let abs_end = last_end + end;
-                matches.push(Match::new(text, abs_start, abs_end, sim, edits));
-                // Move past this match (at least 1 character)
-                last_end = abs_end.max(abs_start + 1);
-            } else {
-                // No more matches found
-                break;
-            }
-        }
-
-        matches
-    }
-
     /// Internal single-match find using Matcher.
     /// Used by `find_iter` for anchored patterns to avoid infinite recursion.
     fn find_single_matcher<'t>(&self, text: &'t str) -> Option<Match<'t>> {
@@ -1716,11 +1430,6 @@ impl FuzzyRegex {
         // Unresolved \L<name> matches nothing.
         if self.has_unresolved_named_lists() {
             return None;
-        }
-        // Resolved \L<name>: match via the word-list path (the NFA does not
-        // expand named lists), consistent with `find`.
-        if !self.word_lists.is_empty() {
-            return self.word_list_match_at(text, start);
         }
         // For patterns anchored at start (not multiline), only match at position 0
         if self.anchored && !self.config.multi_line && start > 0 {
@@ -1900,10 +1609,6 @@ impl FuzzyRegex {
         // Unresolved \L<name> matches nothing.
         if self.has_unresolved_named_lists() {
             return Matches::new(Vec::new());
-        }
-        // Word list fast path: handle \L<name> patterns
-        if !self.word_lists.is_empty() {
-            return Matches::new(self.find_all_word_list(text));
         }
 
         // Fast path for simple exact literal patterns: use lazy iterator
@@ -3158,14 +2863,6 @@ impl FuzzyRegex {
         if self.has_unresolved_named_lists() {
             return Vec::new();
         }
-        // Resolved \L<name>: match via the word-list path (see `captures`).
-        if !self.word_lists.is_empty() {
-            return self
-                .find_all_word_list(text)
-                .iter()
-                .map(|m| self.word_list_captures(text, m))
-                .collect();
-        }
         let matcher = self.create_matcher(self.is_unanchored());
         let mut results = Vec::new();
 
@@ -3209,13 +2906,6 @@ impl FuzzyRegex {
         if self.has_unresolved_named_lists() {
             return None;
         }
-        // Resolved \L<name>: the NFA does not expand named lists, so match via
-        // the word-list path (consistent with `find`) and build group-0 captures.
-        if !self.word_lists.is_empty() {
-            return self
-                .word_list_match_at(text, 0)
-                .map(|m| self.word_list_captures(text, &m));
-        }
         let matcher = self.create_matcher(self.is_unanchored());
         matcher.find(text).map(|m| self.convert_captures(text, m))
     }
@@ -3225,12 +2915,6 @@ impl FuzzyRegex {
         // Unresolved \L<name> matches nothing.
         if self.has_unresolved_named_lists() {
             return None;
-        }
-        // Resolved \L<name>: match via the word-list path (see `captures`).
-        if !self.word_lists.is_empty() {
-            return self
-                .word_list_match_at(text, start)
-                .map(|m| self.word_list_captures(text, &m));
         }
         let matcher = self.create_matcher(self.is_unanchored());
         for (idx, _) in text[start..].char_indices() {
@@ -3509,40 +3193,6 @@ impl FuzzyRegex {
         )
     }
 
-    /// Convert internal match result to Captures type.
-    /// Leftmost word-list match at or after byte offset `start`, in absolute
-    /// coordinates. Used by the capture / `find_at` entry points when a
-    /// `\L<name>` list is resolved, so they stay consistent with `find` (whose
-    /// word-list fast path bypasses the NFA — which does not expand named lists).
-    fn word_list_match_at<'t>(&self, text: &'t str, start: usize) -> Option<Match<'t>> {
-        if start > text.len() {
-            return None;
-        }
-        let m = self.find_word_list_first(&text[start..], self.config.similarity_threshold)?;
-        Some(Match::new(
-            text,
-            start + m.start(),
-            start + m.end(),
-            m.similarity(),
-            m.edits().clone(),
-        ))
-    }
-
-    /// Build `Captures` from a word-list `Match`. The word-list matcher produces
-    /// no sub-captures, so only group 0 (the whole match) is populated.
-    fn word_list_captures<'t>(&self, text: &'t str, m: &Match<'t>) -> Captures<'t> {
-        let mut slots = vec![None; self.capture_count + 1];
-        slots[0] = Some((m.start(), m.end()));
-        Captures::new(
-            text,
-            self.named_groups.clone(),
-            slots,
-            Vec::new(),
-            m.edits().clone(),
-            m.similarity(),
-        )
-    }
-
     fn convert_captures<'t>(&self, text: &'t str, result: MatchResult) -> Captures<'t> {
         let slots: Vec<Option<(usize, usize)>> = result.captures.slots().to_vec();
 
@@ -3670,9 +3320,78 @@ impl FuzzyRegex {
 
 impl Clone for FuzzyRegex {
     fn clone(&self) -> Self {
-        // Re-compile from pattern since some internal structures aren't Clone
-        Self::compile(self.pattern.clone(), self.config.clone())
-            .expect("re-compilation of valid pattern should not fail")
+        // Rebuild from the stored base AST since some internal structures aren't
+        // Clone. Passing the current word lists preserves any resolved
+        // `\L<name>` expansions (a plain re-compile from the pattern would lose
+        // them).
+        Self::assemble(
+            self.pattern.clone(),
+            self.config.clone(),
+            self.base_ast.clone(),
+            self.word_lists.clone(),
+        )
+    }
+}
+
+/// Expand every resolved `\L<name>` reference in the AST into an alternation of
+/// its words (`(?:w1|w2|...)`), matched as literal strings. The reference's
+/// wrapping non-capturing group (which carries any `{e<=1}` fuzziness) is left in
+/// place, so the words inherit that fuzziness through normal lowering.
+///
+/// Unresolved names, and names bound to an empty list, are left as
+/// `Ast::NamedList` placeholders; the match entry points short-circuit those to
+/// "no match" via [`FuzzyRegex::has_unresolved_named_lists`].
+fn expand_named_lists_ast(
+    ast: &Ast,
+    word_lists: &FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
+) -> Ast {
+    let recur = |a: &Ast| Box::new(expand_named_lists_ast(a, word_lists));
+    match ast {
+        Ast::NamedList { name } => match word_lists.get(name.as_str()) {
+            Some(words) if !words.is_empty() => {
+                Ast::Alternation(words.iter().map(|w| Ast::literal(w.as_ref())).collect())
+            }
+            _ => ast.clone(),
+        },
+        Ast::Concat(parts) => Ast::Concat(
+            parts
+                .iter()
+                .map(|p| expand_named_lists_ast(p, word_lists))
+                .collect(),
+        ),
+        Ast::Alternation(alts) => Ast::Alternation(
+            alts.iter()
+                .map(|a| expand_named_lists_ast(a, word_lists))
+                .collect(),
+        ),
+        Ast::Quantified {
+            expr,
+            quantifier,
+            greedy,
+        } => Ast::Quantified {
+            expr: recur(expr),
+            quantifier: *quantifier,
+            greedy: *greedy,
+        },
+        Ast::Group { index, name, expr } => Ast::Group {
+            index: *index,
+            name: name.clone(),
+            expr: recur(expr),
+        },
+        Ast::NonCapturingGroup { expr, fuzziness } => Ast::NonCapturingGroup {
+            expr: recur(expr),
+            fuzziness: fuzziness.clone(),
+        },
+        Ast::Lookahead { positive, expr } => Ast::Lookahead {
+            positive: *positive,
+            expr: recur(expr),
+        },
+        Ast::Lookbehind { positive, expr } => Ast::Lookbehind {
+            positive: *positive,
+            expr: recur(expr),
+        },
+        Ast::AtomicGroup { expr } => Ast::AtomicGroup { expr: recur(expr) },
+        other => other.clone(),
     }
 }
 
@@ -4007,45 +3726,6 @@ fn hir_greedy_prefix_min(hir: &Hir) -> usize {
         }
         _ => 0,
     }
-}
-
-/// Compute simple Levenshtein distance between two strings.
-fn simple_levenshtein(a: &str, b: &str) -> u32 {
-    let a_len = a.len();
-    let b_len = b.len();
-
-    if a_len == 0 {
-        return b_len as u32;
-    }
-    if b_len == 0 {
-        return a_len as u32;
-    }
-
-    // For small strings, use full matrix
-    if a_len <= 100 && b_len <= 100 {
-        let mut matrix = vec![vec![0u32; b_len + 1]; a_len + 1];
-
-        for i in 0..=a_len {
-            matrix[i][0] = i as u32;
-        }
-        for j in 0..=b_len {
-            matrix[0][j] = j as u32;
-        }
-
-        for i in 1..=a_len {
-            for j in 1..=b_len {
-                let cost = u32::from(a.as_bytes()[i - 1] != b.as_bytes()[j - 1]);
-                matrix[i][j] = (matrix[i - 1][j] + 1) // deletion
-                    .min(matrix[i][j - 1] + 1) // insertion
-                    .min(matrix[i - 1][j - 1] + cost); // substitution
-            }
-        }
-
-        return matrix[a_len][b_len];
-    }
-
-    // For longer strings, use a simpler bound estimate
-    (a_len as i32 - b_len as i32).unsigned_abs()
 }
 
 #[cfg(test)]

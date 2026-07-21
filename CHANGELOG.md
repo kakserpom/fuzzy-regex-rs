@@ -50,11 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlapping variants) now short-circuit to no match when any referenced
   `\L<name>` is still unresolved. Once the list is set via `set_word_list`,
   matching works as before.
-- `captures`, `captures_at`, `captures_all_overlapping`, and `find_at` returned
-  no match for `\L<name>` patterns even when the word list was resolved, because
-  they use the NFA path (which does not expand named lists) rather than the
-  word-list matcher that `find`/`find_iter` use. They are now word-list-aware and
-  return the matched word (group 0), consistent with `find`.
+- Full, uniform `\L<name>` named-list support. Previously named lists were
+  matched by a bespoke substring/Levenshtein matcher used only by `find`/
+  `find_iter`, so it ignored surrounding anchors (`\b\L<w>\b` matched inside a
+  word), produced no sub-captures, could not handle `\L` embedded in a larger
+  pattern, and left `captures`/`find_at` returning no match. `set_word_list` now
+  expands each resolved `\L<name>` into a real NFA alternation of its words
+  (inside the reference's fuzzy group) and rebuilds the compiled automaton, so
+  the named list is matched by the normal engine on every path. As a result:
+  surrounding anchors are honored, capture groups around/near `\L` work, `\L`
+  composes inside larger patterns (`(\w+)=\L<v>`), fuzzy edits apply to the
+  alternation (`\L<w>{e<=1}`), and `find`/`find_iter`/`captures`/`find_at` are
+  all consistent. `clone` now also preserves resolved word lists (it previously
+  re-compiled from the pattern and dropped them). Note: expanding a very large
+  word list produces a correspondingly large alternation; matching stays correct
+  but is no longer served by the previous bespoke fast path.
 - `find()` fast-path hijacking: the specialized linear-scan "shape" fast paths
   (currency, class-plus-with-literal, digit-sequence-with-separator) grabbed
   complex anchored or group-repeating patterns they cannot handle and returned

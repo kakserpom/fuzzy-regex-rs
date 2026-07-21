@@ -284,12 +284,14 @@ fn resolved_named_list_captures_match_find() {
     assert!(re.captures_at(text, 0).is_some());
     assert!(re.captures_at(text, 5).is_none(), "nothing after index 5");
 
-    // find_at consistent with captures_at
+    // find_at anchors the match at `start` (it does not scan forward — this is
+    // find_at's contract for every pattern, and \L is now consistent with it):
+    // nothing matches AT position 0, but the word matches AT position 2.
+    assert!(re.find_at(text, 0).is_none());
     assert_eq!(
-        re.find_at(text, 0).map(|m| (m.start(), m.end())),
+        re.find_at(text, 2).map(|m| (m.start(), m.end())),
         Some((2, 5))
     );
-    assert!(re.find_at(text, 5).is_none());
 
     // captures_all_overlapping finds every word occurrence
     let all = re.captures_all_overlapping("dog cat", 0.0);
@@ -297,4 +299,52 @@ fn resolved_named_list_captures_match_find() {
 
     // No match still yields no captures.
     assert!(re.captures("a cow x").is_none());
+}
+
+/// `\L<name>` is expanded into a real NFA alternation on `set_word_list`, so it
+/// composes correctly with the rest of the pattern: surrounding anchors are
+/// honored, it can appear inside a larger pattern, sub-captures work, and a
+/// clone preserves the resolved list.
+#[test]
+fn named_list_expands_into_nfa_alternation() {
+    // Surrounding \b anchors are honored (the old bespoke matcher ignored them).
+    let mut re = FuzzyRegex::new(r"\b\L<w>\b").unwrap();
+    re.set_word_list("w", vec!["dog", "cat"]);
+    assert_eq!(
+        re.find("a dog x").map(|m| (m.start(), m.end())),
+        Some((2, 5))
+    );
+    assert!(re.find("adogx").is_none(), "\\b must be honored");
+
+    // \L embedded in a larger pattern, with a capture group around other parts.
+    let mut kv = FuzzyRegex::new(r"(\w+)=\L<v>").unwrap();
+    kv.set_word_list("v", vec!["on", "off"]);
+    let caps = kv.captures("mode=off").expect("should match");
+    assert_eq!(
+        caps.get(0).map(|m| m.as_str().to_string()),
+        Some("mode=off".into())
+    );
+    assert_eq!(
+        caps.get(1).map(|m| m.as_str().to_string()),
+        Some("mode".into())
+    );
+    assert!(kv.find("mode=blue").is_none(), "blue not in list");
+
+    // Fuzzy over the alternation.
+    let mut fz = FuzzyRegex::new(r"\b\L<w>{e<=1}\b").unwrap();
+    fz.set_word_list("w", vec!["dog", "cat"]);
+    assert!(fz.is_match("cot")); // 1 sub from cat
+
+    // Clone preserves the resolved list (previously a clone re-compiled from the
+    // pattern and dropped the word list).
+    let cloned = re.clone();
+    assert_eq!(
+        cloned.find("a cat y").map(|m| (m.start(), m.end())),
+        Some((2, 5))
+    );
+
+    // An empty list is treated as unresolved (matches nothing).
+    let mut empty = FuzzyRegex::new(r"\L<w>").unwrap();
+    empty.set_word_list("w", Vec::<&str>::new());
+    assert!(!empty.is_match("dog"));
 }
