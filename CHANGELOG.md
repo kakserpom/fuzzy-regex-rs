@@ -54,6 +54,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The exact-alternation Aho-Corasick fast path (behind the `fuzzy-aho-corasick`
+  feature) used `MatchKind::LeftmostFirst`, which returns the earliest-listed
+  branch rather than the longest, so it disagreed with the engine's
+  leftmost-longest semantics — e.g. `(?:cat|cats)` on `"cats"` returned `"cat"`
+  with the feature enabled instead of `"cats"`. It now uses
+  `MatchKind::LeftmostLongest`, matching the NFA. (Default builds were
+  unaffected; the feature is off by default.)
 - Unresolved `\L<name>` named-list references matched the empty string everywhere
   instead of matching nothing. `\L<name>` compiles to a placeholder resolved
   later via `set_word_list`; until a list was provided it lowered to an empty

@@ -477,8 +477,12 @@ impl FuzzyRegex {
                     .map(|lit| lit.text.as_str())
                     .collect::<Vec<_>>();
                 if patterns.len() >= 2 {
+                    // LeftmostLongest matches the engine's alternation semantics
+                    // (`(?:cat|cats)` on "cats" -> "cats"); LeftmostFirst would
+                    // return the earliest-listed branch instead and disagree with
+                    // the NFA.
                     AhoCorasick::builder()
-                        .match_kind(aho_corasick::MatchKind::LeftmostFirst)
+                        .match_kind(aho_corasick::MatchKind::LeftmostLongest)
                         .build(&patterns)
                         .ok()
                 } else {
