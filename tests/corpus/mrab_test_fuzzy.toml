@@ -7,12 +7,14 @@ description = "Ported from mrab-regex tests/test_regex.py fuzzy assertions"
 [[test]]
 name = "L654 word e<=3 with fuzzy lookbehind (V0)"
 pattern = '(?iV0)\m(?:word){e<=3}\M(?<!\m(?:word){e<=1}\M)'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors ()
 
 [[test]]
 name = "L657 word e<=3 with fuzzy lookbehind (V1) - fuzzy inside lookbehind + \\m/\\M unsupported"
 pattern = '(?iV1)\m(?:word){e<=3}\M(?<!\m(?:word){e<=1}\M)'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (fuzzy inside lookbehind + \\m/\\M unsupported)
 
 # ---------------------------------------------------------------------------
 # def test_fuzzy (L2612-2803)
@@ -22,26 +24,32 @@ ignore = true
 [[test]]
 name = "L2614 compile (fou){s,e<=1}"
 pattern = "(?:fou){s,e<=1}"
+compiles = true
 
 [[test]]
 name = "L2616 compile (fuu){s}"
 pattern = "(?:fuu){s}"
+compiles = true
 
 [[test]]
 name = "L2618 compile (fuu){s,e}"
 pattern = "(?:fuu){s,e}"
+compiles = true
 
 [[test]]
 name = "L2620 compile (anaconda){1i+1d<1,s<=1}"
 pattern = "(?:anaconda){1i+1d<1,s<=1}"
+compiles = true
 
 [[test]]
 name = "L2622 compile (anaconda){1i+1d<1,s<=1,e<=10}"
 pattern = "(?:anaconda){1i+1d<1,s<=1,e<=10}"
+compiles = true
 
 [[test]]
 name = "L2624 compile (anaconda){s<=1,e<=1,1i+1d<1}"
 pattern = "(?:anaconda){s<=1,e<=1,1i+1d<1}"
+compiles = true
 
 # text = 'molasses anaconda foo bar baz smith anderson '
 [[test]]
@@ -118,6 +126,7 @@ span = [9, 10]
 [[test]]
 name = "L2652 compile (approximate){s<=3,1i+1d<3}"
 pattern = "(?:approximate){s<=3,1i+1d<3}"
+compiles = true
 
 # No cost limit
 [[test]]
@@ -327,78 +336,85 @@ span = [0, 119]
 [[test]]
 name = "L2735 \\L<words> e<=1 - named word list unsupported"
 pattern = '\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
+ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
 
 [[test]]
 name = "L2737 \\L<words> e<=1 (2) - named word list unsupported"
 pattern = '\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
+ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
 
 [[test]]
 name = "L2739 (?e) \\L<words> e<=1 - named word list unsupported"
 pattern = '(?e)\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
+ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
 
 [[test]]
 name = "L2741 (?r) \\L<words> e<=1 - named word list + reverse unsupported"
 pattern = '(?r)\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
 
 [[test]]
 name = "L2743 (?er) \\L<words> e<=1 - named word list + reverse unsupported"
 pattern = '(?er)\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
 
 [[test]]
 name = "L2745 (?r) \\L<words> e<=1 (2) - named word list + reverse unsupported"
 pattern = '(?r)\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
 
 [[test]]
 name = "L2747 br \\L<words> e<=1 - byte pattern + named word list unsupported"
 pattern = '\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
+ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
 
 [[test]]
 name = "L2749 br \\L<words> e<=1 (2) - byte pattern + named word list unsupported"
 pattern = '\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
+ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
 
 [[test]]
 name = "L2751 br (?e) \\L<words> e<=1 - byte pattern + named word list unsupported"
 pattern = '(?e)\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
+ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
 
 [[test]]
 name = "L2753 br (?r) \\L<words> e<=1 - byte pattern + word list + reverse unsupported"
 pattern = '(?r)\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
 
 [[test]]
 name = "L2755 br (?er) \\L<words> e<=1 - byte pattern + word list + reverse unsupported"
 pattern = '(?er)\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
 
 [[test]]
 name = "L2757 br (?r) \\L<words> e<=1 (2) - byte pattern + word list + reverse unsupported"
 pattern = '(?r)\b\L<words>{e<=1}\b'
-ignore = true
+expect_error = true
 
 # Backreference inside fuzzy (unsupported)
 [[test]]
 name = "L2760 (\\w+) (\\1 e<=1) - backreference inside fuzzy unsupported"
 pattern = '(\w+) (\1{e<=1})'
-ignore = true
+compiles = true
 
 [[test]]
 name = "L2762 (?r) (\\2 e<=1) (\\w+) - backreference + reverse unsupported"
 pattern = '(?r)(\2{e<=1}) (\w+)'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + reverse unsupported)
 
 [[test]]
 name = "L2764 br (\\w+) (\\1 e<=1) - byte pattern + backreference unsupported"
 pattern = '(\w+) (\1{e<=1})'
-ignore = true
+compiles = true
 
 # Fuzzy over repeated groups (findall; first match)
 [[test]]
@@ -483,7 +499,8 @@ fuzzy_counts = [1, 0, 0]
 [[test]]
 name = "L2798 issue fuzzy_changes GTTTTCATTCCTCATA - fuzzy_changes unsupported"
 pattern = "(?e)(GTTTTCATTCCTCATA){i<=4,d<=4,s<=4,i+d+s<=8}"
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (fuzzy_changes unsupported)
 
 # Fuzzy constraints ignored when checking for prefix/suffix in branches
 [[test]]
@@ -566,17 +583,20 @@ is_match = false
 [[test]]
 name = "L3786 issue196 (?r)(x{6})e<=1 xxxxxx - reverse unsupported"
 pattern = "(?r)(x{6}){e<=1}"
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 [[test]]
 name = "L3788 issue196 (?r)(x{6})e<=1 xxxxx - reverse unsupported"
 pattern = "(?r)(x{6}){e<=1}"
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 [[test]]
 name = "L3790 issue196 (?r)(x{6})e<=1 x - reverse unsupported"
 pattern = "(?r)(x{6}){e<=1}"
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 # Hg issue 198: malformed fuzzy fails to compile (mrab uses byte pattern)
 [[test]]
@@ -588,12 +608,14 @@ expect_error = true
 [[test]]
 name = "L3801 issue199 ((?0))e - recursion (?0) unsupported"
 pattern = "((?0)){e}"
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (recursion (?0) unsupported)
 
 [[test]]
 name = "L3804 issue200 \\x00?(?0)e - recursion (?0) unsupported"
 pattern = '\x00?(?0){e}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (recursion (?0) unsupported)
 
 # Hg issue 201: ENHANCEMATCH findall (first match; groups converted)
 [[test]]
@@ -607,12 +629,12 @@ span = [10, 19]
 [[test]]
 name = "L3853 issue210 (2)(?:\\1{5})e<=1 - backreference inside fuzzy unsupported"
 pattern = '(2)(?:\1{5}){e<=1}'
-ignore = true
+compiles = true
 
 [[test]]
 name = "L3855 issue210 (\\d)(?:\\1{5})e<=1 - backreference inside fuzzy unsupported"
 pattern = '(\d)(?:\1{5}){e<=1}'
-ignore = true
+compiles = true
 
 # Hg issue 225: BESTMATCH in fuzzy match
 [[test]]
@@ -669,22 +691,26 @@ span = [5, 13]
 [[test]]
 name = "L3944 issue247 (?r) ESTONIA(?!\\w) e<=1 - reverse unsupported"
 pattern = '(?r)(?:ESTONIA(?!\w)){e<=1}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 [[test]]
 name = "L3946 issue247 (?r) ESTONIA(?=\\W) e<=1 - reverse unsupported"
 pattern = '(?r)(?:ESTONIA(?=\W)){e<=1}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 [[test]]
 name = "L3949 issue247 (?r) (?<!\\w)ESTONIA e<=1 - reverse unsupported"
 pattern = '(?r)(?:(?<!\w)ESTONIA){e<=1}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 [[test]]
 name = "L3951 issue247 (?r) (?<=\\W)ESTONIA e<=1 - reverse unsupported"
 pattern = '(?r)(?:(?<=\W)ESTONIA){e<=1}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 # Hg issue 248: fuzzy + multiple non-greedy quantifiers; group() = whole
 [[test]]
@@ -725,7 +751,7 @@ fuzzy_counts = [0, 1, 0]
 [[test]]
 name = "L4151 issue300 fuzzy_changes - unsupported"
 pattern = "(?b)(?:GGCGTCACACTTTGCTATGCCATAGCAT[AG]TTTATCCATAAGATTAGCGGATCCTACCTGACGCTTTTTATCGCAACTCTCTACTGTTTCTCCATAACAGAACATATTGACTATCCGGTATTACCCGGCATGACAGGAGTAAAA){e<=1}(?:[ACGT]{1059}){e<=2}(?:TAATCGTCTTGTTTGATACACAAGGGTCGCATCTGCGGCCCTTTTGCTTTTTTAAGTTGTAAGGATATGCCATTCTAGA){e<=0}(?:[ACGT]{18}){e<=0}(?:AGATCGG[CT]AGAGCGTCGTGTAGGGAAAGAGTGTGG){e<=1}"
-ignore = true
+compiles = true
 
 # Hg issue 306: fuzzy scope on nested quantified groups
 [[test]]
@@ -757,7 +783,8 @@ is_match = true
 [[test]]
 name = "L4181 issue353 (?be) AGTGT...{s<=5,i<=5,d<=5,s+i+d<=10} - fuzzy_changes unsupported"
 pattern = "(?be)(AGTGTTCCCCGCGCCAGCGGGGATAAACCG){s<=5,i<=5,d<=5,s+i+d<=10}"
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (fuzzy_changes unsupported)
 
 # Git issue 364: fuzzy_counts vs fuzzy_changes (match -> ^)
 [[test]]
@@ -770,7 +797,7 @@ fuzzy_counts = [1, 0, 1]
 [[test]]
 name = "L4187 issue364 (?:bc)e c fuzzy_changes - unsupported"
 pattern = "^(?:bc){e}"
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4189 issue364 (?e)(?:bc)e c fuzzy_counts"
@@ -781,7 +808,7 @@ fuzzy_counts = [0, 0, 1]
 [[test]]
 name = "L4191 issue364 (?e)(?:bc)e c fuzzy_changes - unsupported"
 pattern = "(?e)^(?:bc){e}"
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4193 issue364 (?b)(?:bc)e c fuzzy_counts"
@@ -792,7 +819,7 @@ fuzzy_counts = [0, 0, 1]
 [[test]]
 name = "L4195 issue364 (?b)(?:bc)e c fuzzy_changes - unsupported"
 pattern = "(?b)^(?:bc){e}"
-ignore = true
+compiles = true
 
 # Git issue 370: fuzzy matching behavior (match -> ^; inner ^...$ kept)
 [[test]]
@@ -898,7 +925,7 @@ is_match = false
 [[test]]
 name = "L4244 issue415 t(?:es){i<=1:\\d}t fuzzy_changes - unsupported"
 pattern = '^t(?:es){i<=1:\d}t'
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4246 issue415 t(es){i<=1,0<e<=1}t tes5t (trailing insertion)"
@@ -910,7 +937,7 @@ span = [0, 5]
 [[test]]
 name = "L4248 issue415 t(?:es){i<=1,0<e<=1:\\d}t fuzzy_changes - unsupported"
 pattern = '^t(?:es){i<=1,0<e<=1:\d}t'
-ignore = true
+compiles = true
 
 # Git issue 427: BESTMATCH / ENHANCEMATCH on multi-region pattern (match -> ^)
 [[test]]
@@ -935,7 +962,7 @@ fuzzy_counts = [0, 0, 0]
 [[test]]
 name = "L4283 issue433 fuzzy_changes exact - unsupported"
 pattern = "(?b)^(?:.*)(?:AACACTGG){e<=1}(?:(?:[AT][CG]){5}){e<=2}(?:GTAACCGAAG){e<=2}(?:(?:[ACGT]){0,6}$)"
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4287 issue433 anchor/umi/sid BESTMATCH fuzzy_counts subs"
@@ -946,7 +973,7 @@ fuzzy_counts = [2, 0, 0]
 [[test]]
 name = "L4288 issue433 fuzzy_changes subs - unsupported"
 pattern = "(?b)^(?:.*)(?:AACACTGG){e<=1}(?:(?:[AT][CG]){5}){e<=2}(?:GTAACCGAAG){e<=2}(?:(?:[ACGT]){0,6}$)"
-ignore = true
+compiles = true
 
 # Git issue 442: fuzzy insertions with char set
 [[test]]
@@ -966,7 +993,7 @@ is_match = false
 [[test]]
 name = "L4330 issue525 (\\L<foo>)e<=5 empty list - named word list unsupported"
 pattern = '(\L<foo>){e<=5}'
-ignore = true
+expect_error = true
 
 # ---------------------------------------------------------------------------
 # def test_fuzzy_ext (L4411-4497): fullmatch bool cases
@@ -974,7 +1001,7 @@ ignore = true
 [[test]]
 name = "L4412 (?r)(?:a){e<=1:[a-z]} e - reverse unsupported"
 pattern = "(?:a){e<=1:[a-z]}"
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4414 (?:a){e<=1:[a-z]} e"
@@ -991,7 +1018,7 @@ is_match = false
 [[test]]
 name = "L4418 (?r)(?:a){e<=1:[a-z]} dash - reverse unsupported"
 pattern = "(?:a){e<=1:[a-z]}"
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4421 (?:a){e<=1:[a-z]} ae"
@@ -1002,7 +1029,7 @@ is_match = true
 [[test]]
 name = "L4423 (?r)(?:a){e<=1:[a-z]} ae - reverse unsupported"
 pattern = "(?:a){e<=1:[a-z]}"
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4425 (?:a){e<=1:[a-z]} a- no match"
@@ -1013,7 +1040,7 @@ is_match = false
 [[test]]
 name = "L4427 (?r)(?:a){e<=1:[a-z]} a- - reverse unsupported"
 pattern = "(?:a){e<=1:[a-z]}"
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4430 (?:ab){e<=1:[a-z]} ae"
@@ -1024,7 +1051,7 @@ is_match = true
 [[test]]
 name = "L4432 (?r)(?:ab){e<=1:[a-z]} ae - reverse unsupported"
 pattern = "(?:ab){e<=1:[a-z]}"
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4434 (?:ab){e<=1:[a-z]} a- no match"
@@ -1035,144 +1062,166 @@ is_match = false
 [[test]]
 name = "L4436 (?r)(?:ab){e<=1:[a-z]} a- - reverse unsupported"
 pattern = "(?:ab){e<=1:[a-z]}"
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4439 (a)\\1{e<=1:[a-z]} ae - backreference inside fuzzy unsupported"
 pattern = '(a)\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4441 (?r)\\1{e<=1:[a-z]}(a) ea - backreference + reverse unsupported"
 pattern = '(?r)\1{e<=1:[a-z]}(a)'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + reverse unsupported)
 
 [[test]]
 name = "L4443 (a)\\1{e<=1:[a-z]} a- - backreference inside fuzzy unsupported"
 pattern = '(a)\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4445 (?r)\\1{e<=1:[a-z]}(a) -a - backreference + reverse unsupported"
 pattern = '(?r)\1{e<=1:[a-z]}(a)'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + reverse unsupported)
 
 [[test]]
 name = "L4448 (?fiu) sharp-s e<=1:[a-z] ts - \\N{} + fullcase unsupported"
 pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
 name = "L4450 (?fiu) sharp-s e<=1:[a-z] st - \\N{} + fullcase unsupported"
 pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
 name = "L4452 (?firu) sharp-s e<=1:[a-z] st - \\N{} + fullcase + reverse unsupported"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase + reverse unsupported)
 
 [[test]]
 name = "L4454 (?firu) sharp-s e<=1:[a-z] ts - \\N{} + fullcase + reverse unsupported"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase + reverse unsupported)
 
 [[test]]
 name = "L4456 (?fiu) sharp-s e<=1:[a-z] -s - \\N{} + fullcase unsupported"
 pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
 name = "L4458 (?fiu) sharp-s e<=1:[a-z] s- - \\N{} + fullcase unsupported"
 pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
 name = "L4460 (?firu) sharp-s e<=1:[a-z] s- - \\N{} + fullcase + reverse unsupported"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase + reverse unsupported)
 
 [[test]]
 name = "L4462 (?firu) sharp-s e<=1:[a-z] -s - \\N{} + fullcase + reverse unsupported"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase + reverse unsupported)
 
 [[test]]
 name = "L4465 (?fiu)(sharp-s)\\1 e<=1:[a-z] ssst - backreference + \\N{} unsupported"
 pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
 name = "L4467 (?fiu)(sharp-s)\\1 e<=1:[a-z] ssts - backreference + \\N{} unsupported"
 pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
 name = "L4469 (?firu)\\1(sharp-s) stss - backreference + \\N{} + reverse unsupported"
 pattern = '(?firu)\1{e<=1:[a-z]}(\N{LATIN SMALL LETTER SHARP S})'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
 
 [[test]]
 name = "L4471 (?firu)\\1(sharp-s) tsss - backreference + \\N{} + reverse unsupported"
 pattern = '(?firu)\1{e<=1:[a-z]}(\N{LATIN SMALL LETTER SHARP S})'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
 
 [[test]]
 name = "L4473 (?fiu)(sharp-s)\\1 ss-s - backreference + \\N{} unsupported"
 pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
 name = "L4475 (?fiu)(sharp-s)\\1 sss- - backreference + \\N{} unsupported"
 pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
 name = "L4477 (?firu)(sharp-s)\\1 -s - backreference + \\N{} + reverse unsupported"
 pattern = '(?firu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
 
 [[test]]
 name = "L4479 (?firu)(sharp-s)\\1 s- - backreference + \\N{} + reverse unsupported"
 pattern = '(?firu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
 
 [[test]]
 name = "L4482 (?fiu)(ss)\\1 e<=1:[a-z] sharp-s ts - backreference + \\N{} unsupported"
 pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4484 (?fiu)(ss)\\1 e<=1:[a-z] sharp-s st - backreference + \\N{} unsupported"
 pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4486 (?firu)\\1(ss) st sharp-s - backreference + \\N{} + reverse unsupported"
 pattern = '(?firu)\1{e<=1:[a-z]}(ss)'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
 
 [[test]]
 name = "L4488 (?firu)\\1(ss) ts sharp-s - backreference + \\N{} + reverse unsupported"
 pattern = '(?firu)\1{e<=1:[a-z]}(ss)'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
 
 [[test]]
 name = "L4490 (?fiu)(ss)\\1 sharp-s -s - backreference + \\N{} unsupported"
 pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4492 (?fiu)(ss)\\1 sharp-s s- - backreference + \\N{} unsupported"
 pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
 
 [[test]]
 name = "L4494 (?firu)(ss)\\1 s- sharp-s - backreference + \\N{} + reverse unsupported"
 pattern = '(?firu)(ss)\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
 
 [[test]]
 name = "L4496 (?firu)(ss)\\1 -s sharp-s - backreference + \\N{} + reverse unsupported"
 pattern = '(?firu)(ss)\1{e<=1:[a-z]}'
-ignore = true
+compiles = true
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Real expected values for the 73 mrab corpus "skeleton" cases (previously just a
+  name + pattern with no assertion, so they verified nothing). These mirror
+  mrab's compile-only tests (`repr(type(regex.compile(...))) == PATTERN_CLASS`),
+  so the authentic expectation is compilation, now asserted via a new
+  `compiles = true` corpus field (checked against the Python `regex` oracle). Of
+  the 73: 31 are now active passing tests (24 compile in both engines; 7 `\L<words>`
+  patterns are rejected by both without a `words=` list), and 42 remain ignored
+  but documented — 36 that mrab compiles yet we do not (reverse `(?r)`, `\N{...}`,
+  recursion `(?0)`, `\m`/`\M`, combined constraints), and 6 `\L<words>` patterns
+  we mis-accept where mrab rejects (a latent parser bug, now flagged). The 7
+  pre-existing active compile-only cases also gained explicit `compiles = true`;
+  every corpus case now carries an assertion (139 active, 55 ignored, 0 no-ops).
 - A property-based consistency test (`tests/find_iter_consistency_proptest.rs`)
   that generates patterns from the atom/quantifier grammar which surfaced the
   fast-path divergences below and asserts `find(text) == find_iter(text).next()`

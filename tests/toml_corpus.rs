@@ -48,6 +48,10 @@ struct Case {
     min_edit: bool,
     #[serde(default)]
     expect_error: bool,
+    /// Compile-only assertion (mirrors mrab's `repr(type(compile(...)))` tests):
+    /// `true` requires the pattern to compile without error; no match is run.
+    #[serde(default)]
+    compiles: Option<bool>,
     #[serde(default)]
     is_match: Option<bool>,
     #[serde(default)]
@@ -75,6 +79,16 @@ fn run_case(c: &Case) -> Result<(), String> {
         return match built {
             Ok(_) => Err("expected compile error, but pattern compiled".into()),
             Err(_) => Ok(()),
+        };
+    }
+
+    // Compile-only case: assert only that the pattern (does not) compile, like
+    // mrab's `repr(type(regex.compile(...))) == PATTERN_CLASS` tests.
+    if let Some(want) = c.compiles {
+        return match (&built, want) {
+            (Ok(_), true) | (Err(_), false) => Ok(()),
+            (Ok(_), false) => Err("expected compile error, but pattern compiled".into()),
+            (Err(e), true) => Err(format!("expected pattern to compile, got error: {e:?}")),
         };
     }
 
