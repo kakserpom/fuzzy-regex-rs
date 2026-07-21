@@ -17,7 +17,7 @@
 //!   fuzzy_counts     — expected (substitutions, insertions, deletions) — mrab order
 //!   ignore           — skip this case
 
-use fuzzy_regex::FuzzyRegexBuilder;
+use fuzzy_regex::{FuzzyRegexBuilder, MatchEndPolicy};
 use serde::Deserialize;
 use std::path::Path;
 
@@ -42,6 +42,10 @@ struct Case {
     threshold: Option<f32>,
     #[serde(default)]
     case_insensitive: bool,
+    /// Select `MatchEndPolicy::MinEdit` (tightest alignment) instead of the
+    /// default longest-within-budget end selection.
+    #[serde(default)]
+    min_edit: bool,
     #[serde(default)]
     expect_error: bool,
     #[serde(default)]
@@ -56,9 +60,15 @@ struct Case {
 
 /// Run a single case, returning `Err(reason)` on failure.
 fn run_case(c: &Case) -> Result<(), String> {
+    let policy = if c.min_edit {
+        MatchEndPolicy::MinEdit
+    } else {
+        MatchEndPolicy::LongestWithinBudget
+    };
     let built = FuzzyRegexBuilder::new(&c.pattern)
         .case_insensitive(c.case_insensitive)
         .similarity(c.threshold.unwrap_or(0.0))
+        .match_end_policy(policy)
         .build();
 
     if c.expect_error {

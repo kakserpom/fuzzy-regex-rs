@@ -65,6 +65,31 @@ pub struct MatchFlags {
     pub unicode: bool,
 }
 
+/// Policy for choosing a fuzzy match's end position when several ends are valid
+/// within the edit budget.
+///
+/// For a fixed match start, a fuzzy pattern with a large or unlimited edit
+/// budget (e.g. `{e}`) can accept at many different end positions. This policy
+/// decides which one is reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MatchEndPolicy {
+    /// Prefer the longest match that stays within the edit budget.
+    ///
+    /// This is the historical fuzzy-regex behavior and the default. For
+    /// `(?:error){e}` against `"regex failure"` it reports the widest span the
+    /// budget allows.
+    #[default]
+    LongestWithinBudget,
+    /// Prefer the end position that minimizes the edit count, breaking ties by
+    /// the shortest span.
+    ///
+    /// This reports the tightest alignment, mirroring mrab-regex's tendency to
+    /// report the minimal-error match for unlimited/large `{e}` budgets. For
+    /// `(?:error){e}` against `"regex failure"` it reports the tight `"regex"`
+    /// span rather than the widest one.
+    MinEdit,
+}
+
 /// Configuration for regex matching.
 #[allow(clippy::struct_excessive_bools)]
 pub struct RegexConfig {
@@ -111,6 +136,12 @@ pub struct RegexConfig {
     /// When true, builds all states upfront for faster matching and thread-safety
     /// (no runtime locking needed). May increase build time and memory for complex patterns.
     pub full_dfa: bool,
+    /// Policy for choosing a fuzzy match's end position among several valid ends.
+    ///
+    /// Defaults to [`MatchEndPolicy::LongestWithinBudget`] (historical behavior).
+    /// Set to [`MatchEndPolicy::MinEdit`] to report the tightest (minimum-edit)
+    /// alignment instead.
+    pub match_end_policy: MatchEndPolicy,
 }
 
 impl Clone for RegexConfig {
@@ -134,6 +165,7 @@ impl Clone for RegexConfig {
             initial_dfa_capacity: self.initial_dfa_capacity,
             minimize_dfa: self.minimize_dfa,
             full_dfa: self.full_dfa,
+            match_end_policy: self.match_end_policy,
         }
     }
 }
@@ -162,6 +194,7 @@ impl Default for RegexConfig {
             initial_dfa_capacity: 2048,
             minimize_dfa: false,
             full_dfa: false,
+            match_end_policy: MatchEndPolicy::default(),
         }
     }
 }
@@ -259,6 +292,30 @@ impl FuzzyRegexBuilder {
     #[must_use]
     pub fn greedy_first(mut self, yes: bool) -> Self {
         self.config.greedy_first = yes;
+        self
+    }
+
+    /// Choose how a fuzzy match's end position is selected when several ends
+    /// are valid within the edit budget.
+    ///
+    /// The default ([`MatchEndPolicy::LongestWithinBudget`]) reports the widest
+    /// span the budget allows. [`MatchEndPolicy::MinEdit`] instead reports the
+    /// tightest alignment (fewest edits, then shortest span), which matches
+    /// mrab-regex's minimal-error reporting for large/unlimited `{e}` budgets.
+    ///
+    /// # Example
+    /// ```
+    /// use fuzzy_regex::{FuzzyRegexBuilder, MatchEndPolicy};
+    /// let re = FuzzyRegexBuilder::new(r"(?:error){e}")
+    ///     .match_end_policy(MatchEndPolicy::MinEdit)
+    ///     .build()
+    ///     .unwrap();
+    /// let m = re.find("regex failure").unwrap();
+    /// assert_eq!((m.start(), m.end()), (0, 5)); // tight "regex", not the widest span
+    /// ```
+    #[must_use]
+    pub fn match_end_policy(mut self, policy: MatchEndPolicy) -> Self {
+        self.config.match_end_policy = policy;
         self
     }
 

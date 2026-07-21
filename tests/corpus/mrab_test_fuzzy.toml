@@ -521,9 +521,11 @@ input = "regex failure"
 is_match = true
 span = [0, 5]
 
+# unlimited {e} first-match span: with default (longest-within-budget) this
+# reports [0,8]; MatchEndPolicy::MinEdit reports mrab's tight [0,5] alignment.
 [[test]]
-name = "[GAP: unlimited {e} first-match span; (?fi) now parses but span diverges [0,8] vs mrab [0,5]] L3578 issue147 (?fi)(?:error)e first match"
-ignore = true
+name = "L3578 issue147 (?fi)(?:error)e first match [min_edit]"
+min_edit = true
 pattern = "(?fi)(?:error){e}"
 input = "regex failure"
 is_match = true

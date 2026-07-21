@@ -636,8 +636,24 @@ impl Nfa {
             return false;
         }
 
+        // A genuine single character-class-plus (`\d+`, `[a-z]*`) has exactly ONE
+        // `Char` state — the looping class. More than one means there is extra
+        // consuming structure (e.g. `\.+\d`, `@+\d{2}`, `\d+\d+`), which this
+        // fast path would mis-handle by scanning only one class's run.
+        if self.count_char_states() != 1 {
+            return false;
+        }
+
         let mut visited = vec![false; self.states.len()];
         self.check_char_class_plus(self.start, &mut visited, false, 0)
+    }
+
+    /// Count the number of input-consuming `Char` states in the NFA.
+    fn count_char_states(&self) -> usize {
+        self.states
+            .iter()
+            .filter(|s| matches!(s, State::Char { .. }))
+            .count()
     }
 
     /// Check if this NFA is a character class plus OR lazy plus: [charset]+ or [charset]+?
@@ -654,6 +670,12 @@ impl Nfa {
         let has_greedy_loop = self.has_char_class_loop_with_greedy(true);
         let has_lazy_loop = self.has_char_class_loop_with_greedy(false);
         if !has_greedy_loop && !has_lazy_loop {
+            return false;
+        }
+
+        // Exactly one Char state — a single looping class, no extra structure
+        // (see `is_char_class_plus`).
+        if self.count_char_states() != 1 {
             return false;
         }
 
@@ -951,13 +973,100 @@ impl Nfa {
             return false;
         }
 
-        // Check for FuzzyLiteral (separator)
-        let has_literal = self
+        // Every Char state must be a digit class: a genuine digit-sequence is
+        // only digits and separators. A non-digit class between the digits and
+        // the separator (e.g. `\d{1,3}?[a-z]\.`) is not this shape, and the
+        // `find_digit_sequence_with_separator` scan would mishandle it.
+        if digit_chars.len() != self.count_char_states() {
+            return false;
+        }
+
+        // The pattern must START with a digit (the separator sits BETWEEN digit
+        // groups). A leading separator (`\.\d{1,3}?` = `.` then digits) is not a
+        // digit-sequence and the scan would mis-handle it.
+        if !self.starts_with_digit_char() {
+            return false;
+        }
+
+        // Must have a FuzzyLiteral (the separator).
+        if !self
             .states
             .iter()
-            .any(|s| matches!(s, State::FuzzyLiteral { .. }));
+            .any(|s| matches!(s, State::FuzzyLiteral { .. }))
+        {
+            return false;
+        }
 
-        digit_chars.len() >= 2 && has_literal
+        // The pattern must END with a digit too: in a genuine digit-sequence the
+        // separator always sits BETWEEN digit groups, so every separator is
+        // followed by more digits. A TRAILING separator (`\d{1,3}?\.` = digits
+        // then `.` with nothing after) is not this shape, and the scan would
+        // mis-handle it (it matched `".1"` on `".1 "`). Reject if any separator
+        // can reach Accept without a digit `Char` after it.
+        !self.any_separator_reaches_accept_zero_width()
+    }
+
+    /// Whether any `FuzzyLiteral` (separator) can reach `Accept` through
+    /// zero-width transitions only — i.e. it can be the last consuming element
+    /// (a trailing separator). Used to reject non-digit-sequence shapes.
+    fn any_separator_reaches_accept_zero_width(&self) -> bool {
+        self.states.iter().any(|state| {
+            matches!(state, State::FuzzyLiteral { next, .. }
+                if self.reaches_accept_zero_width(*next, &mut vec![false; self.states.len()]))
+        })
+    }
+
+    /// Whether `Accept` is reachable from `state` without consuming any input
+    /// (following only Epsilon/Anchor/Capture/Split zero-width transitions).
+    /// Stops at any consuming state (`Char`/`FuzzyChar`/`FuzzyLiteral`/...).
+    fn reaches_accept_zero_width(&self, state: StateId, visited: &mut [bool]) -> bool {
+        if state >= self.states.len() || visited[state] {
+            return false;
+        }
+        visited[state] = true;
+        match &self.states[state] {
+            State::Accept => true,
+            State::Epsilon { targets } => targets
+                .iter()
+                .any(|&t| self.reaches_accept_zero_width(t, visited)),
+            State::Split { branches, .. } => branches
+                .iter()
+                .any(|&b| self.reaches_accept_zero_width(b, visited)),
+            State::Anchor { next, .. }
+            | State::CaptureStart { next, .. }
+            | State::CaptureEnd { next, .. }
+            | State::ResetMatchStart { next } => self.reaches_accept_zero_width(*next, visited),
+            _ => false,
+        }
+    }
+
+    /// Whether the pattern's first input-consuming state is a digit-class `Char`.
+    fn starts_with_digit_char(&self) -> bool {
+        let mut visited = vec![false; self.states.len()];
+        let mut current = self.start;
+        loop {
+            if current >= self.states.len() || visited[current] {
+                return false;
+            }
+            visited[current] = true;
+            match &self.states[current] {
+                State::Char { class, .. } => {
+                    return class
+                        .named
+                        .iter()
+                        .any(|n| matches!(n, crate::parser::NamedClass::Digit))
+                        || class
+                            .ranges
+                            .iter()
+                            .any(|(start, end)| *start >= '0' && *end <= '9');
+                }
+                State::Epsilon { targets } if targets.len() == 1 => current = targets[0],
+                State::Anchor { next, .. }
+                | State::CaptureStart { next, .. }
+                | State::CaptureEnd { next, .. } => current = *next,
+                _ => return false,
+            }
+        }
     }
 
     /// Check if this NFA contains any recursive patterns.
@@ -1194,11 +1303,15 @@ impl Nfa {
 
         // Check that the pattern starts with .* followed by suffix (not alternation)
         // Pattern must be: ^? . (any char) * (greedy) SUFFIX
-        self.check_greedy_dotstar_prefix(self.start)
+        let mut visited = vec![false; self.states.len()];
+        self.check_greedy_dotstar_prefix(self.start, &mut visited)
     }
 
-    /// Check if pattern starts with greedy .* followed by suffix
-    fn check_greedy_dotstar_prefix(&self, state_id: StateId) -> bool {
+    /// Check if pattern starts with greedy .* followed by suffix.
+    ///
+    /// `visited` guards against cycles in the NFA (e.g. `.+.+`, whose `+` loops
+    /// would otherwise recurse forever and overflow the stack).
+    fn check_greedy_dotstar_prefix(&self, state_id: StateId, visited: &mut [bool]) -> bool {
         if state_id >= self.states.len() {
             return false;
         }
@@ -1207,17 +1320,22 @@ impl Nfa {
             return false; // Reached Accept without finding suffix
         }
 
+        if visited[state_id] {
+            return false;
+        }
+        visited[state_id] = true;
+
         match &self.states[state_id] {
             State::Epsilon { targets } => {
                 // Follow epsilon transitions to find the real start of pattern
                 targets
                     .iter()
-                    .any(|&target| self.check_greedy_dotstar_prefix(target))
+                    .any(|&target| self.check_greedy_dotstar_prefix(target, visited))
             }
             State::Anchor {
                 kind: crate::parser::Anchor::Start,
                 next,
-            } => self.check_greedy_dotstar_prefix(*next),
+            } => self.check_greedy_dotstar_prefix(*next, visited),
             State::Char { class, next }
                 // Check if this is `.` (any character)
                 if class.named.iter().any(|n| {
@@ -1228,15 +1346,25 @@ impl Nfa {
                     )
                 }) && !class.negated
                 => {
-                    // Found `.` - now check for * (Split) after it
-                    self.check_greedy_star_after_dot(*next)
+                    // Found `.` - now check for a `*`/`+` that repeats THIS dot.
+                    self.check_greedy_star_after_dot(*next, state_id, visited)
                 }
             _ => false,
         }
     }
 
-    /// Check for greedy * after the dot
-    fn check_greedy_star_after_dot(&self, state_id: StateId) -> bool {
+    /// Check for a greedy `*`/`+` that repeats the dot at `dot_state`.
+    ///
+    /// The Split must actually repeat the dot — one of its branches must lead
+    /// back to `dot_state`. Otherwise the Split belongs to a *following* element
+    /// (e.g. `.(?:,\d)*`, where `.` is a single dot and `*` applies to `,\d`),
+    /// which is not a `.*SUFFIX` pattern.
+    fn check_greedy_star_after_dot(
+        &self,
+        state_id: StateId,
+        dot_state: StateId,
+        visited: &mut [bool],
+    ) -> bool {
         if state_id >= self.states.len() {
             return false;
         }
@@ -1245,22 +1373,35 @@ impl Nfa {
             return false; // Reached Accept without finding suffix
         }
 
+        if visited[state_id] {
+            return false;
+        }
+        visited[state_id] = true;
+
         match &self.states[state_id] {
             State::Epsilon { targets } => targets
                 .iter()
-                .any(|&target| self.check_greedy_star_after_dot(target)),
+                .any(|&target| self.check_greedy_star_after_dot(target, dot_state, visited)),
             State::Split { branches, greedy } if *greedy && branches.len() >= 2 => {
-                // Found greedy * - now check that one branch leads to suffix (not just Accept)
-                // branches[0] = loop back to continue consuming
-                // branches[1] = skip * and go to suffix
-                self.check_suffix_after_star(branches[1])
+                // One branch must loop back to the dot (the `*`/`+` repeats it).
+                if !branches.iter().any(|&b| self.can_reach_state(b, dot_state)) {
+                    return false;
+                }
+                // The suffix is the branch that exits the loop (does not lead
+                // back to the dot).
+                let exit = branches
+                    .iter()
+                    .copied()
+                    .find(|&b| !self.can_reach_state(b, dot_state))
+                    .unwrap_or(branches[1]);
+                self.check_suffix_after_star(exit, visited)
             }
             _ => false,
         }
     }
 
     /// Check that after the * we have a suffix pattern that leads to Accept
-    fn check_suffix_after_star(&self, state_id: StateId) -> bool {
+    fn check_suffix_after_star(&self, state_id: StateId, visited: &mut [bool]) -> bool {
         if state_id >= self.states.len() {
             return false;
         }
@@ -1269,29 +1410,59 @@ impl Nfa {
             return true; // Empty match after * is valid (.* can match empty)
         }
 
+        if visited[state_id] {
+            return false;
+        }
+        visited[state_id] = true;
+
         match &self.states[state_id] {
             State::Accept => true, // Reached Accept - suffix was empty
             State::Epsilon { targets } => {
                 for &target in targets {
-                    if self.check_suffix_after_star(target) {
+                    if self.check_suffix_after_star(target, visited) {
                         return true;
                     }
                 }
                 false
             }
-            // FuzzyLiteral is a valid suffix
+            // FuzzyLiteral is a valid suffix (a fixed literal string).
             State::FuzzyLiteral { next, .. } => {
-                // After FuzzyLiteral, must reach Accept
-                self.check_reaches_accept(*next)
+                // After FuzzyLiteral, must reach Accept via a pure literal.
+                self.check_reaches_accept(*next, visited)
             }
-            // Char (non-dot) is also a valid suffix (exact literal chars)
-            State::Char { next, .. } => self.check_reaches_accept(*next),
+            // A single literal character is a valid suffix element. A character
+            // CLASS (`\d`, `.`, `[a-z]`, negated) is NOT: the fast path uses
+            // `literals[0]` (a fixed string) as the whole suffix via `rfind`, so
+            // any class/group after the literal would be ignored (e.g. `.+@.{2}`
+            // would match on just `@`).
+            State::Char { class, next } if Self::is_literal_char(class) => {
+                self.check_reaches_accept(*next, visited)
+            }
             _ => false,
         }
     }
 
-    /// Check if we can reach Accept from this state
-    fn check_reaches_accept(&self, state_id: StateId) -> bool {
+    /// Whether a `Char` state matches exactly one fixed literal character (not a
+    /// character class like `\d`, `.`, `[a-z]`, or a negated class).
+    fn is_literal_char(class: &crate::ir::hir::HirClass) -> bool {
+        class.chars.len() == 1
+            && class.ranges.is_empty()
+            && class.named.is_empty()
+            && !class.negated
+    }
+
+    /// Check that Accept is reachable from `state_id` through ZERO-WIDTH
+    /// transitions only (epsilon).
+    ///
+    /// The greedy-prefix fast path treats `literals[0]` as the ENTIRE suffix, so
+    /// the suffix must be exactly one literal unit (the `FuzzyLiteral` / single
+    /// `Char` that `check_suffix_after_star` already matched) immediately
+    /// followed by Accept. Any further consuming state — another `Char`
+    /// (e.g. the `a{2}` in `.+aa{2}`, whose extra chars are NOT in `literals[0]`),
+    /// a `FuzzyLiteral`, a `Split`, or an anchor the fast path can't honor —
+    /// means the suffix is longer than `literals[0]`, so we reject and let the
+    /// DFA/NFA handle it.
+    fn check_reaches_accept(&self, state_id: StateId, visited: &mut [bool]) -> bool {
         if state_id >= self.states.len() {
             return false;
         }
@@ -1300,29 +1471,16 @@ impl Nfa {
             return true; // Reached Accept
         }
 
+        if visited[state_id] {
+            return false;
+        }
+        visited[state_id] = true;
+
         match &self.states[state_id] {
             State::Accept => true,
-            State::Epsilon { targets } => {
-                for &target in targets {
-                    if self.check_reaches_accept(target) {
-                        return true;
-                    }
-                }
-                false
-            }
-            State::Char { next, .. } | State::FuzzyLiteral { next, .. } => {
-                self.check_reaches_accept(*next)
-            }
-            State::Split { branches, greedy }
-                // For greedy split, all branches must reach Accept for valid suffix
-                if *greedy => {
-                    for &branch in branches {
-                        if !self.check_reaches_accept(branch) {
-                            return false;
-                        }
-                    }
-                    true
-                }
+            State::Epsilon { targets } => targets
+                .iter()
+                .any(|&t| self.check_reaches_accept(t, visited)),
             _ => false,
         }
     }
@@ -1422,37 +1580,60 @@ impl Nfa {
     /// Returns true if all paths to Accept go through an End anchor.
     #[must_use]
     pub fn ends_with_end_anchor(&self) -> bool {
-        let mut visited = vec![false; self.states.len()];
-        self.check_ends_with_end_anchor(self.start, &mut visited)
+        // `on_stack` detects cycles (a state currently being explored on the DFS
+        // path); `memo` caches each state's result so branches that CONVERGE on a
+        // shared downstream state (e.g. the single `$` reached by both arms of
+        // `(?:ab)?$`) are not misread as cycles. Conflating the two — a single
+        // "visited" flag — made convergent paths return false, so `(?:ab)?$` and
+        // friends were wrongly treated as not end-anchored.
+        let mut on_stack = vec![false; self.states.len()];
+        let mut memo = vec![None; self.states.len()];
+        self.check_ends_with_end_anchor(self.start, &mut on_stack, &mut memo)
     }
 
     /// Recursive helper for `ends_with_end_anchor`.
-    fn check_ends_with_end_anchor(&self, state_id: StateId, visited: &mut [bool]) -> bool {
-        if visited[state_id] {
-            return false; // Cycle - assume false
+    fn check_ends_with_end_anchor(
+        &self,
+        state_id: StateId,
+        on_stack: &mut [bool],
+        memo: &mut [Option<bool>],
+    ) -> bool {
+        if on_stack[state_id] {
+            // Back-edge (loop, e.g. the `(?:ab)*` cycle). This is the neutral
+            // element for the universal "all paths to Accept go through `$`"
+            // conjunction: looping adds no NEW way to reach Accept that bypasses
+            // `$`, and any finite bypassing path still yields false via a plain
+            // `Accept`. Returning false here would wrongly reject end-anchored
+            // loops like `(?:ab)*$`.
+            return true;
         }
-        visited[state_id] = true;
+        if let Some(cached) = memo[state_id] {
+            return cached;
+        }
+        on_stack[state_id] = true;
 
         #[allow(clippy::match_same_arms)]
-        match &self.states[state_id] {
+        let result = match &self.states[state_id] {
             // Accept without going through End anchor
             State::Accept => false,
 
             // Non-consuming states - check successors
             State::Epsilon { targets } => {
                 // All targets must end with anchor
+                let targets = targets.clone();
                 !targets.is_empty()
                     && targets
                         .iter()
-                        .all(|&t| self.check_ends_with_end_anchor(t, visited))
+                        .all(|&t| self.check_ends_with_end_anchor(t, on_stack, memo))
             }
 
             State::Split { branches, .. } => {
                 // All branches must end with anchor
+                let branches = branches.clone();
                 !branches.is_empty()
                     && branches
                         .iter()
-                        .all(|&b| self.check_ends_with_end_anchor(b, visited))
+                        .all(|&b| self.check_ends_with_end_anchor(b, on_stack, memo))
             }
 
             // Check anchors
@@ -1461,12 +1642,14 @@ impl Nfa {
                 next,
             } => {
                 // Found End anchor - check that the path continues to Accept
-                self.path_reaches_accept(*next, &mut vec![false; self.states.len()])
+                let next = *next;
+                self.path_reaches_accept(next, &mut vec![false; self.states.len()])
             }
 
             State::Anchor { next, .. } => {
                 // Other anchor - continue
-                self.check_ends_with_end_anchor(*next, visited)
+                let next = *next;
+                self.check_ends_with_end_anchor(next, on_stack, memo)
             }
 
             // Consuming states - check successor
@@ -1485,8 +1668,15 @@ impl Nfa {
             | State::RecursivePattern { next, .. }
             | State::RecursiveGroup { next, .. }
             | State::RecursiveNamedGroup { next, .. }
-            | State::Handler { next, .. } => self.check_ends_with_end_anchor(*next, visited),
-        }
+            | State::Handler { next, .. } => {
+                let next = *next;
+                self.check_ends_with_end_anchor(next, on_stack, memo)
+            }
+        };
+
+        on_stack[state_id] = false;
+        memo[state_id] = Some(result);
+        result
     }
 
     /// Check if a path reaches Accept (for end anchor validation).

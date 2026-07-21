@@ -71,6 +71,9 @@ pub struct FuzzyRegex {
     anchored: bool,
     /// Whether the pattern has lazy quantifiers (prefer shorter matches).
     has_lazy: bool,
+    /// Whether the pattern begins with a lazy `.*?`/`.+?` (the shape the lazy
+    /// literal fast path handles); gates `find_all_lazy_literal_fast`.
+    has_lazy_dotstar_prefix: bool,
     /// Whether the pattern is anchored at end (ends with $).
     ends_with_end_anchor: bool,
     /// Maximum match length (for end-anchor optimization).
@@ -84,13 +87,22 @@ pub struct FuzzyRegex {
     /// Cached strategy flags computed at compile time.
     is_simple_fuzzy_only: bool,
     is_pure_greedy_dotstar: bool,
+    /// The pure dot-repeat requires at least one char (`.+`, not `.*`), so it
+    /// must not match empty text.
+    pure_dotstar_requires_char: bool,
     is_greedy_prefix_with_suffix: bool,
+    /// Minimum chars the leading greedy dot-repeat must consume before the suffix
+    /// in the `.*SUFFIX`/`.+SUFFIX` fast path (0 for `.*`, 1 for `.+`).
+    greedy_prefix_min: usize,
     is_word_bounded_class: bool,
     #[allow(dead_code)]
     is_char_class_plus: bool,
     is_char_class_plus_or_lazy: bool,
     is_class_plus_with_literal: bool,
     is_digit_sequence_with_separator: bool,
+    /// Pattern repeats a multi-atom group (e.g. `(?:,\d{3})*`); disqualifies the
+    /// linear-scan shape fast paths in `find`.
+    has_repeated_group: bool,
     has_literal_word_boundary: bool,
     /// Additional cached flags for fast path checks
     is_simple_alternation: bool,
@@ -196,7 +208,13 @@ impl FuzzyRegex {
             config.default_limits.clone(),
             config.penalties.clone(),
             config.case_insensitive,
-        );
+        )
+        .map(|mut bridge| {
+            bridge.set_prefer_min_edit(
+                config.match_end_policy == crate::api::MatchEndPolicy::MinEdit,
+            );
+            bridge
+        });
 
         // Create prefilter from leading literal (if pattern starts with a literal)
         let prefilter = Arc::new(create_prefilter_from_hir(&hir, config.case_insensitive));
@@ -206,6 +224,7 @@ impl FuzzyRegex {
 
         // Detect if pattern has lazy quantifiers
         let has_lazy = nfa.has_lazy_quantifiers();
+        let has_lazy_dotstar_prefix = hir_starts_with_lazy_dotstar(&hir);
 
         // Detect if pattern ends with $ anchor
         let ends_with_end_anchor = nfa.ends_with_end_anchor();
@@ -266,13 +285,30 @@ impl FuzzyRegex {
 
         // Precompute strategy flags at compile time
         let is_simple_fuzzy_only = nfa.is_simple_fuzzy_only();
-        let is_pure_greedy_dotstar = nfa.is_pure_greedy_dotstar();
+        // The NFA check can't distinguish bounded `.{1,3}` from unbounded `.*`;
+        // require the HIR to be an unbounded dot repeat so the "match whole text"
+        // fast path never fires for a bounded dot-repeat like `^.{1,3}$`.
+        // Only `.*` (min 0) and `.+` (min 1) qualify: for min >= 2 a short
+        // non-empty text would not satisfy the count.
+        let pure_dotstar_min = if nfa.is_pure_greedy_dotstar() {
+            hir_pure_dotstar_min(&hir)
+        } else {
+            None
+        };
+        let is_pure_greedy_dotstar = matches!(pure_dotstar_min, Some(0 | 1));
+        let pure_dotstar_requires_char = pure_dotstar_min == Some(1);
         let is_greedy_prefix_with_suffix = nfa.is_greedy_prefix_with_suffix();
+        let greedy_prefix_min = if is_greedy_prefix_with_suffix {
+            hir_greedy_prefix_min(&hir)
+        } else {
+            0
+        };
         let is_word_bounded_class = nfa.is_word_bounded_class();
         let is_char_class_plus = nfa.is_char_class_plus();
         let is_char_class_plus_or_lazy = nfa.is_char_class_plus_or_lazy();
         let is_class_plus_with_literal = nfa.is_class_plus_with_literal();
         let is_digit_sequence_with_separator = nfa.is_digit_sequence_with_separator();
+        let has_repeated_group = hir_has_repeated_group(&hir);
         let has_literal_word_boundary = nfa.has_literal_word_boundary();
         let is_simple_alternation = nfa.is_simple_alternation();
         let has_recursion = nfa.has_recursion();
@@ -287,6 +323,16 @@ impl FuzzyRegex {
             && config.handlers.is_empty()
             && capture_count == 0
             && !has_char_classes
+            // The memchr path treats the pattern as a single FIXED literal. Any
+            // branching — a `Split` (`*`/`+`/`?`/`|`) or a multi-target `Epsilon`
+            // (optional group) — means the literal is quantified, optional, or
+            // alternated, so scanning for one occurrence is unsound. E.g.
+            // `(?:ab)*`/`(?:ab)?` can match empty, but memchr("ab") returns None.
+            && !nfa.states.iter().any(|s| match s {
+                State::Split { .. } => true,
+                State::Epsilon { targets } => targets.len() > 1,
+                _ => false,
+            })
             && {
                 let lit = &literals[0];
                 lit.limits.is_none()
@@ -401,6 +447,7 @@ impl FuzzyRegex {
             prefilter,
             anchored,
             has_lazy,
+            has_lazy_dotstar_prefix,
             ends_with_end_anchor,
             max_match_length,
             dfa,
@@ -408,12 +455,15 @@ impl FuzzyRegex {
             aho_corasick,
             is_simple_fuzzy_only,
             is_pure_greedy_dotstar,
+            pure_dotstar_requires_char,
             is_greedy_prefix_with_suffix,
+            greedy_prefix_min,
             is_word_bounded_class,
             is_char_class_plus,
             is_char_class_plus_or_lazy,
             is_class_plus_with_literal,
             is_digit_sequence_with_separator,
+            has_repeated_group,
             has_literal_word_boundary,
             is_simple_alternation,
             has_recursion,
@@ -587,6 +637,21 @@ impl FuzzyRegex {
         }
     }
 
+    /// Whether the specialized linear-scan "shape" fast paths in `find`
+    /// (currency, class-plus-with-literal, digit-sequence-with-separator) may be
+    /// used for this pattern.
+    ///
+    /// These heuristics scan free text for a flat sequence of class-plus and
+    /// literal atoms and ignore anchors and group repetition. They are only
+    /// sound for unanchored patterns without a repeated multi-atom group;
+    /// otherwise they return truncated or missing matches (diverging from
+    /// `find_iter`), so anchored / group-repeating patterns fall through to the
+    /// correct DFA/NFA path instead.
+    #[inline]
+    fn can_use_shape_heuristic(&self) -> bool {
+        !self.has_repeated_group && !self.anchored && !self.ends_with_end_anchor
+    }
+
     /// Find the first match in the text.
     /// In BESTMATCH mode, returns the match with fewest errors.
     /// In ENHANCEMATCH mode, improves the fit of the found match.
@@ -596,6 +661,38 @@ impl FuzzyRegex {
     /// Never panics (all fast paths are pre-validated at construction time).
     #[inline]
     pub fn find<'t>(&self, text: &'t str) -> Option<Match<'t>> {
+        let result = self.find_dispatch(text);
+
+        // Consistency guard (this crate's own tests only — zero cost and no
+        // panic risk for downstream builds): in default (leftmost) mode `find`
+        // MUST agree with `find_iter().next()`. The two have separate fast-path
+        // dispatch trees, so this turns any divergence into a hard test failure
+        // instead of a silent wrong result. Special modes
+        // (BESTMATCH/ENHANCEMATCH/POSIX) legitimately differ (best vs leftmost),
+        // and recursive patterns use a separate engine, so both are excluded.
+        #[cfg(test)]
+        {
+            let flags = &self.config.match_flags;
+            if !self.has_recursion && !flags.best_match && !flags.enhance_match && !flags.posix {
+                let span = |m: &Option<Match<'t>>| m.as_ref().map(|x| (x.start(), x.end()));
+                let iter_first = self.find_iter(text).next();
+                assert_eq!(
+                    span(&result),
+                    span(&iter_first),
+                    "find() disagrees with find_iter().next() for pattern {:?} on input {:?}",
+                    self.pattern,
+                    text
+                );
+            }
+        }
+
+        result
+    }
+
+    /// The fast-path dispatch for [`FuzzyRegex::find`]. See `find` for the
+    /// consistency guard that keeps this in sync with `find_iter`.
+    #[inline]
+    fn find_dispatch<'t>(&self, text: &'t str) -> Option<Match<'t>> {
         // Use backtracking engine for recursive patterns
         if self.has_recursion {
             return self.find_with_backtrack(text);
@@ -737,7 +834,11 @@ impl FuzzyRegex {
         // However, (?s) dot_all is fine - . still matches everything.
         if self.is_pure_greedy_dotstar && !self.config.multi_line {
             if text.is_empty() {
-                // For empty text, return empty match at position 0
+                // `.+` needs at least one char, so it does NOT match empty text;
+                // `.*` matches empty at position 0.
+                if self.pure_dotstar_requires_char {
+                    return None;
+                }
                 return Some(Match::new(
                     text,
                     0,
@@ -757,13 +858,30 @@ impl FuzzyRegex {
         }
 
         // Fast path for end-anchored exact literals: PATTERN$
-        // Use rfind for O(n) reverse search
+        // Use rfind for O(n) reverse search.
+        //
+        // This only holds when the pattern is *just* a required, fixed literal
+        // followed by `$`. A single `rfind` cannot honor anything else, so we
+        // require: no character classes (`[0-9]{2},$` must not match a lone
+        // trailing comma), no `Split` states — i.e. no `?`/`*`/`+`/`|`, so the
+        // literal is neither optional (`(?:ab)?$`) nor repeated (`(?:ab)+$`) —
+        // and no start anchor (`rfind` ignores `^`).
         if self.ends_with_end_anchor
             && !self.config.multi_line
             && self.literals.len() == 1
             && self.capture_count == 0
             && !self.has_recursion
             && !self.config.case_insensitive
+            && !self.anchored
+            && !self.nfa.has_char_classes()
+            && !self.nfa.states.iter().any(|s| match s {
+                // Any branching means the pattern is not a single fixed literal:
+                // alternation / repetition (`Split`) or an optional group
+                // (a multi-target `Epsilon`, e.g. `(?:ab)?$`).
+                State::Split { .. } => true,
+                State::Epsilon { targets } => targets.len() > 1,
+                _ => false,
+            })
         {
             let literal = &self.literals[0];
             if literal.limits.is_none()
@@ -793,8 +911,13 @@ impl FuzzyRegex {
         // Fast path for greedy prefix patterns: .*SUFFIX
         // For greedy .*, the match is simply: find the suffix, then .* matches everything before it
         // This works for both literal and fuzzy suffixes
-        // This avoids O(n²) behavior where greedy .* tries many ending positions with fuzzy matching
-        if self.is_greedy_prefix_with_suffix {
+        // This avoids O(n²) behavior where greedy .* tries many ending positions with fuzzy matching.
+        //
+        // Requires exactly one literal: the fast path treats `literals[0]` as the
+        // ENTIRE suffix. When the suffix spans multiple literal segments (e.g.
+        // `.+-(?:ab)` -> `["-", "ab"]`) `literals[0]` is only part of it, so the
+        // match would be truncated; those fall through to the DFA/NFA instead.
+        if self.is_greedy_prefix_with_suffix && self.literals.len() == 1 {
             // For non-fuzzy literals: use rfind for O(n) reverse search
             if !self.literals.is_empty()
                 && let Some(literal) = self.literals.first()
@@ -815,6 +938,12 @@ impl FuzzyRegex {
                 };
 
                 if let Some(pos) = search_text.rfind(&pattern_text) {
+                    // `.+`/`.{n,}` must consume at least `greedy_prefix_min` chars
+                    // before the suffix. If the (rightmost) suffix is too early,
+                    // the prefix cannot meet its minimum and there is no match.
+                    if pos < self.greedy_prefix_min {
+                        return None;
+                    }
                     return Some(Match::new(
                         text,
                         0,
@@ -850,6 +979,11 @@ impl FuzzyRegex {
                 {
                     // Use find_rev to find the rightmost match of suffix
                     if let Some(m) = suffix_re.find_rev(text) {
+                        // `.+`/`.{n,}` must consume at least `greedy_prefix_min`
+                        // chars before the suffix (see the exact branch above).
+                        if m.start() < self.greedy_prefix_min {
+                            return None;
+                        }
                         // Greedy .* matches everything before the suffix
                         return Some(Match::new(
                             text,
@@ -864,45 +998,12 @@ impl FuzzyRegex {
             }
         }
 
-        // Fast path for prefix-suffix patterns: PREFIX.*SUFFIX
-        // Find prefix from left, suffix from right, check ordering
-        // This avoids O(n²) behavior with greedy .*
-        if self.literals.len() >= 2 && self.is_greedy_prefix_with_suffix {
-            // Get first two literals as prefix and suffix
-            let prefix_text = &self.literals[0].text;
-            let suffix_text = &self.literals[1].text;
-
-            // Both must be exact (no fuzzy) for this optimization
-            if self.literals[0].limits.is_none()
-                && self.literals[1].limits.is_none()
-                && self.literals[0].min_edits.is_none()
-                && self.literals[1].min_edits.is_none()
-            {
-                let search_text = if self.config.case_insensitive {
-                    text.to_lowercase()
-                } else {
-                    text.to_string()
-                };
-
-                // Find prefix from left
-                if let Some(prefix_pos) = search_text.find(prefix_text) {
-                    // Find suffix from right (after prefix)
-                    let suffix_search = &search_text[prefix_pos + prefix_text.len()..];
-                    if let Some(suffix_offset) = suffix_search.rfind(suffix_text) {
-                        let suffix_pos = prefix_pos + prefix_text.len() + suffix_offset;
-                        let end_pos = suffix_pos + suffix_text.len();
-                        return Some(Match::new(
-                            text,
-                            prefix_pos,
-                            end_pos,
-                            1.0,
-                            crate::engine::EditCounts::default(),
-                        ));
-                    }
-                }
-                return None;
-            }
-        }
+        // (A former "PREFIX.*SUFFIX" fast path lived here, but it was guarded by
+        // `is_greedy_prefix_with_suffix` — which requires a leading `.*`, not a
+        // leading literal — so it never matched its intended shape and instead
+        // mishandled `.+` followed by a multi-segment literal suffix such as
+        // `.+-(?:ab)`. Removed; those patterns use the DFA/NFA, consistent with
+        // `find_iter`.)
 
         // Fast path for non-fuzzy word-bounded literals: use exact literal search + boundary check
         // This handles \bword\b, \bword, word\b patterns (but NOT \Bword\B)
@@ -1002,38 +1103,34 @@ impl FuzzyRegex {
         // Also handles lazy versions: [a-z]+?, \d+?, \w+?
         // Use direct byte scanning instead of DFA/NFA
         // Only use when default_edits == 0 (exact matching, no fuzzy)
+        // Only when the class maps to a known byte predicate (digit/word/whitespace
+        // and negations). Custom ranges (`[a-z]`, `[a-c]`) and literal chars (`a+?`)
+        // return None here; their byte matcher would be wrong, so fall through to the
+        // DFA/NFA — exactly as `find_iter` does (see the mirrored gate below).
         if self.config.default_edits == 0
             && self.is_char_class_plus_or_lazy
             && self.literals.is_empty()
+            && let Some(class_type) = self.nfa.get_char_class_type()
         {
-            let class_type = self.nfa.get_char_class_type();
-            return Self::find_char_class_plus_first(text, self.has_lazy, class_type);
+            return Self::find_char_class_plus_first(text, self.has_lazy, Some(class_type));
         }
 
-        // Fast path for character class + literal: \w+@, \d+\., \S+pattern
-        // Also handles patterns with multiple literals like email: [\w.+-]+@[\w.-]+\.\w+
-        // Find literal first with memchr, then extend with character classes
-        if self.is_class_plus_with_literal
-            && !self.has_recursion
-            && !self.literals.is_empty()
-            && self.capture_count == 0
-            && !self.config.case_insensitive
-        {
-            // Check all literals have no fuzzy parameters
-            let all_literals_simple = self
-                .literals
-                .iter()
-                .all(|l| l.limits.is_none() && l.min_edits.is_none() && l.edit_chars.is_none());
-
-            if all_literals_simple && self.literals.len() <= 3 {
-                let first_literal = &self.literals[0];
-                return Self::find_class_plus_with_literal_first(text, &first_literal.text);
-            }
+        // Character class + literal (\w+@, \d+\., email, etc.): delegate to the
+        // same class-aware logic `find_iter` uses (`find_all_class_plus_literal`)
+        // and take the leftmost match. find's former dedicated first-match helper
+        // (`find_class_plus_with_literal_first`) always extended by a fixed
+        // word/email character set regardless of the actual class, so it
+        // over-/under-matched non-word classes — e.g. `\d?,` on "b,.2-1"
+        // returned "b,.2-1" instead of ",". Routing through `find_iter`
+        // guarantees `find(x) == find_iter(x).next()`.
+        if self.is_class_plus_with_literal {
+            return self.find_iter(text).next();
         }
 
         // Fast path for digit sequences: \d{4}-\d{2}-\d{2}
         // Only for patterns that are exactly digits and separators (like dates)
         if self.is_digit_sequence_with_separator
+            && self.can_use_shape_heuristic()
             && !self.has_recursion
             && self.capture_count == 0
             && !self.config.case_insensitive
@@ -1059,7 +1156,11 @@ impl FuzzyRegex {
         }
 
         // Fast path for currency/money: $, €, £, etc. followed by digits
-        if !self.has_recursion && self.capture_count == 0 && !self.config.case_insensitive {
+        if self.can_use_shape_heuristic()
+            && !self.has_recursion
+            && self.capture_count == 0
+            && !self.config.case_insensitive
+        {
             // Check if pattern starts with a currency symbol
             if let Some(literal) = self.literals.first() {
                 let currency = &literal.text;
@@ -1839,8 +1940,14 @@ impl FuzzyRegex {
         }
 
         // Optimization for patterns like .*?LITERAL: scan for literal positions
-        // and emit matches from previous end to each literal position
-        if self.has_lazy && self.literals.len() == 1 && self.fuzzy_bridge.is_some() {
+        // and emit matches from previous end to each literal position. Only valid
+        // when the pattern actually starts with a lazy `.*?`/`.+?` — otherwise
+        // (e.g. `\.\d+?`, a literal followed by a lazy class) it mangles the match.
+        if self.has_lazy
+            && self.has_lazy_dotstar_prefix
+            && self.literals.len() == 1
+            && self.fuzzy_bridge.is_some()
+        {
             return Matches::new(self.find_all_lazy_literal_fast(text));
         }
 
@@ -2111,12 +2218,6 @@ impl FuzzyRegex {
     #[inline]
     fn is_word_char(b: u8) -> bool {
         b.is_ascii_alphanumeric() || b == b'_'
-    }
-
-    /// Check if a byte is an email-word character (alphanumeric, underscore, dot, minus, plus).
-    #[inline]
-    fn is_email_word_char(b: u8) -> bool {
-        b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-' || b == b'+'
     }
 
     /// Check if there's a word boundary at the given position.
@@ -2535,100 +2636,10 @@ impl FuzzyRegex {
         memmem::find(text.as_bytes(), literal.as_bytes()).map(|pos| pos..pos + literal.len())
     }
 
-    /// Fast path for character class + literal: \w+@, \d+\., \S+pattern
-    /// Find the literal first with memchr, then extend backwards with the character class.
-    /// Also extends forward if there's another character class after the literal (like \w+@\w+).
-    /// This is much faster than NFA/DFA for patterns like email-like matches.
-    fn find_class_plus_with_literal_first<'a>(text: &'a str, literal: &str) -> Option<Match<'a>> {
-        if text.is_empty() || literal.is_empty() {
-            return None;
-        }
-
-        let bytes = text.as_bytes();
-        let literal_bytes = literal.as_bytes();
-        let literal_first_byte = literal_bytes[0];
-
-        // Check if the literal is a common email separator
-        let is_email_like = literal_first_byte == b'@' || literal_first_byte == b'.';
-
-        // Use memchr to find the literal
-        let mut i = 0;
-        while i < bytes.len() {
-            if let Some(pos) = memchr::memchr(literal_first_byte, &bytes[i..]) {
-                let start_pos = i + pos;
-
-                // Check if the full literal matches
-                if start_pos + literal_bytes.len() <= bytes.len()
-                    && &bytes[start_pos..start_pos + literal_bytes.len()] == literal_bytes
-                {
-                    // Extend backwards with word characters
-                    let mut class_start = start_pos;
-                    while class_start > 0 {
-                        let prev = bytes[class_start - 1];
-                        if Self::is_email_word_char(prev) {
-                            class_start -= 1;
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // Extend forward
-                    let literal_after = start_pos + literal_bytes.len();
-                    let mut after_end = literal_after;
-
-                    // For email-like patterns, continue extending through more word chars and dots
-                    if is_email_like && after_end < bytes.len() {
-                        // Skip the character right after @ (it's part of next class)
-                        // Then extend through word-like chars
-                        while after_end < bytes.len() {
-                            let next = bytes[after_end];
-                            if Self::is_email_word_char(next) {
-                                after_end += 1;
-                            } else if next == b'.' && after_end + 1 < bytes.len() {
-                                // Could be domain dot - include it and continue
-                                after_end += 1;
-                                // Include the char after dot if it's word-like
-                                if after_end < bytes.len()
-                                    && Self::is_email_word_char(bytes[after_end])
-                                {
-                                    continue;
-                                }
-                                break;
-                            } else {
-                                break;
-                            }
-                        }
-                    } else {
-                        // Simple case: just extend with word chars
-                        while after_end < bytes.len() && Self::is_email_word_char(bytes[after_end])
-                        {
-                            after_end += 1;
-                        }
-                    }
-
-                    // Found valid match
-                    if class_start < start_pos && after_end > literal_after {
-                        return Some(Match::new(
-                            text,
-                            class_start,
-                            after_end,
-                            1.0,
-                            crate::engine::EditCounts::default(),
-                        ));
-                    }
-                }
-
-                i = start_pos + 1;
-            } else {
-                break;
-            }
-        }
-
-        None
-    }
-
-    /// Fast path for character class + literal: \w+@, [a-z]+#, etc.
-    /// Finds all matches by scanning for literal, then extending with character class.
+    /// Find all non-overlapping character-class-plus + literal matches (e.g.
+    /// `\w+@\w+`, `\d+\.`), extending through the *actual* character class on
+    /// both sides of each literal. Used by both `find` (leftmost) and
+    /// `find_iter`.
     fn find_all_class_plus_literal<'a>(
         text: &'a str,
         class_type: &str,
@@ -3696,6 +3707,169 @@ fn is_anchored_at_start(hir: &Hir) -> bool {
 
         // Other cases: not anchored
         _ => false,
+    }
+}
+
+/// Whether an HIR node consumes input (as opposed to zero-width assertions).
+fn hir_consumes(hir: &Hir) -> bool {
+    !matches!(
+        hir,
+        Hir::Anchor(_)
+            | Hir::Empty
+            | Hir::Lookahead { .. }
+            | Hir::Lookbehind { .. }
+            | Hir::ResetMatchStart
+    )
+}
+
+/// Whether an HIR node consumes more than one atom per match (a group /
+/// sequence / multi-char literal), as opposed to a single character or class.
+fn hir_is_multi_atom(hir: &Hir) -> bool {
+    match hir {
+        Hir::Literal { text, .. } => text.chars().count() > 1,
+        Hir::Concat(parts) => parts.iter().filter(|h| hir_consumes(h)).take(2).count() > 1,
+        Hir::Alt(parts) => parts.iter().any(hir_is_multi_atom),
+        Hir::Capture { expr, .. } | Hir::AtomicGroup { expr } => hir_is_multi_atom(expr),
+        _ => false,
+    }
+}
+
+/// Whether the pattern repeats a multi-atom group (e.g. `(?:,\d{3})*`,
+/// `(?:ab)+`), as opposed to repeating a single character or class (`\d+`,
+/// `[a-z]*`, `\d{1,3}`).
+///
+/// The specialized "shape" fast paths in [`FuzzyRegex::find`]
+/// (`find_class_plus_with_literal_first`, `find_digit_sequence_with_separator`,
+/// `find_currency_amount`) assume a flat sequence of class-plus and literal
+/// atoms; a repeated multi-atom group breaks that assumption and makes them
+/// return truncated or missing matches. When this returns true those heuristics
+/// are skipped so the correct DFA/NFA path handles the pattern.
+fn hir_has_repeated_group(hir: &Hir) -> bool {
+    match hir {
+        Hir::Repeat { expr, max, .. } => {
+            let repeats_multiple = !matches!(max, Some(0 | 1));
+            (repeats_multiple && hir_is_multi_atom(expr)) || hir_has_repeated_group(expr)
+        }
+        Hir::Concat(parts) | Hir::Alt(parts) => parts.iter().any(hir_has_repeated_group),
+        Hir::Capture { expr, .. }
+        | Hir::AtomicGroup { expr }
+        | Hir::Lookahead { expr, .. }
+        | Hir::Lookbehind { expr, .. } => hir_has_repeated_group(expr),
+        _ => false,
+    }
+}
+
+/// Whether the pattern is a pure greedy dot-star: `.*` or `.+` (an *unbounded*
+/// repeat of `.`), optionally wrapped in `^`…`$`.
+///
+/// If the pattern is a pure greedy dot-repeat (`.*` or `.+`, optionally wrapped
+/// in `^`…`$`), returns the repeat's minimum count (`0` for `.*`, `1` for `.+`);
+/// otherwise `None`.
+///
+/// The NFA-level `is_pure_greedy_dotstar` cannot tell a bounded `.{1,3}` from an
+/// unbounded `.*` (both are Any-chars plus splits), so it wrongly enables the
+/// "match the whole text" fast path for bounded dot repeats — e.g. `^.{1,3}$`
+/// matching a 4-char string. This HIR check requires `max: None`, so only
+/// genuinely unbounded dot repetition uses that fast path. The returned minimum
+/// lets the fast path reject empty text for `.+` (which needs ≥1 char) while
+/// still matching it for `.*`.
+fn hir_pure_dotstar_min(hir: &Hir) -> Option<usize> {
+    let inner = match hir {
+        Hir::Concat(parts) => {
+            let mut lo = 0;
+            let mut hi = parts.len();
+            if matches!(parts.first(), Some(Hir::Anchor(Anchor::Start))) {
+                lo += 1;
+            }
+            if hi > lo && matches!(parts.get(hi - 1), Some(Hir::Anchor(Anchor::End))) {
+                hi -= 1;
+            }
+            if hi - lo != 1 {
+                return None;
+            }
+            &parts[lo]
+        }
+        other => other,
+    };
+    match inner {
+        Hir::Repeat {
+            expr,
+            min,
+            max: None,
+            ..
+        } if matches!(expr.as_ref(),
+            Hir::Class(c)
+                if !c.negated
+                    && c.chars.is_empty()
+                    && c.ranges.is_empty()
+                    && !c.named.is_empty()
+                    && c.named.iter().all(|n| matches!(n,
+                        NamedClass::Any | NamedClass::AnyExceptNewline))) =>
+        {
+            Some(*min)
+        }
+        _ => None,
+    }
+}
+
+/// Whether the pattern begins with a LAZY dot-repeat (`.*?` / `.+?`), i.e. its
+/// first input-consuming element is a non-greedy `Repeat` over `.`.
+///
+/// `find_all_lazy_literal_fast` assumes exactly this `.*?LITERAL` shape (lazy
+/// prefix that stretches from the previous match end up to the literal). It must
+/// NOT fire for patterns where the lazy quantifier is elsewhere — e.g.
+/// `\.\d+?` / `\.\d{1,3}?` (literal `.` then a lazy digit class), which it would
+/// mangle into a `.*?.` match. Those go to the NFA (`prefer_shortest`) instead.
+fn hir_starts_with_lazy_dotstar(hir: &Hir) -> bool {
+    let first = match hir {
+        Hir::Concat(parts) => parts.iter().find(|h| hir_consumes(h)),
+        other => Some(other),
+    };
+    matches!(
+        first,
+        Some(Hir::Repeat { expr, greedy: false, .. })
+            if matches!(expr.as_ref(),
+                Hir::Class(c)
+                    if !c.negated
+                        && c.chars.is_empty()
+                        && c.ranges.is_empty()
+                        && !c.named.is_empty()
+                        && c.named.iter().all(|n| matches!(n,
+                            NamedClass::Any | NamedClass::AnyExceptNewline)))
+    )
+}
+
+/// Minimum characters the leading greedy dot-repeat of a `.*SUFFIX`/`.+SUFFIX`
+/// pattern must consume before the suffix (0 for `.*`, 1 for `.+`, `n` for
+/// `.{n,}`). The greedy-prefix fast path anchors the match at position 0 and
+/// places the suffix at the rightmost occurrence; that is only valid when the
+/// suffix sits at position `>= min`, otherwise the prefix cannot meet its
+/// minimum (e.g. `.+-` on `"-…"`: the only `-` is at 0, so `.+` has nothing to
+/// consume and there is no match). Returns 0 when the leading element is not a
+/// greedy dot-repeat, imposing no constraint.
+fn hir_greedy_prefix_min(hir: &Hir) -> usize {
+    let first = match hir {
+        Hir::Concat(parts) => parts.iter().find(|h| hir_consumes(h)),
+        other => Some(other),
+    };
+    match first {
+        Some(Hir::Repeat {
+            expr,
+            min,
+            greedy: true,
+            ..
+        }) if matches!(expr.as_ref(),
+            Hir::Class(c)
+                if !c.negated
+                    && c.chars.is_empty()
+                    && c.ranges.is_empty()
+                    && !c.named.is_empty()
+                    && c.named.iter().all(|n| matches!(n,
+                        NamedClass::Any | NamedClass::AnyExceptNewline))) =>
+        {
+            *min
+        }
+        _ => 0,
     }
 }
 
@@ -5843,12 +6017,17 @@ mod tests {
 
         // All matches found: "best", "tset", "test", "test" (in contest)
         // Positions: (0,4), (5,9), (16,20), (24,28)
-        // Note: find() returns first match in position order
 
-        // find returns the leftmost match at position 16 (exact "test")
+        // find returns the LEFTMOST match — the fuzzy "best" at position 0
+        // (1 substitution), not the later exact "test". This matches
+        // find_iter().next().
         let m = re.find(text).unwrap();
-        assert_eq!(m.start(), 16);
-        assert_eq!(m.end(), 20);
+        assert_eq!(m.start(), 0);
+        assert_eq!(m.end(), 4);
+        assert_eq!(
+            re.find_iter(text).next().map(|m| (m.start(), m.end())),
+            Some((0, 4))
+        );
 
         // find_rev should return the rightmost match
         let m = re.find_rev(text).unwrap();

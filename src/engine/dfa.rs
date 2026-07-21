@@ -545,13 +545,16 @@ impl Dfa {
                     break;
                 }
                 State::Split { branches, .. } => {
-                    // For alternations, collect first bytes from each branch
-                    let first_bytes =
-                        Self::collect_first_bytes_from_branches(nfa, branches, literal_texts);
-                    if !first_bytes.is_empty() {
-                        return Self::make_multi_byte_prefilter(&first_bytes, case_insensitive);
+                    // For alternations / optional / repeated leading groups,
+                    // collect first bytes from every branch. If any branch can't
+                    // be soundly enumerated, or the union is too broad, use no
+                    // prefilter (a partial one would skip valid match starts).
+                    match Self::collect_first_bytes_from_branches(nfa, branches, literal_texts) {
+                        Some(fb) if !fb.is_empty() && fb.len() <= 64 => {
+                            return Self::make_multi_byte_prefilter(&fb, case_insensitive);
+                        }
+                        _ => return DfaPrefilter::None,
                     }
-                    break;
                 }
                 _ => break,
             }
@@ -713,26 +716,39 @@ impl Dfa {
     }
 
     /// Collect first bytes from all branches of a Split state.
+    /// Collect **all** possible leading bytes for the branches of a `Split`
+    /// (alternation, or the two arms of `?`/`*`/`+`), for use as a prefilter.
+    ///
+    /// Returns `None` when any branch's leading bytes cannot be fully and
+    /// soundly enumerated (a negated/broad class, a nested split, an empty
+    /// branch, etc.). The caller must then use no prefilter (linear scan) rather
+    /// than a partial one — a partial prefilter would skip valid match starts.
+    /// This is why `,?\d` used to return no match: the `\d` arm was dropped and
+    /// the filter searched only for `,`.
     fn collect_first_bytes_from_branches(
         nfa: &Nfa,
         branches: &[StateId],
         literal_texts: &[String],
-    ) -> Vec<u8> {
+    ) -> Option<Vec<u8>> {
         let mut first_bytes = Vec::new();
-
         for &branch in branches {
-            if let Some(byte) = Self::get_first_byte(nfa, branch, literal_texts)
-                && !first_bytes.contains(&byte)
-            {
-                first_bytes.push(byte);
+            let branch_bytes = Self::get_first_bytes(nfa, branch, literal_texts)?;
+            for b in branch_bytes {
+                if !first_bytes.contains(&b) {
+                    first_bytes.push(b);
+                }
             }
         }
-
-        first_bytes
+        Some(first_bytes)
     }
 
-    /// Get the first byte of a pattern starting at a given NFA state.
-    fn get_first_byte(nfa: &Nfa, start: StateId, literal_texts: &[String]) -> Option<u8> {
+    /// Get **all** possible leading bytes of the pattern starting at `start`.
+    ///
+    /// Follows zero-width transitions to the first consuming state and returns
+    /// every byte that state could begin with. Returns `None` when this cannot
+    /// be soundly enumerated (negated/broad class, unknown named class, nested
+    /// branch, or a branch that can reach `Accept` without consuming).
+    fn get_first_bytes(nfa: &Nfa, start: StateId, literal_texts: &[String]) -> Option<Vec<u8>> {
         let mut visited = vec![false; nfa.states.len()];
         let mut current = start;
 
@@ -743,42 +759,85 @@ impl Dfa {
             visited[current] = true;
 
             match &nfa.states[current] {
-                State::Epsilon { targets } if !targets.is_empty() => {
+                State::Epsilon { targets } if targets.len() == 1 => {
                     current = targets[0];
                 }
-                State::CaptureStart { next, .. } | State::CaptureEnd { next, .. } => {
+                State::CaptureStart { next, .. }
+                | State::CaptureEnd { next, .. }
+                | State::Anchor { next, .. } => {
                     current = *next;
                 }
-                State::Char { class, .. } => {
-                    // Get first byte from character class
-                    if !class.chars.is_empty() {
-                        let ch = class.chars[0];
-                        // Return the first UTF-8 byte for any character (ASCII or non-ASCII)
-                        let mut buf = [0u8; 4];
-                        let encoded = ch.encode_utf8(&mut buf);
-                        return Some(encoded.as_bytes()[0]);
-                    }
-                    if !class.ranges.is_empty() {
-                        let (start, _) = class.ranges[0];
-                        if start.is_ascii() {
-                            return Some(start as u8);
-                        }
-                        // For non-ASCII ranges, return the first byte of the range start
-                        let mut buf = [0u8; 4];
-                        let encoded = start.encode_utf8(&mut buf);
-                        return Some(encoded.as_bytes()[0]);
-                    }
-                    return None;
-                }
+                State::Char { class, .. } => return Self::class_first_bytes(class),
                 State::FuzzyLiteral { pattern_index, .. } => {
-                    if let Some(text) = literal_texts.get(*pattern_index) {
-                        return text.as_bytes().first().copied();
-                    }
-                    return None;
+                    return literal_texts
+                        .get(*pattern_index)
+                        .and_then(|t| t.as_bytes().first().copied())
+                        .map(|b| vec![b]);
                 }
                 _ => return None,
             }
         }
+    }
+
+    /// Enumerate every leading byte a character class can match.
+    ///
+    /// Returns `None` for a negated class or a named class we do not enumerate
+    /// (too broad / unknown), so the caller can fall back to no prefilter rather
+    /// than build an unsound partial one.
+    fn class_first_bytes(class: &crate::ir::hir::HirClass) -> Option<Vec<u8>> {
+        use crate::parser::NamedClass;
+        if class.negated {
+            return None;
+        }
+        let mut bytes: Vec<u8> = Vec::new();
+        let push = |b: u8, bytes: &mut Vec<u8>| {
+            if !bytes.contains(&b) {
+                bytes.push(b);
+            }
+        };
+        for &ch in &class.chars {
+            let mut buf = [0u8; 4];
+            push(ch.encode_utf8(&mut buf).as_bytes()[0], &mut bytes);
+        }
+        for &(s, e) in &class.ranges {
+            if s.is_ascii() && e.is_ascii() {
+                for b in (s as u8)..=(e as u8) {
+                    push(b, &mut bytes);
+                }
+            } else {
+                Self::add_utf8_leading_bytes(s, e, &mut bytes);
+            }
+        }
+        for named in &class.named {
+            match named {
+                NamedClass::Digit => {
+                    for b in b'0'..=b'9' {
+                        push(b, &mut bytes);
+                    }
+                }
+                NamedClass::Word => {
+                    for b in b'a'..=b'z' {
+                        push(b, &mut bytes);
+                    }
+                    for b in b'A'..=b'Z' {
+                        push(b, &mut bytes);
+                    }
+                    for b in b'0'..=b'9' {
+                        push(b, &mut bytes);
+                    }
+                    push(b'_', &mut bytes);
+                }
+                NamedClass::Whitespace => {
+                    for &b in b" \t\n\r\x0b\x0c" {
+                        push(b, &mut bytes);
+                    }
+                }
+                // Any / AnyExceptNewline / negated named classes / anything else
+                // are too broad or not safely enumerable: bail to no prefilter.
+                _ => return None,
+            }
+        }
+        Some(bytes)
     }
 
     /// Add UTF-8 leading bytes for a Unicode range to the prefilter.
@@ -1511,32 +1570,58 @@ impl Dfa {
     }
 
     /// Find using prefilter to skip non-candidate positions.
+    /// Fallback for `find_with_prefilter` once the prefilter scan has found no
+    /// non-empty match.
+    ///
+    /// If the pattern accepts the empty string the only remaining candidate is
+    /// an empty match, which is valid only where the pattern's anchors hold —
+    /// NOT unconditionally at position 0. `find_with_prefilter` is only reached
+    /// for start-unanchored patterns, so we just honor the end anchor: without
+    /// one the leftmost empty match is at position 0; with one it sits at
+    /// end-of-text (or before a newline in multiline mode), which `find_at`
+    /// verifies. Returns `None` when the pattern does not accept empty.
+    ///
+    /// This mirrors `find_linear`/`find_all` (which already handle the end
+    /// position correctly) and fixes `find` returning a bogus `(0, 0)` for
+    /// end-anchored empty-accepting patterns like `,?$`.
+    fn empty_match_fallback(&mut self, text: &str) -> Option<DfaMatch> {
+        // A prefilter scan surfaces only non-empty matches that begin at a
+        // prefilter byte. It cannot see a zero-width / empty match at a position
+        // with no such byte — most commonly an empty match at end-of-text for an
+        // end-anchored pattern (`,?$`, `(?:ab)?$`), whose DFA start state is NOT
+        // accepting (the accept needs the `$` transition), so keying off
+        // `start.is_accept` misses it. `find_at` evaluates the pattern's anchors
+        // at a position, so probe end-of-text (and, in multiline mode, each
+        // interior boundary where `$` may also hold). For patterns that cannot
+        // match empty this returns `None` in O(1), preserving prefilter speed.
+        if self.multi_line {
+            for (pos, _) in text.char_indices() {
+                if let Some(m) = self.find_at(text, pos) {
+                    return Some(m);
+                }
+            }
+        }
+        self.find_at(text, text.len())
+    }
+
     fn find_with_prefilter(&mut self, text: &str) -> Option<DfaMatch> {
         let bytes = text.as_bytes();
         let accepts_empty = self.states[self.start as usize].is_accept;
 
-        // For patterns that can match empty strings:
-        // - End-anchored patterns (like ^$) can only match empty if text is empty
-        // - Other patterns should try to find a longer match first via find_at
-        // We handle the empty-only case by trying find_at(0) first, which will
-        // return the longest match starting at position 0.
-        if accepts_empty && bytes.is_empty() {
-            // Empty text with pattern that accepts empty - return empty match
-            return Some(DfaMatch { start: 0, end: 0 });
+        // A byte prefilter is only a sound leftmost filter when every match must
+        // begin at a prefilter byte. That fails for empty-accepting patterns: an
+        // empty (or short) match can occur at a position the prefilter skips, and
+        // for an optional leading class the prefilter can even be a single
+        // representative byte (e.g. `[0-9]?` -> just `0`), missing `2`. So for
+        // these patterns we scan linearly instead. `find_linear` applies the
+        // pattern's anchors via `find_at` at every character boundary and at
+        // end-of-text, yielding the true leftmost match (e.g. `[0-9]?$` on "2.2"
+        // -> (2,3), not the empty (3,3)). find_at returns the longest match at a
+        // position, so greedy empty-accepting patterns like `\w*` still match
+        // fully at position 0 in O(1).
+        if accepts_empty {
+            return self.find_linear(text);
         }
-
-        // For non-empty text, try to find the longest match at position 0 first
-        // This handles patterns like a* that should match "aaa" not ""
-        if accepts_empty && !self.anchored_end {
-            if let Some(m) = self.find_at(text, 0) {
-                return Some(m);
-            }
-            // If no match at position 0, return empty match as fallback
-            return Some(DfaMatch { start: 0, end: 0 });
-        }
-
-        // For end-anchored patterns on non-empty text, fall through to regular matching
-        // (the end anchor check will reject empty matches at position 0)
 
         // Clone prefilter data to avoid borrow conflicts
         let prefilter = self.prefilter.clone();
@@ -1557,10 +1642,7 @@ impl Dfa {
                     offset = start + 1;
                 }
                 // Handle patterns that accept empty string
-                if accepts_empty {
-                    return Some(DfaMatch { start: 0, end: 0 });
-                }
-                None
+                self.empty_match_fallback(text)
             }
             DfaPrefilter::TwoBytes(needle1, needle2) => {
                 let mut offset = 0;
@@ -1571,10 +1653,7 @@ impl Dfa {
                     }
                     offset = start + 1;
                 }
-                if accepts_empty {
-                    return Some(DfaMatch { start: 0, end: 0 });
-                }
-                None
+                self.empty_match_fallback(text)
             }
             DfaPrefilter::ThreeBytes(needle1, needle2, needle3) => {
                 let mut offset = 0;
@@ -1585,10 +1664,7 @@ impl Dfa {
                     }
                     offset = start + 1;
                 }
-                if accepts_empty {
-                    return Some(DfaMatch { start: 0, end: 0 });
-                }
-                None
+                self.empty_match_fallback(text)
             }
             DfaPrefilter::ManyBytes(ref needles) => {
                 // Create a byte set for O(1) lookup
@@ -1609,10 +1685,7 @@ impl Dfa {
                         break;
                     }
                 }
-                if accepts_empty {
-                    return Some(DfaMatch { start: 0, end: 0 });
-                }
-                None
+                self.empty_match_fallback(text)
             }
             DfaPrefilter::Literal(ref lit) => {
                 let finder = memmem::Finder::new(lit);
@@ -1624,10 +1697,7 @@ impl Dfa {
                     }
                     offset = start + 1;
                 }
-                if accepts_empty {
-                    return Some(DfaMatch { start: 0, end: 0 });
-                }
-                None
+                self.empty_match_fallback(text)
             }
             DfaPrefilter::CharClassRanges(ref ranges) => {
                 use super::simd_class::RevSearchRanges;
@@ -1640,7 +1710,7 @@ impl Dfa {
                     }
                     offset = start + 1;
                 }
-                None
+                self.empty_match_fallback(text)
             }
         }
     }

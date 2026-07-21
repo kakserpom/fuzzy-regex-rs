@@ -247,6 +247,15 @@ impl FuzzyBridge {
         self.patterns.len() + self.word_list_patterns.len()
     }
 
+    /// Enable minimum-edit end selection on every Bitap matcher
+    /// (`MatchEndPolicy::MinEdit`). No-op for patterns that fall back to the NFA
+    /// (which already reports the leftmost minimal-edit match).
+    pub fn set_prefer_min_edit(&mut self, yes: bool) {
+        for bitap in self.bitap_matchers.iter_mut().flatten() {
+            bitap.set_prefer_min_edit(yes);
+        }
+    }
+
     /// Get the limits for patterns.
     #[must_use]
     pub fn limits(&self) -> &[Option<FuzzyLimits>] {
@@ -521,8 +530,27 @@ impl FuzzyBridge {
             return matches;
         }
 
-        // Fallback to NFA
-        self.automata[pattern_idx].find_all(text, pattern_threshold)
+        // Fallback to NFA. `find_all` returns every (overlapping) candidate
+        // match; a non-overlapping search must return leftmost, best-per-start,
+        // non-overlapping matches. Sort by (start, fewest edits, shortest end)
+        // — so the first element equals `search_first`/`find_first` and `find`
+        // agrees with `find_iter().next()` — then greedily drop overlaps.
+        let mut all = self.automata[pattern_idx].find_all(text, pattern_threshold);
+        all.sort_by(|a, b| {
+            a.start
+                .cmp(&b.start)
+                .then_with(|| a.total_edits().cmp(&b.total_edits()))
+                .then_with(|| a.end.cmp(&b.end))
+        });
+        let mut result: Vec<super::damlev::DamLevMatch> = Vec::new();
+        let mut last_end = 0;
+        for m in all {
+            if m.start >= last_end {
+                last_end = m.end;
+                result.push(m);
+            }
+        }
+        result
     }
 
     /// Find up to `n` non-overlapping matches for a single pattern.
@@ -589,49 +617,62 @@ impl FuzzyBridge {
             return None;
         }
 
-        // Fast path: try exact substring match first
-        // This is much faster than Bitap when the pattern exists verbatim in text
-        let pattern = &self.patterns[pattern_idx];
-        if let Some(pos) = text.find(pattern) {
-            // Verify exact match meets threshold (always does for similarity=1.0)
-            let sim = 1.0f32;
-            if sim >= threshold {
-                // Check if pattern text fits within text bounds
-                let end = pos + pattern.len();
-                if end <= text.len() {
-                    return Some(super::damlev::DamLevMatch {
-                        start: pos,
-                        end,
-                        insertions: 0,
-                        deletions: 0,
-                        substitutions: 0,
-                        swaps: 0,
-                        similarity: sim,
-                    });
+        // Fast path: try exact substring match first.
+        //
+        // Only sound for NON-fuzzy patterns. With fuzzy edits, a fuzzy match can
+        // occur to the LEFT of the first exact occurrence, and `find` must return
+        // the leftmost match (to agree with `find_iter`). For example,
+        // `(?:test){e<=1}` on "best tset trial test" — the leftmost match is the
+        // fuzzy "best" at 0, not the exact "test" at 16. For exact patterns
+        // `str::find` already yields the leftmost match, so the shortcut is both
+        // correct and faster than Bitap.
+        if self.pattern_max_edits(pattern_idx).unwrap_or(0) == 0 {
+            let pattern = &self.patterns[pattern_idx];
+            if let Some(pos) = text.find(pattern) {
+                // Verify exact match meets threshold (always does for similarity=1.0)
+                let sim = 1.0f32;
+                if sim >= threshold {
+                    // Check if pattern text fits within text bounds
+                    let end = pos + pattern.len();
+                    if end <= text.len() {
+                        return Some(super::damlev::DamLevMatch {
+                            start: pos,
+                            end,
+                            insertions: 0,
+                            deletions: 0,
+                            substitutions: 0,
+                            swaps: 0,
+                            similarity: sim,
+                        });
+                    }
                 }
             }
         }
 
         let pattern_threshold = self.calculate_effective_threshold(pattern_idx, threshold);
 
+        // Char-class edit restrictions (`{s<=1:[0-9]}`): the first Bitap match
+        // may fail the restriction while a LATER match passes. Taking the first
+        // match and filtering would return None (or the wrong match), diverging
+        // from `find_iter`. Delegate to the same non-overlapping search
+        // `find_iter` uses (which filters each match by the restriction) and take
+        // the leftmost, so `find` == `find_iter().next()`.
+        if self.has_char_restrictions
+            && self
+                .edit_char_restrictions
+                .get(pattern_idx)
+                .and_then(|r| r.as_ref())
+                .is_some()
+        {
+            return self
+                .search_non_overlapping(text, threshold, pattern_idx, false)
+                .into_iter()
+                .next();
+        }
+
         // Use Bitap for first match - needed for fuzzy matching
         if let Some(ref bitap) = self.bitap_matchers[pattern_idx] {
-            let result = bitap.find_first_non_overlapping(text, pattern_threshold);
-
-            // Validate character class restrictions if present
-            if self.has_char_restrictions
-                && let Some(restriction) = self
-                    .edit_char_restrictions
-                    .get(pattern_idx)
-                    .and_then(|r| r.as_ref())
-            {
-                return result.filter(|m| {
-                    let matched_text = &text[m.start..m.end];
-                    self.validate_edit_chars(&self.patterns[pattern_idx], matched_text, restriction)
-                });
-            }
-
-            return result;
+            return bitap.find_first_non_overlapping(text, pattern_threshold);
         }
 
         // Fallback to NFA

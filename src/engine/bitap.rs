@@ -98,6 +98,10 @@ pub struct BitapMatcher {
     /// `block_base` is the start codepoint (e.g., 0x0400 for Cyrillic).
     unicode_block_base: u32,
     unicode_block_masks: Option<Box<[u64; 256]>>,
+    /// When true, a reported match's end is refined to the minimum-edit end
+    /// (ties broken by shortest span) instead of the default longest-within-budget
+    /// end. Set from `MatchEndPolicy::MinEdit`. Default is false.
+    prefer_min_edit: bool,
 }
 
 impl BitapMatcher {
@@ -187,7 +191,87 @@ impl BitapMatcher {
             accept_mask,
             unicode_block_base,
             unicode_block_masks,
+            prefer_min_edit: false,
         })
+    }
+
+    /// Enable minimum-edit end selection (`MatchEndPolicy::MinEdit`).
+    ///
+    /// When set, reported matches have their end refined to the minimum-edit
+    /// end (fewest edits, then shortest span) rather than the default
+    /// longest-within-budget end.
+    pub fn set_prefer_min_edit(&mut self, yes: bool) {
+        self.prefer_min_edit = yes;
+    }
+
+    /// Refine a match's end to the minimum-edit end for its fixed start when
+    /// `prefer_min_edit` is set; otherwise return the match unchanged.
+    ///
+    /// Holding `m.start` fixed, this scans candidate ends across the pattern's
+    /// edit window and returns the end that minimizes the edit count (ties
+    /// broken by the shortest span). This mirrors `DamLevNfa::find_first`'s
+    /// leftmost/fewest-edits/shortest-span selection so that the Bitap-backed
+    /// simple-fuzzy fast paths agree with the NFA paths under
+    /// `MatchEndPolicy::MinEdit`.
+    #[inline]
+    fn refine_min_edit_end(&self, m: DamLevMatch, text: &[u8], threshold: f32) -> DamLevMatch {
+        if !self.prefer_min_edit {
+            return m;
+        }
+        let max_edits = self.limits.max_edits as usize;
+        // Cap the scan window for unlimited/large budgets: a minimal alignment
+        // never needs more than `pattern_len` net insertions/deletions.
+        let eff_edits = max_edits.min(self.pattern_len.max(1));
+        let min_len = self.pattern_len.saturating_sub(eff_edits).max(1);
+        let max_len = self.pattern_len + eff_edits;
+
+        let start = m.start;
+        let mut chosen: Option<DamLevMatch> = None;
+        let mut end = start;
+        let mut char_count = 0usize;
+        while end < text.len() && char_count < max_len {
+            let (_, char_len) = decode_utf8_char_fast(text, end);
+            end += char_len;
+            char_count += 1;
+            if char_count < min_len {
+                continue;
+            }
+            let (insertions, deletions, substitutions, swaps) =
+                self.compute_exact_edit_breakdown(&text[start..end]);
+            let total = insertions + deletions + substitutions + swaps;
+            if total as usize > max_edits {
+                continue;
+            }
+            let sim = self.calc_similarity(total, insertions, deletions);
+            if sim < threshold {
+                continue;
+            }
+            let cand = DamLevMatch {
+                start,
+                end,
+                insertions,
+                deletions,
+                substitutions,
+                swaps,
+                similarity: sim,
+            };
+            chosen = Some(match chosen {
+                None => cand,
+                Some(cur) => {
+                    // Prefer fewest edits, then the span closest to the pattern
+                    // length (natural alignment), then the shortest span. The
+                    // length tie-break keeps a full-length alignment (e.g.
+                    // "regex" for `error{e}`) over a degenerate short one (e.g.
+                    // "r" via 4 deletions), matching mrab-regex's reporting.
+                    let key = |m: &DamLevMatch| {
+                        let span = m.end - m.start;
+                        (m.total_edits(), span.abs_diff(self.pattern_len), span)
+                    };
+                    if key(&cand) < key(&cur) { cand } else { cur }
+                }
+            });
+        }
+        chosen.unwrap_or(m)
     }
 
     /// Returns the original pattern string.
@@ -1020,6 +1104,7 @@ impl BitapMatcher {
 
                 if chars_since_pending >= commit_threshold {
                     let (_, m) = pending_match.take().unwrap();
+                    let m = self.refine_min_edit_end(m, text_bytes, threshold);
                     last_end = m.end;
                     matches.push(m);
 
@@ -1045,6 +1130,7 @@ impl BitapMatcher {
 
         // Commit any remaining pending match
         if let Some((_, m)) = pending_match {
+            let m = self.refine_min_edit_end(m, text_bytes, threshold);
             matches.push(m);
         }
 
@@ -1269,7 +1355,7 @@ impl BitapMatcher {
 
                 if chars_since_pending >= commit_threshold {
                     let (_, m) = pending_match.take().unwrap();
-                    return Some(m);
+                    return Some(self.refine_min_edit_end(m, text, threshold));
                 }
             }
 
@@ -1277,7 +1363,7 @@ impl BitapMatcher {
         }
 
         // Return any pending match
-        pending_match.map(|(_, m)| m)
+        pending_match.map(|(_, m)| self.refine_min_edit_end(m, text, threshold))
     }
 
     /// Total Damerau-Levenshtein distance between the pattern and `matched_text`.
