@@ -10,6 +10,8 @@ pub mod builder;
 pub mod match_result;
 pub mod regex;
 pub mod streaming;
+#[cfg(feature = "word-list-ac")]
+pub(crate) mod word_list_ac;
 
 pub use builder::{
     FuzzyRegexBuilder, Handler, HandlerMap, HandlerResult, MatchEndPolicy, MatchFlags, RegexConfig,

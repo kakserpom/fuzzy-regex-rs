@@ -348,3 +348,67 @@ fn named_list_expands_into_nfa_alternation() {
     empty.set_word_list("w", Vec::<&str>::new());
     assert!(!empty.is_match("dog"));
 }
+
+/// A large `\L<name>` list uses the Aho-Corasick fast path (when the
+/// `word-list-ac` feature is on). It must return the same results as the
+/// equivalent explicit alternation, which uses the NFA.
+#[test]
+fn large_word_list_matches_nfa_alternation() {
+    // Well over the AC threshold (64) so the fast path engages.
+    let mut words: Vec<String> = (0..200).map(|i| format!("wxq{i}")).collect();
+    for w in ["cat", "dog", "frog", "cats"] {
+        words.push(w.to_string());
+    }
+
+    let mut ac = FuzzyRegex::new(r"\b\L<w>\b").unwrap();
+    ac.set_word_list("w", words.clone());
+
+    // Reference: the same words as an explicit alternation (NFA path).
+    let alt = format!(r"\b(?:{})\b", words.join("|"));
+    let nfa = FuzzyRegex::new(&alt).unwrap();
+
+    for text in [
+        "a dog x",
+        "adogx",
+        "dog cat",
+        "cats and a frog",
+        "wxq5 here",
+        "nothing here",
+        "the cats sat",
+        "",
+    ] {
+        let a = ac.find(text).map(|m| (m.start(), m.end()));
+        let n = nfa.find(text).map(|m| (m.start(), m.end()));
+        assert_eq!(a, n, "find disagrees on {text:?}");
+
+        let ai: Vec<_> = ac.find_iter(text).map(|m| (m.start(), m.end())).collect();
+        let ni: Vec<_> = nfa.find_iter(text).map(|m| (m.start(), m.end())).collect();
+        assert_eq!(ai, ni, "find_iter disagrees on {text:?}");
+
+        // captures group 0 matches find
+        assert_eq!(
+            ac.captures(text)
+                .and_then(|c| c.get(0))
+                .map(|m| (m.start(), m.end())),
+            a,
+            "captures disagrees with find on {text:?}"
+        );
+    }
+
+    // \b is genuinely honored by the fast path.
+    assert!(ac.find("xdogx").is_none());
+    // Longest-wins among words sharing a prefix.
+    assert_eq!(
+        ac.find("cats").map(|m| m.as_str().to_string()),
+        Some("cats".into())
+    );
+
+    // Fuzzy over a large list.
+    let mut fz = FuzzyRegex::new(r"\b\L<w>{e<=1}\b").unwrap();
+    fz.set_word_list("w", words);
+    assert!(fz.is_match("cot")); // 1 sub from cat
+    assert_eq!(
+        fz.find("a cot x").map(|m| m.as_str().to_string()),
+        Some("cot".into())
+    );
+}

@@ -128,6 +128,11 @@ pub struct FuzzyRegex {
     /// Names of every `\L<name>` reference in the pattern (compile-time). Used to
     /// detect unresolved references — an unset list matches nothing.
     named_list_names: Vec<SmartStr>,
+    /// Aho-Corasick fast path for a large pure word-list pattern (`\L<name>`
+    /// wrapped only in anchors/boundaries). When present, matching is served by
+    /// this instead of the NFA. `None` for small lists / non-pure patterns.
+    #[cfg(feature = "word-list-ac")]
+    word_list_ac: Option<crate::api::word_list_ac::WordListAc>,
     /// Custom handlers for (?call:name) patterns.
     handlers: HandlerMap,
 }
@@ -219,8 +224,24 @@ impl FuzzyRegex {
         base_ast: Ast,
         word_lists: FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
     ) -> Self {
+        // Large pure word-list patterns are served by an Aho-Corasick fast path
+        // instead of a huge NFA alternation. When one applies, its list name is
+        // NOT expanded into the NFA (which would be exactly the automaton we are
+        // trying to avoid building).
+        #[cfg(feature = "word-list-ac")]
+        let (word_list_ac, ac_name) = build_word_list_ac(&base_ast, &word_lists, &config);
+
         // Expand resolved \L<name> references into (?:w1|w2|...) alternations,
         // preserving each reference's wrapping group fuzziness.
+        #[cfg(feature = "word-list-ac")]
+        let ast = if let Some(name) = &ac_name {
+            let mut without_ac = word_lists.clone();
+            without_ac.remove(name.as_str());
+            expand_named_lists_ast(&base_ast, &without_ac)
+        } else {
+            expand_named_lists_ast(&base_ast, &word_lists)
+        };
+        #[cfg(not(feature = "word-list-ac"))]
         let ast = expand_named_lists_ast(&base_ast, &word_lists);
 
         // Count captures and collect named groups
@@ -510,6 +531,8 @@ impl FuzzyRegex {
             lookahead_fast,
             word_lists,
             named_list_names,
+            #[cfg(feature = "word-list-ac")]
+            word_list_ac,
             handlers: config.handlers,
         }
     }
@@ -523,6 +546,33 @@ impl FuzzyRegex {
         self.named_list_names
             .iter()
             .any(|name| self.word_lists.get(name).is_none_or(Vec::is_empty))
+    }
+
+    /// Convert a word-list Aho-Corasick match into a `Match`.
+    #[cfg(feature = "word-list-ac")]
+    #[allow(clippy::unused_self)]
+    fn wl_to_match<'t>(&self, text: &'t str, m: &crate::api::word_list_ac::WlMatch) -> Match<'t> {
+        Match::new(text, m.start, m.end, m.similarity, m.edits.clone())
+    }
+
+    /// Build group-0 `Captures` from a word-list Aho-Corasick match (a pure
+    /// word-list pattern has no capture groups, so only group 0 is populated).
+    #[cfg(feature = "word-list-ac")]
+    fn wl_to_captures<'t>(
+        &self,
+        text: &'t str,
+        m: &crate::api::word_list_ac::WlMatch,
+    ) -> Captures<'t> {
+        let mut slots = vec![None; self.capture_count + 1];
+        slots[0] = Some((m.start, m.end));
+        Captures::new(
+            text,
+            self.named_groups.clone(),
+            slots,
+            Vec::new(),
+            m.edits.clone(),
+            m.similarity,
+        )
     }
 
     /// Get the original pattern string.
@@ -753,6 +803,12 @@ impl FuzzyRegex {
         // placeholder the NFA would produce.
         if self.has_unresolved_named_lists() {
             return None;
+        }
+
+        // Large pure word-list pattern: served by the Aho-Corasick fast path.
+        #[cfg(feature = "word-list-ac")]
+        if let Some(ac) = &self.word_list_ac {
+            return ac.find(text).map(|m| self.wl_to_match(text, &m));
         }
 
         // Use backtracking engine for recursive patterns
@@ -1441,6 +1497,11 @@ impl FuzzyRegex {
             return None;
         }
 
+        #[cfg(feature = "word-list-ac")]
+        if let Some(ac) = &self.word_list_ac {
+            return ac.find_at(text, start).map(|m| self.wl_to_match(text, &m));
+        }
+
         let matcher = self.create_matcher(self.is_unanchored());
 
         // Optimization for end-anchored patterns: only check positions near the end
@@ -1609,6 +1670,15 @@ impl FuzzyRegex {
         // Unresolved \L<name> matches nothing.
         if self.has_unresolved_named_lists() {
             return Matches::new(Vec::new());
+        }
+        #[cfg(feature = "word-list-ac")]
+        if let Some(ac) = &self.word_list_ac {
+            return Matches::new(
+                ac.matches(text)
+                    .iter()
+                    .map(|m| self.wl_to_match(text, m))
+                    .collect(),
+            );
         }
 
         // Fast path for simple exact literal patterns: use lazy iterator
@@ -2863,6 +2933,14 @@ impl FuzzyRegex {
         if self.has_unresolved_named_lists() {
             return Vec::new();
         }
+        #[cfg(feature = "word-list-ac")]
+        if let Some(ac) = &self.word_list_ac {
+            return ac
+                .all(text)
+                .iter()
+                .map(|m| self.wl_to_captures(text, m))
+                .collect();
+        }
         let matcher = self.create_matcher(self.is_unanchored());
         let mut results = Vec::new();
 
@@ -2906,6 +2984,10 @@ impl FuzzyRegex {
         if self.has_unresolved_named_lists() {
             return None;
         }
+        #[cfg(feature = "word-list-ac")]
+        if let Some(ac) = &self.word_list_ac {
+            return ac.find(text).map(|m| self.wl_to_captures(text, &m));
+        }
         let matcher = self.create_matcher(self.is_unanchored());
         matcher.find(text).map(|m| self.convert_captures(text, m))
     }
@@ -2915,6 +2997,12 @@ impl FuzzyRegex {
         // Unresolved \L<name> matches nothing.
         if self.has_unresolved_named_lists() {
             return None;
+        }
+        #[cfg(feature = "word-list-ac")]
+        if let Some(ac) = &self.word_list_ac {
+            return ac
+                .find_at(text, start)
+                .map(|m| self.wl_to_captures(text, &m));
         }
         let matcher = self.create_matcher(self.is_unanchored());
         for (idx, _) in text[start..].char_indices() {
@@ -3331,6 +3419,131 @@ impl Clone for FuzzyRegex {
             self.word_lists.clone(),
         )
     }
+}
+
+/// A pure word-list pattern: a single `\L<name>` (with optional fuzziness)
+/// wrapped only in `^`/`$` anchors and/or `\b` word boundaries, no captures.
+#[cfg(feature = "word-list-ac")]
+struct WordListShape {
+    name: String,
+    fuzziness: crate::parser::ast::Fuzziness,
+    start_anchor: bool,
+    end_anchor: bool,
+    start_wb: bool,
+    end_wb: bool,
+}
+
+/// Detect the pure word-list shape (see [`WordListShape`]). Returns `None` for
+/// anything else, so those patterns keep using the NFA.
+#[cfg(feature = "word-list-ac")]
+fn detect_word_list_shape(ast: &Ast) -> Option<WordListShape> {
+    use crate::parser::ast::Fuzziness;
+    // A `\L<name>` node: `NonCapturingGroup { fuzziness, expr: NamedList }`.
+    fn as_named_list(a: &Ast) -> Option<(&str, &Fuzziness)> {
+        if let Ast::NonCapturingGroup { expr, fuzziness } = a
+            && let Ast::NamedList { name } = expr.as_ref()
+        {
+            Some((name.as_str(), fuzziness))
+        } else {
+            None
+        }
+    }
+
+    if let Some((name, fz)) = as_named_list(ast) {
+        return Some(WordListShape {
+            name: name.to_string(),
+            fuzziness: fz.clone(),
+            start_anchor: false,
+            end_anchor: false,
+            start_wb: false,
+            end_wb: false,
+        });
+    }
+
+    let Ast::Concat(parts) = ast else {
+        return None;
+    };
+    // Exactly one `\L<name>` group; every other part must be an anchor / `\b`.
+    let mut group_idx = None;
+    for (i, p) in parts.iter().enumerate() {
+        if as_named_list(p).is_some() {
+            if group_idx.is_some() {
+                return None;
+            }
+            group_idx = Some(i);
+        } else if !matches!(
+            p,
+            Ast::Anchor(Anchor::Start | Anchor::End | Anchor::WordBoundary)
+        ) {
+            return None;
+        }
+    }
+    let gi = group_idx?;
+    let (name, fz) = as_named_list(&parts[gi])?;
+    let mut shape = WordListShape {
+        name: name.to_string(),
+        fuzziness: fz.clone(),
+        start_anchor: false,
+        end_anchor: false,
+        start_wb: false,
+        end_wb: false,
+    };
+    for (i, p) in parts.iter().enumerate() {
+        if let Ast::Anchor(a) = p {
+            match a {
+                Anchor::Start => shape.start_anchor = true,
+                Anchor::End => shape.end_anchor = true,
+                Anchor::WordBoundary if i < gi => shape.start_wb = true,
+                Anchor::WordBoundary => shape.end_wb = true,
+                Anchor::NotWordBoundary => {}
+            }
+        }
+    }
+    Some(shape)
+}
+
+/// If the pattern is a large pure word-list, build its Aho-Corasick fast path.
+/// Returns the automaton and the list name it serves (so the caller can skip
+/// expanding that name into the NFA). Falls back to `(None, None)` — keeping the
+/// NFA — for small lists, multiline `^`/`$`, or edit budgets the fast path can't
+/// represent (per-op or cost constraints).
+#[cfg(feature = "word-list-ac")]
+fn build_word_list_ac(
+    base_ast: &Ast,
+    word_lists: &FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
+    config: &RegexConfig,
+) -> (Option<crate::api::word_list_ac::WordListAc>, Option<String>) {
+    let Some(shape) = detect_word_list_shape(base_ast) else {
+        return (None, None);
+    };
+    let Some(words) = word_lists.get(shape.name.as_str()) else {
+        return (None, None);
+    };
+    if words.len() <= crate::api::word_list_ac::THRESHOLD {
+        return (None, None);
+    }
+    if config.multi_line && (shape.start_anchor || shape.end_anchor) {
+        return (None, None);
+    }
+    // Only a simple total edit budget is representable here.
+    let edits = match shape.fuzziness.to_limits(config.default_edits) {
+        None => 0, // exact
+        Some(limits) => match limits.get_edits() {
+            Some(e) => e,
+            None => return (None, None), // per-op / cost constraint -> NFA
+        },
+    };
+    let ac = crate::api::word_list_ac::WordListAc::build(
+        words,
+        edits,
+        config.case_insensitive,
+        config.similarity_threshold,
+        shape.start_anchor,
+        shape.end_anchor,
+        shape.start_wb,
+        shape.end_wb,
+    );
+    (Some(ac), Some(shape.name))
 }
 
 /// Expand every resolved `\L<name>` reference in the AST into an alternation of

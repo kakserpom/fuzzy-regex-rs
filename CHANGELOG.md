@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Aho-Corasick fast path for large `\L<name>` word lists, behind the new
+  default-on `word-list-ac` feature (uses the
+  [`fuzzy-aho-corasick`](https://github.com/kakserpom/fuzzy-aho-corasick-rs)
+  crate). A *pure word-list* pattern — a single `\L<name>` (optionally fuzzy)
+  wrapped only in `^`/`$` anchors and/or `\b` word boundaries, with no capture
+  groups — whose resolved list exceeds a threshold is matched by a single
+  Aho-Corasick pass instead of being expanded into an NFA alternation of every
+  word (which is slow to build and scan for large lists). Selection is
+  leftmost-longest and non-overlapping, and the surrounding anchors/boundaries
+  are enforced against the full text, so results match the NFA alternation
+  exactly (verified in tests). Small lists and non-pure patterns keep using the
+  NFA. Disable the feature for a lighter dependency tree if you do not use large
+  named lists. A 5000-word list compiles in a few milliseconds and matches in
+  microseconds.
 - Real expected values for the 73 mrab corpus "skeleton" cases (previously just a
   name + pattern with no assertion, so they verified nothing). These mirror
   mrab's compile-only tests (`repr(type(regex.compile(...))) == PATTERN_CLASS`),

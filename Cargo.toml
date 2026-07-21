@@ -14,10 +14,14 @@ documentation = "https://kakserpom.github.io/fuzzy-regex-rs/"
 include = ["/src/**/*.rs", "/Cargo.toml", "/README.md", "/CHANGELOG.md"]
 
 [features]
-default = ["simd"]
+default = ["simd", "word-list-ac"]
 simd = []
 mimalloc = ["dep:mimalloc"]
 fuzzy-aho-corasick = ["dep:aho-corasick"]
+# Aho-Corasick fast path for large `\L<name>` word lists (uses the
+# fuzzy-aho-corasick crate). On by default; disable for a lighter dependency
+# tree if you do not use large named lists.
+word-list-ac = ["dep:fuzzy-aho-corasick"]
 
 [dependencies]
 unicode-segmentation = "1.12"
@@ -25,13 +29,14 @@ thiserror = "2.0"
 memchr = "2.8"
 mimalloc = { version = "0.1", default-features = false, optional = true }
 aho-corasick = { version = "1.1", optional = true }
+fuzzy-aho-corasick = { version = "0.4", optional = true }
 
 [dev-dependencies]
 criterion = "0.8.2"
 regex = "1"
 arbitrary = { version = "1", features = ["derive"] }
 proptest = "1.10"
-fuzzy-aho-corasick = "0.3.7"
+fuzzy-aho-corasick = "0.4"
 toml = "0.8"
 serde = { version = "1.0.229", features = ["derive"] }
 
