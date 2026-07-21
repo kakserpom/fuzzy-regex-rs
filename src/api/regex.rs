@@ -122,6 +122,9 @@ pub struct FuzzyRegex {
     /// Named word lists for \L<name> patterns.
     /// Map from list name to vector of words.
     word_lists: FxHashMap<SmartStr, Vec<Cow<'static, str>>>,
+    /// Names of every `\L<name>` reference in the pattern (compile-time). Used to
+    /// detect unresolved references — an unset list matches nothing.
+    named_list_names: Vec<SmartStr>,
     /// Custom handlers for (?call:name) patterns.
     handlers: HandlerMap,
 }
@@ -218,6 +221,10 @@ impl FuzzyRegex {
 
         // Create prefilter from leading literal (if pattern starts with a literal)
         let prefilter = Arc::new(create_prefilter_from_hir(&hir, config.case_insensitive));
+
+        // Collect \L<name> references so unresolved ones short-circuit matching.
+        let mut named_list_names = Vec::new();
+        hir_named_list_names(&hir, &mut named_list_names);
 
         // Detect if pattern is anchored at start
         let anchored = is_anchored_at_start(&hir);
@@ -474,8 +481,20 @@ impl FuzzyRegex {
             lookbehind_fast,
             lookahead_fast,
             word_lists: FxHashMap::default(),
+            named_list_names,
             handlers: config.handlers,
         })
+    }
+
+    /// Whether the pattern references a `\L<name>` list that has not yet been
+    /// provided via [`set_word_list`](Self::set_word_list). An unresolved list is
+    /// an empty alternation and matches nothing, so all matching short-circuits
+    /// to "no match" rather than the empty-string placeholder the NFA would
+    /// otherwise produce.
+    fn has_unresolved_named_lists(&self) -> bool {
+        self.named_list_names
+            .iter()
+            .any(|name| !self.word_lists.contains_key(name))
     }
 
     /// Get the original pattern string.
@@ -693,6 +712,13 @@ impl FuzzyRegex {
     /// consistency guard that keeps this in sync with `find_iter`.
     #[inline]
     fn find_dispatch<'t>(&self, text: &'t str) -> Option<Match<'t>> {
+        // An unresolved \L<name> reference matches nothing (see the note on
+        // has_unresolved_named_lists): report no match instead of the empty-string
+        // placeholder the NFA would produce.
+        if self.has_unresolved_named_lists() {
+            return None;
+        }
+
         // Use backtracking engine for recursive patterns
         if self.has_recursion {
             return self.find_with_backtrack(text);
@@ -1687,6 +1713,10 @@ impl FuzzyRegex {
     /// The full text is passed to the matcher for proper boundary handling
     /// (e.g., `\b` word boundaries need context from preceding characters).
     pub fn find_at<'t>(&self, text: &'t str, start: usize) -> Option<Match<'t>> {
+        // Unresolved \L<name> matches nothing.
+        if self.has_unresolved_named_lists() {
+            return None;
+        }
         // For patterns anchored at start (not multiline), only match at position 0
         if self.anchored && !self.config.multi_line && start > 0 {
             return None;
@@ -1770,6 +1800,10 @@ impl FuzzyRegex {
     /// Uses efficient reverse DFA when available for exact patterns.
     /// For fuzzy patterns, falls back to finding all matches.
     pub fn find_rev<'t>(&self, text: &'t str) -> Option<Match<'t>> {
+        // Unresolved \L<name> matches nothing.
+        if self.has_unresolved_named_lists() {
+            return None;
+        }
         // Fast path: use DFA reverse search when available
         if let Some(ref dfa_cell) = self.dfa {
             if let Some(m) = dfa_cell.borrow_mut().find_rev(text) {
@@ -1798,6 +1832,10 @@ impl FuzzyRegex {
     /// Searches from the end of the text, finding matches starting from the right.
     /// Uses efficient reverse scanning - O(n × states) instead of O(n × matches).
     pub fn find_iter_rev<'t>(&self, text: &'t str) -> Vec<Match<'t>> {
+        // Unresolved \L<name> matches nothing.
+        if self.has_unresolved_named_lists() {
+            return Vec::new();
+        }
         // Find all matches using efficient scanning from right
         if let Some(ref dfa_cell) = self.dfa {
             let mut dfa = dfa_cell.borrow_mut();
@@ -1854,6 +1892,10 @@ impl FuzzyRegex {
     ///
     /// Panics if the fast path literal pointer is null (internal invariant).
     pub fn find_iter<'t>(&self, text: &'t str) -> Matches<'t> {
+        // Unresolved \L<name> matches nothing.
+        if self.has_unresolved_named_lists() {
+            return Matches::new(Vec::new());
+        }
         // Word list fast path: handle \L<name> patterns
         if !self.word_lists.is_empty() {
             return Matches::new(self.find_all_word_list(text));
@@ -3107,6 +3149,10 @@ impl FuzzyRegex {
         text: &'t str,
         similarity_threshold: f32,
     ) -> Vec<Captures<'t>> {
+        // Unresolved \L<name> matches nothing.
+        if self.has_unresolved_named_lists() {
+            return Vec::new();
+        }
         let matcher = self.create_matcher(self.is_unanchored());
         let mut results = Vec::new();
 
@@ -3146,12 +3192,20 @@ impl FuzzyRegex {
 
     /// Get captures for the first match.
     pub fn captures<'t>(&self, text: &'t str) -> Option<Captures<'t>> {
+        // Unresolved \L<name> matches nothing.
+        if self.has_unresolved_named_lists() {
+            return None;
+        }
         let matcher = self.create_matcher(self.is_unanchored());
         matcher.find(text).map(|m| self.convert_captures(text, m))
     }
 
     /// Get captures starting at a specific position.
     pub fn captures_at<'t>(&self, text: &'t str, start: usize) -> Option<Captures<'t>> {
+        // Unresolved \L<name> matches nothing.
+        if self.has_unresolved_named_lists() {
+            return None;
+        }
         let matcher = self.create_matcher(self.is_unanchored());
         for (idx, _) in text[start..].char_indices() {
             if let Some(m) = matcher.find(&text[start + idx..]) {
@@ -3837,6 +3891,29 @@ fn hir_starts_with_lazy_dotstar(hir: &Hir) -> bool {
                         && c.named.iter().all(|n| matches!(n,
                             NamedClass::Any | NamedClass::AnyExceptNewline)))
     )
+}
+
+/// Collect the names of every `\L<name>` named-list reference in the pattern.
+///
+/// A `\L<name>` compiles to a placeholder that is resolved later via
+/// [`FuzzyRegex::set_word_list`]. Until the list is provided the reference is an
+/// empty alternation (matches nothing), so the match entry points consult these
+/// names to short-circuit to "no match" when any is still unresolved.
+fn hir_named_list_names(hir: &Hir, out: &mut Vec<String>) {
+    match hir {
+        Hir::NamedList { name } => out.push(name.clone()),
+        Hir::Concat(parts) | Hir::Alt(parts) => {
+            for p in parts {
+                hir_named_list_names(p, out);
+            }
+        }
+        Hir::Repeat { expr, .. }
+        | Hir::Capture { expr, .. }
+        | Hir::Lookahead { expr, .. }
+        | Hir::Lookbehind { expr, .. }
+        | Hir::AtomicGroup { expr } => hir_named_list_names(expr, out),
+        _ => {}
+    }
 }
 
 /// Minimum characters the leading greedy dot-repeat of a `.*SUFFIX`/`.+SUFFIX`

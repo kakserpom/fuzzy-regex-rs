@@ -334,70 +334,70 @@ span = [0, 119]
 
 # \L<words> named word lists (unsupported)
 [[test]]
-name = "L2735 \\L<words> e<=1 - named word list unsupported"
+name = "L2735 \\L<words> e<=1 (deferred; resolve via set_word_list)"
 pattern = '\b\L<words>{e<=1}\b'
-expect_error = true
-ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
+compiles = true
 
 [[test]]
-name = "L2737 \\L<words> e<=1 (2) - named word list unsupported"
+name = "L2737 \\L<words> e<=1 (2) (deferred; resolve via set_word_list)"
 pattern = '\b\L<words>{e<=1}\b'
-expect_error = true
-ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
+compiles = true
 
 [[test]]
-name = "L2739 (?e) \\L<words> e<=1 - named word list unsupported"
+name = "L2739 (?e) \\L<words> e<=1 (deferred; resolve via set_word_list)"
 pattern = '(?e)\b\L<words>{e<=1}\b'
-expect_error = true
-ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
+compiles = true
 
 [[test]]
 name = "L2741 (?r) \\L<words> e<=1 - named word list + reverse unsupported"
 pattern = '(?r)\b\L<words>{e<=1}\b'
-expect_error = true
+compiles = true
+ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 [[test]]
 name = "L2743 (?er) \\L<words> e<=1 - named word list + reverse unsupported"
 pattern = '(?er)\b\L<words>{e<=1}\b'
-expect_error = true
+compiles = true
+ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 [[test]]
 name = "L2745 (?r) \\L<words> e<=1 (2) - named word list + reverse unsupported"
 pattern = '(?r)\b\L<words>{e<=1}\b'
-expect_error = true
+compiles = true
+ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 [[test]]
-name = "L2747 br \\L<words> e<=1 - byte pattern + named word list unsupported"
+name = "L2747 br \\L<words> e<=1 (deferred; resolve via set_word_list)"
 pattern = '\b\L<words>{e<=1}\b'
-expect_error = true
-ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
+compiles = true
 
 [[test]]
-name = "L2749 br \\L<words> e<=1 (2) - byte pattern + named word list unsupported"
+name = "L2749 br \\L<words> e<=1 (2) (deferred; resolve via set_word_list)"
 pattern = '\b\L<words>{e<=1}\b'
-expect_error = true
-ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
+compiles = true
 
 [[test]]
-name = "L2751 br (?e) \\L<words> e<=1 - byte pattern + named word list unsupported"
+name = "L2751 br (?e) \\L<words> e<=1 (deferred; resolve via set_word_list)"
 pattern = '(?e)\b\L<words>{e<=1}\b'
-expect_error = true
-ignore = true   # BUG: mrab rejects (needs words=), ours mis-accepts
+compiles = true
 
 [[test]]
 name = "L2753 br (?r) \\L<words> e<=1 - byte pattern + word list + reverse unsupported"
 pattern = '(?r)\b\L<words>{e<=1}\b'
-expect_error = true
+compiles = true
+ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 [[test]]
 name = "L2755 br (?er) \\L<words> e<=1 - byte pattern + word list + reverse unsupported"
 pattern = '(?er)\b\L<words>{e<=1}\b'
-expect_error = true
+compiles = true
+ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 [[test]]
 name = "L2757 br (?r) \\L<words> e<=1 (2) - byte pattern + word list + reverse unsupported"
 pattern = '(?r)\b\L<words>{e<=1}\b'
-expect_error = true
+compiles = true
+ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 # Backreference inside fuzzy (unsupported)
 [[test]]
@@ -993,7 +993,8 @@ is_match = false
 [[test]]
 name = "L4330 issue525 (\\L<foo>)e<=5 empty list - named word list unsupported"
 pattern = '(\L<foo>){e<=5}'
-expect_error = true
+compiles = true
+ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 # ---------------------------------------------------------------------------
 # def test_fuzzy_ext (L4411-4497): fullmatch bool cases

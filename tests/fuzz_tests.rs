@@ -221,3 +221,41 @@ fn fuzz_word_lists() {
         let _ = re.find_iter(text).collect::<Vec<_>>();
     }
 }
+
+/// An unresolved `\L<name>` (no `set_word_list`) is an empty alternation and
+/// must match nothing across every entry point — previously it silently matched
+/// the empty string everywhere (`(0,0)`, `is_match == true`).
+#[test]
+fn unresolved_named_list_matches_nothing() {
+    for pat in [r"\b\L<words>\b", r"\b\L<words>{e<=1}\b", r"\L<words>"] {
+        let re = FuzzyRegex::new(pat).unwrap();
+        let text = "a dog x";
+        assert!(re.find(text).is_none(), "find [{pat}]");
+        assert!(!re.is_match(text), "is_match [{pat}]");
+        assert_eq!(re.find_iter(text).count(), 0, "find_iter [{pat}]");
+        assert!(re.captures(text).is_none(), "captures [{pat}]");
+        assert!(re.find_at(text, 0).is_none(), "find_at [{pat}]");
+        // Empty input must not yield a spurious empty match either.
+        assert!(re.find("").is_none(), "find empty [{pat}]");
+        assert!(!re.is_match(""), "is_match empty [{pat}]");
+    }
+}
+
+/// Once the list is provided, `\L<name>` matches the words (and only the words).
+#[test]
+fn resolved_named_list_matches_words() {
+    let mut re = FuzzyRegex::new(r"\b\L<words>\b").unwrap();
+    re.set_word_list("words", vec!["cat", "dog", "frog"]);
+    assert_eq!(
+        re.find("a dog x").map(|m| (m.start(), m.end())),
+        Some((2, 5))
+    );
+    assert!(re.is_match("cat"));
+    assert!(re.find("a cow x").is_none());
+
+    // A reference to a *different*, still-unset list stays unmatchable even when
+    // some other list is populated.
+    let mut re2 = FuzzyRegex::new(r"\L<a>\L<b>").unwrap();
+    re2.set_word_list("a", vec!["x"]);
+    assert!(!re2.is_match("xy"), "list `b` still unresolved -> no match");
+}

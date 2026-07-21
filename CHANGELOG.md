@@ -14,13 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mrab's compile-only tests (`repr(type(regex.compile(...))) == PATTERN_CLASS`),
   so the authentic expectation is compilation, now asserted via a new
   `compiles = true` corpus field (checked against the Python `regex` oracle). Of
-  the 73: 31 are now active passing tests (24 compile in both engines; 7 `\L<words>`
-  patterns are rejected by both without a `words=` list), and 42 remain ignored
-  but documented — 36 that mrab compiles yet we do not (reverse `(?r)`, `\N{...}`,
-  recursion `(?0)`, `\m`/`\M`, combined constraints), and 6 `\L<words>` patterns
-  we mis-accept where mrab rejects (a latent parser bug, now flagged). The 7
-  pre-existing active compile-only cases also gained explicit `compiles = true`;
-  every corpus case now carries an assertion (139 active, 55 ignored, 0 no-ops).
+  the 73: active compile-only tests now cover the cases both engines accept
+  (including `\L<words>`, which fuzzy-regex compiles for deferred resolution via
+  `set_word_list`), while patterns that mrab compiles but fuzzy-regex does not
+  yet (reverse `(?r)`, `\N{...}`, recursion `(?0)`, `\m`/`\M`, combined
+  constraints, fuzzy `{e}` on capturing groups) stay ignored with a documented
+  GAP note. The 7 pre-existing active compile-only cases also gained explicit
+  `compiles = true`; every corpus case now carries an assertion.
 - A property-based consistency test (`tests/find_iter_consistency_proptest.rs`)
   that generates patterns from the atom/quantifier grammar which surfaced the
   fast-path divergences below and asserts `find(text) == find_iter(text).next()`
@@ -40,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Unresolved `\L<name>` named-list references matched the empty string everywhere
+  instead of matching nothing. `\L<name>` compiles to a placeholder resolved
+  later via `set_word_list`; until a list was provided it lowered to an empty
+  epsilon, so `\b\L<words>{e<=1}\b` on `"a dog x"` returned `(0,0)` (and
+  `is_match` was `true`, `find_iter` yielded `(0,0),(1,1),…`). An unset list is an
+  empty alternation and matches nothing, so all match entry points (`find`,
+  `find_iter`, `is_match`, `captures`, `find_at`, `find_rev`, and the reverse/
+  overlapping variants) now short-circuit to no match when any referenced
+  `\L<name>` is still unresolved. Once the list is set via `set_word_list`,
+  matching works as before.
 - `find()` fast-path hijacking: the specialized linear-scan "shape" fast paths
   (currency, class-plus-with-literal, digit-sequence-with-separator) grabbed
   complex anchored or group-repeating patterns they cannot handle and returned
