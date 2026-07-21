@@ -259,3 +259,42 @@ fn resolved_named_list_matches_words() {
     re2.set_word_list("a", vec!["x"]);
     assert!(!re2.is_match("xy"), "list `b` still unresolved -> no match");
 }
+
+/// The capture / find_at entry points must be word-list-aware too: with a
+/// resolved list, `captures`, `captures_at`, `find_at`, and
+/// `captures_all_overlapping` return the matched word (group 0), consistent with
+/// `find` — previously they used the NFA (which doesn't expand named lists) and
+/// returned no match.
+#[test]
+fn resolved_named_list_captures_match_find() {
+    let mut re = FuzzyRegex::new(r"\b\L<words>\b").unwrap();
+    re.set_word_list("words", vec!["cat", "dog", "frog"]);
+
+    let text = "a dog x";
+    let find = re.find(text).map(|m| (m.start(), m.end()));
+    assert_eq!(find, Some((2, 5)));
+
+    // captures group 0 must equal find()
+    let caps = re.captures(text).expect("captures should match");
+    let g0 = caps.get(0).expect("group 0");
+    assert_eq!((g0.start(), g0.end()), (2, 5));
+    assert_eq!(g0.as_str(), "dog");
+
+    // captures_at from before the match finds it; from after does not
+    assert!(re.captures_at(text, 0).is_some());
+    assert!(re.captures_at(text, 5).is_none(), "nothing after index 5");
+
+    // find_at consistent with captures_at
+    assert_eq!(
+        re.find_at(text, 0).map(|m| (m.start(), m.end())),
+        Some((2, 5))
+    );
+    assert!(re.find_at(text, 5).is_none());
+
+    // captures_all_overlapping finds every word occurrence
+    let all = re.captures_all_overlapping("dog cat", 0.0);
+    assert!(!all.is_empty(), "should find dog and cat");
+
+    // No match still yields no captures.
+    assert!(re.captures("a cow x").is_none());
+}

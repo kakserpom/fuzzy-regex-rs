@@ -1717,6 +1717,11 @@ impl FuzzyRegex {
         if self.has_unresolved_named_lists() {
             return None;
         }
+        // Resolved \L<name>: match via the word-list path (the NFA does not
+        // expand named lists), consistent with `find`.
+        if !self.word_lists.is_empty() {
+            return self.word_list_match_at(text, start);
+        }
         // For patterns anchored at start (not multiline), only match at position 0
         if self.anchored && !self.config.multi_line && start > 0 {
             return None;
@@ -3153,6 +3158,14 @@ impl FuzzyRegex {
         if self.has_unresolved_named_lists() {
             return Vec::new();
         }
+        // Resolved \L<name>: match via the word-list path (see `captures`).
+        if !self.word_lists.is_empty() {
+            return self
+                .find_all_word_list(text)
+                .iter()
+                .map(|m| self.word_list_captures(text, m))
+                .collect();
+        }
         let matcher = self.create_matcher(self.is_unanchored());
         let mut results = Vec::new();
 
@@ -3196,6 +3209,13 @@ impl FuzzyRegex {
         if self.has_unresolved_named_lists() {
             return None;
         }
+        // Resolved \L<name>: the NFA does not expand named lists, so match via
+        // the word-list path (consistent with `find`) and build group-0 captures.
+        if !self.word_lists.is_empty() {
+            return self
+                .word_list_match_at(text, 0)
+                .map(|m| self.word_list_captures(text, &m));
+        }
         let matcher = self.create_matcher(self.is_unanchored());
         matcher.find(text).map(|m| self.convert_captures(text, m))
     }
@@ -3205,6 +3225,12 @@ impl FuzzyRegex {
         // Unresolved \L<name> matches nothing.
         if self.has_unresolved_named_lists() {
             return None;
+        }
+        // Resolved \L<name>: match via the word-list path (see `captures`).
+        if !self.word_lists.is_empty() {
+            return self
+                .word_list_match_at(text, start)
+                .map(|m| self.word_list_captures(text, &m));
         }
         let matcher = self.create_matcher(self.is_unanchored());
         for (idx, _) in text[start..].char_indices() {
@@ -3484,6 +3510,39 @@ impl FuzzyRegex {
     }
 
     /// Convert internal match result to Captures type.
+    /// Leftmost word-list match at or after byte offset `start`, in absolute
+    /// coordinates. Used by the capture / `find_at` entry points when a
+    /// `\L<name>` list is resolved, so they stay consistent with `find` (whose
+    /// word-list fast path bypasses the NFA — which does not expand named lists).
+    fn word_list_match_at<'t>(&self, text: &'t str, start: usize) -> Option<Match<'t>> {
+        if start > text.len() {
+            return None;
+        }
+        let m = self.find_word_list_first(&text[start..], self.config.similarity_threshold)?;
+        Some(Match::new(
+            text,
+            start + m.start(),
+            start + m.end(),
+            m.similarity(),
+            m.edits().clone(),
+        ))
+    }
+
+    /// Build `Captures` from a word-list `Match`. The word-list matcher produces
+    /// no sub-captures, so only group 0 (the whole match) is populated.
+    fn word_list_captures<'t>(&self, text: &'t str, m: &Match<'t>) -> Captures<'t> {
+        let mut slots = vec![None; self.capture_count + 1];
+        slots[0] = Some((m.start(), m.end()));
+        Captures::new(
+            text,
+            self.named_groups.clone(),
+            slots,
+            Vec::new(),
+            m.edits().clone(),
+            m.similarity(),
+        )
+    }
+
     fn convert_captures<'t>(&self, text: &'t str, result: MatchResult) -> Captures<'t> {
         let slots: Vec<Option<(usize, usize)>> = result.captures.slots().to_vec();
 

@@ -50,6 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlapping variants) now short-circuit to no match when any referenced
   `\L<name>` is still unresolved. Once the list is set via `set_word_list`,
   matching works as before.
+- `captures`, `captures_at`, `captures_all_overlapping`, and `find_at` returned
+  no match for `\L<name>` patterns even when the word list was resolved, because
+  they use the NFA path (which does not expand named lists) rather than the
+  word-list matcher that `find`/`find_iter` use. They are now word-list-aware and
+  return the matched word (group 0), consistent with `find`.
 - `find()` fast-path hijacking: the specialized linear-scan "shape" fast paths
   (currency, class-plus-with-literal, digit-sequence-with-separator) grabbed
   complex anchored or group-repeating patterns they cannot handle and returned
