@@ -514,8 +514,8 @@ is_match = false
 
 # Hg issue 147: fuzzy match beyond buffer end (finditer; first match)
 [[test]]
-name = "[DIVERGENCE: minimal-vs-default-alignment] L3576 issue147 (?i)(?:error)e first match"
-ignore = true
+name = "L3576 issue147 (?i)(?:error)e first match [min_edit]"
+min_edit = true
 pattern = "(?i)(?:error){e}"
 input = "regex failure"
 is_match = true
