@@ -25,7 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   microseconds. The size threshold is configurable via
   `FuzzyRegexBuilder::word_list_ac_threshold(n)` (default
   `DEFAULT_WORD_LIST_AC_THRESHOLD` = 64); set it very high to keep every list on
-  the NFA, or low to favor the AC path sooner.
+  the NFA, or low to favor the AC path sooner. `benches/fuzzy_benchmarks.rs`
+  includes `word_list_match` / `word_list_compile` groups comparing the two paths
+  across list sizes (match is ~60× faster at 128 words, growing past 200× for
+  thousands of words, since the NFA alternation scans in O(list × text) while the
+  automaton is effectively constant).
 - Real expected values for the 73 mrab corpus "skeleton" cases (previously just a
   name + pattern with no assertion, so they verified nothing). These mirror
   mrab's compile-only tests (`repr(type(regex.compile(...))) == PATTERN_CLASS`),

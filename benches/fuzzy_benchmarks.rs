@@ -359,8 +359,65 @@ fn bench_vs_regex(c: &mut Criterion) {
     group.finish();
 }
 
+// Benchmark: large `\L<name>` word list — Aho-Corasick fast path vs the NFA
+// alternation. Both paths are exercised via the same pattern; the AC path uses
+// the default threshold while the NFA path is forced by setting the threshold
+// above the list size. Requires the (default) `word-list-ac` feature to show a
+// difference; with it disabled both variants are the NFA.
+fn word_list_words(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("term{i:06}")).collect()
+}
+
+fn build_word_list_regex(words: Vec<String>, force_nfa: bool) -> FuzzyRegex {
+    let mut re = if force_nfa {
+        FuzzyRegexBuilder::new(r"\b\L<w>\b")
+            .word_list_ac_threshold(usize::MAX)
+            .build()
+            .unwrap()
+    } else {
+        FuzzyRegexBuilder::new(r"\b\L<w>\b").build().unwrap()
+    };
+    re.set_word_list("w", words);
+    re
+}
+
+fn bench_word_list_match(c: &mut Criterion) {
+    // A short haystack containing two list words among non-matching text.
+    let haystack = "lorem ipsum dolor term000042 sit amet term001234 consectetur";
+    let mut group = c.benchmark_group("word_list_match");
+    for &size in &[128usize, 512, 2048, 8192] {
+        let words = word_list_words(size);
+        let ac = build_word_list_regex(words.clone(), false);
+        let nfa = build_word_list_regex(words, true);
+        group.bench_with_input(BenchmarkId::new("ac", size), &size, |b, _| {
+            b.iter(|| ac.find(black_box(haystack)));
+        });
+        group.bench_with_input(BenchmarkId::new("nfa", size), &size, |b, _| {
+            b.iter(|| nfa.find(black_box(haystack)));
+        });
+    }
+    group.finish();
+}
+
+fn bench_word_list_compile(c: &mut Criterion) {
+    let mut group = c.benchmark_group("word_list_compile");
+    group.sample_size(20);
+    for &size in &[128usize, 512, 2048] {
+        let words = word_list_words(size);
+        group.bench_with_input(BenchmarkId::new("ac", size), &size, |b, _| {
+            b.iter(|| build_word_list_regex(black_box(words.clone()), false));
+        });
+        group.bench_with_input(BenchmarkId::new("nfa", size), &size, |b, _| {
+            b.iter(|| build_word_list_regex(black_box(words.clone()), true));
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_word_list_match,
+    bench_word_list_compile,
     bench_exact_match,
     bench_fuzzy_1_edit,
     bench_fuzzy_2_edits,
