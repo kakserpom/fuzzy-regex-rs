@@ -54,20 +54,30 @@ fn main() {
 
 ## Min/Max Error Ranges
 
-```rust,ignore
+A range `{min<=e<=max}` requires *at least* `min` edits and at most `max` — so a
+match must differ from the pattern by a minimum amount. The lower bound may be
+exclusive (`{0<e<=2}`, i.e. more than 0 edits, equivalent to `{1<=e<=2}`).
+
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
-    // Require at least 1 edit, allow up to 2
-    let re = FuzzyRegex::new("(?:hello){e>=1,e<=2}").unwrap();
+    // At least 1 edit, at most 2.
+    let re = FuzzyRegex::new("(?:hello){1<=e<=2}").unwrap();
 
-    // Minimum errors with shorthand
-    let re2 = FuzzyRegex::new("(?:hello){1e<=2}").unwrap();
-    
-    println!("re matches 'hello': {}", re.is_match("hello"));
-    println!("re matches 'hallo': {}", re.is_match("hallo"));
+    assert!(re.is_match("hallo"));  // 1 substitution
+    assert!(re.is_match("heo"));    // 2 deletions
+    assert!(!re.is_match("world")); // too different (> 2 edits)
+
+    // Exclusive lower bound: "more than 0" edits, same as {1<=e<=2}.
+    let re2 = FuzzyRegex::new("(?:hello){0<e<=2}").unwrap();
+    assert!(re2.is_match("hallo"));
 }
 ```
+
+> Note: mrab-regex's `{1<=e<=2}` range syntax is supported. Writing `{e>=1}` or
+> the `{1e<=2}` cost shorthand is not a min-error range — use the `min<=e<=max`
+> form above.
 
 ## Editing Classes
 
