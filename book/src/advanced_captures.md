@@ -18,8 +18,9 @@ fn main() {
 
 ## Numbered Capture Groups
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new(r"(\w+)@(\w+)").unwrap();
     let caps = re.captures("test@example").unwrap();
 
@@ -31,8 +32,9 @@ fn main() {
 
 ## Nested Groups
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new(r"((?P<outer>\w+)-(?P<inner>\w+))").unwrap();
     let caps = re.captures("hello-world").unwrap();
 
@@ -131,8 +133,9 @@ fn main() {
 
 ## Iterating Captures
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new(r"(\w+)").unwrap();
     let caps = re.captures("hello world").unwrap();
 
@@ -146,17 +149,18 @@ fn main() {
 
 ## Accessing All Groups
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new(r"(\w+)@(\w+)").unwrap();
     let caps = re.captures("a@b").unwrap();
 
     assert_eq!(caps.len(), 3); // 0 (full) + 2 groups
 
-    // Names of capture groups
-    for name in caps.iter_names() {
-        if let Some(n) = name {
-            println!("Group name: {}", n);
+    // Access each group by index
+    for i in 0..caps.len() {
+        if let Some(m) = caps.get(i) {
+            println!("Group {}: {}", i, m.as_str());
         }
     }
 }

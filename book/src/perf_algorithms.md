@@ -87,7 +87,7 @@ DFA now works with capturing groups like `(?m)^(.*)test$`:
 ```rust,ignore
 let re = FuzzyRegex::new("(?m)^(.*)test$").unwrap();
 // Uses DFA - much faster than NFA
-```text
+```
 
 ## All-Matches Algorithms
 
@@ -97,7 +97,7 @@ When finding all matches in text (`find_iter`, `find_all`), fuzzy-regex supports
 
 Some patterns produce many overlapping matches, causing naive "find, advance, repeat" to be O(n²):
 
-```text
+```rust
 // Pattern: .*a|b on text: "bbbbbbbb"
 // Each 'b' matches individually → O(n) matches × O(n) scan = O(n²)
 ```

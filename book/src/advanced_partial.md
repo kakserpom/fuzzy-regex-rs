@@ -21,7 +21,7 @@ fn main() {
 
 When enabled, matches that reach the end of the input are marked as "partial":
 
-```rust,ignore
+```rust,no_run
 fn main() {
     use fuzzy_regex::FuzzyRegexBuilder;
 
@@ -48,7 +48,7 @@ fn main() {
 
 ### Streaming Input
 
-```rust,ignore
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegexBuilder;
 
@@ -59,11 +59,10 @@ fn main() {
 
     let mut stream = re.stream();
 
-    // Feed incomplete data
+    // Feed incomplete data; matches are reported by their byte span as more
+    // data arrives across chunks.
     for m in stream.feed(b"cmd") {
-        if m.partial() {
-            println!("Partial match: might be complete when more data arrives");
-        }
+        println!("Match at {}-{}", m.start(), m.end());
     }
 }
 ```

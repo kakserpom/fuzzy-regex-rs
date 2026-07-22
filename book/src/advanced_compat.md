@@ -6,16 +6,16 @@ Migrate from other fuzzy matching libraries.
 
 This is a drop-in replacement for `fuzzy-aho-corasick`:
 
-```rust,ignore
+```rust
 use fuzzy_regex::compat::fac::FuzzyAhoCorasickBuilder;
 use fuzzy_regex::types::FuzzyLimits;
 
 let searcher = FuzzyAhoCorasickBuilder::new()
     .fuzzy(FuzzyLimits::new().edits(1))
-    .build(["hello", "world"])
-    .unwrap();
+    .build(["hello", "world"]);
 
-for m in searcher.find_iter("helo wrld") {
-    println!("Pattern {} matched at {}", m.pattern_index(), m.start());
+let matches = searcher.search("helo wrld", 0.5);
+for m in &matches {
+    println!("Pattern {} matched at {}", m.pattern_index, m.start);
 }
 ```

@@ -12,14 +12,14 @@ The Damerau-Levenshtein automaton for a pattern P and max distance k accepts all
 
 ### State Representation
 
-```rust,ignore
+```rust
 // Each state represents a position in the pattern
 // plus the number of errors used so far
 struct NfaState {
     pattern_position: usize,  // Position in pattern
     errors_used: usize,       // Errors consumed
 }
-```text
+```
 
 ### Transitions
 
@@ -33,7 +33,7 @@ For each input character, the NFA can transition to:
 
 ## Building the NFA
 
-```text
+```rust
 // Pattern: "abc" with k=1
 // States: (0,0) → (1,0) → (2,0) → (3,0)  [exact path]
 //         (0,0) → (1,1) → ...             [with errors]

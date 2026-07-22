@@ -21,7 +21,7 @@ let re = FuzzyRegexBuilder::new("(?call:myhandler)")
 
 Handlers have the signature:
 
-```rust,ignore
+```text
 Fn(&str, usize) -> HandlerResult
 ```
 
@@ -168,7 +168,7 @@ re.find("id:999"); // no match (no "user:" prefix)
 
 Handle non-ASCII text (note: byte count matters for UTF-8):
 
-```rust,ignore
+```rust
 use fuzzy_regex::{FuzzyRegexBuilder, HandlerResult};
 
 let re = FuzzyRegexBuilder::new(r#""(?call:translate)""#)
@@ -189,7 +189,7 @@ let caps = re.captures("\"привет\"").unwrap();
 assert_eq!(caps.get(0).unwrap().as_str(), "\"HELLO\"");
 
 // Handler overrides track (start_byte, end_byte, override_text)
-assert_eq!(caps.handler_overrides(), &[(1, 13, "HELLO")]);
+assert_eq!(caps.handler_overrides(), &[(1, 13, "HELLO".to_string())]);
 ```
 
 ### Fuzzy Matching with Handlers
@@ -226,7 +226,7 @@ assert_eq!(m.as_str(), " привет");
 
 Use multiple handlers in the same pattern:
 
-```rust,ignore
+```rust,no_run
 use fuzzy_regex::{FuzzyRegexBuilder, HandlerResult};
 
 let re = FuzzyRegexBuilder::new(r"(?call:foo).*(?call:bar)")

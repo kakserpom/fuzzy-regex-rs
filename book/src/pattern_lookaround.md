@@ -42,7 +42,7 @@ fn main() {
 
 Match only if preceded by:
 
-```rust,ignore
+```rust,no_run
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
@@ -78,7 +78,7 @@ fn main() {
 
 Lookbehind can include fuzzy matching:
 
-```rust,ignore
+```rust,no_run
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
@@ -93,7 +93,7 @@ fn main() {
 
 ### Fuzzy Lookbehind Examples
 
-```rust,ignore
+```rust,no_run
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 

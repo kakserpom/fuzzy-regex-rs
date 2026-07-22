@@ -25,8 +25,9 @@ fn main() {
 
 ### `is_match`
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
 
     println!("{}", re.is_match("hello")); // true
@@ -37,8 +38,9 @@ fn main() {
 
 ### `find`
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
 
     if let Some(m) = re.find("say hello world") {
@@ -50,8 +52,9 @@ fn main() {
 
 ### `find_iter`
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new(r"(?:\w+){e<=1}").unwrap();
 
     for m in re.find_iter("test tset tsat") {
@@ -64,8 +67,9 @@ fn main() {
 
 Find rightmost match:
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new("(?:foo)").unwrap();
     let m = re.find_rev("foo foo foo").unwrap();
     assert_eq!(m.start(), 8);
@@ -74,8 +78,9 @@ fn main() {
 
 ## Replace Methods
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new("world").unwrap();
 
     // Replace first match
@@ -90,8 +95,9 @@ fn main() {
 
 ## Other Methods
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new(r"(?<word>\w+)").unwrap();
 
     // Capture groups
@@ -102,6 +108,6 @@ fn main() {
     let parts: Vec<_> = re.split("a1b2c").collect();
 
     // Check pattern info
-    println!("Capture count: {}", re.capture_count());
+    println!("Capture count: {}", re.captures_len());
 }
 ```

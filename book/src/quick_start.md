@@ -37,34 +37,34 @@ fn main() {
 
 ## Finding Matches
 
-```rust,ignore
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
-    let re = FuzzyRegex::new(r"(?:\w+){e<=1}").unwrap();
+    let re = FuzzyRegex::new(r"(?:test){e<=1}").unwrap();
 
-    // Find first match
-    let m = re.find("This is a tset").unwrap();
-    assert_eq!(m.as_str(), "tset");
+    // Find the first fuzzy match ("tost" = "test" with 1 substitution)
+    let m = re.find("run the tost suite").unwrap();
+    assert_eq!(m.as_str(), "tost");
 
-    // Find all matches
-    let matches: Vec<_> = re.find_iter("test tset tsat").collect();
+    // Find all fuzzy matches (each within 1 edit of "test")
+    let matches: Vec<_> = re.find_iter("test tost tesr").collect();
     assert_eq!(matches.len(), 3);
 }
 ```
 
 ## Streaming Large Data
 
-```rust,ignore
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
     let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
     let mut stream = re.stream();
 
-    // Process in chunks
+    // Process in chunks. A streaming match reports its byte span.
     for m in stream.feed(b"some hay and niddle here") {
-        println!("Found: {} at {}", m.as_str(), m.start());
+        println!("Found match at {}-{}", m.start(), m.end());
     }
 
     // Check position

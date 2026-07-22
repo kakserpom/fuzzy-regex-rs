@@ -16,16 +16,17 @@ fn main() {
 
 ## Feeding Data
 
-```rust,ignore
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
     let re = FuzzyRegex::new("(?:needle){e<=1}").unwrap();
     let mut stream = re.stream();
 
-    // Feed data in chunks
+    // Feed data in chunks. A streaming match reports its byte span
+    // (`start`/`end`) in the overall stream.
     for m in stream.feed(b"some hay and niddle here") {
-        println!("Found '{}' at {}", m.as_str(), m.start());
+        println!("Found match at {}-{}", m.start(), m.end());
     }
 }
 ```
@@ -123,8 +124,9 @@ fn main() {
 
 Search byte slices directly:
 
-```rust,ignore
+```rust
 fn main() {
+    use fuzzy_regex::FuzzyRegex;
     let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
 
     if let Some(m) = re.find_bytes(b"hello world") {

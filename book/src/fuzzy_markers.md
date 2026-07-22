@@ -73,7 +73,7 @@ fn main() {
 
 Apply fuzziness to specific character classes:
 
-```rust,ignore
+```rust,no_run
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
@@ -81,13 +81,13 @@ fn main() {
     let re = FuzzyRegex::new("(?:hello){e<=1} world{e<=1}").unwrap();
     println!("{}", re.is_match("helo worled"));
 }
-```text
+```
 
 ## Shared Group Budget
 
 When a **non-capturing group** has its own fuzziness, the edit budget is shared across all pieces inside it:
 
-```text
+```rust,no_run
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 

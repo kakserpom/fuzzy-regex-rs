@@ -50,7 +50,7 @@ fn main() {
 
 ## Match as Different Types
 
-```rust,ignore
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
@@ -58,7 +58,7 @@ fn main() {
     let m = re.find("hello world").unwrap();
 
     // Get raw bytes
-    let bytes = m.as_bytes();
+    let bytes = m.as_str().as_bytes();
 
     // Get range
     let range = m.range(); // Range<usize>

@@ -42,7 +42,7 @@ fn main() {
 | `\b` | Word boundary |
 | `\B` | Non-word boundary |
 
-```rust,ignore
+```rust,no_run
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 

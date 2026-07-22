@@ -42,9 +42,9 @@ By default, `\w`, `\d`, `\s` match ASCII characters only:
 
 Enable Unicode character classes with `(?u)` flag:
 
-```rust,ignore
+```rust
 fn main() {
-    use fuzzy_regex::FuzzyRegexBuilder;
+    use fuzzy_regex::{FuzzyRegex, FuzzyRegexBuilder};
 
     // Via inline flag
     let re1 = FuzzyRegex::new(r"(?u)\w+").unwrap();
