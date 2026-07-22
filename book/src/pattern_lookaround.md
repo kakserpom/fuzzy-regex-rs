@@ -42,7 +42,7 @@ fn main() {
 
 Match only if preceded by:
 
-```rust,no_run
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
@@ -54,7 +54,7 @@ fn main() {
 
     // Get match position
     let m = re.find("say hello world here").unwrap();
-    assert_eq!(m.start(), 9); // After "hello "
+    assert_eq!(m.start(), 10); // start of "world", after "say hello "
 }
 ```
 
@@ -78,12 +78,14 @@ fn main() {
 
 Lookbehind can include fuzzy matching:
 
-```rust,no_run
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
-    // Match "world" preceded by "hello" with up to 1 error
-    let re = FuzzyRegex::new("(?<=(?:hello){e<=1})world").unwrap();
+    // Match "world" preceded by "hello " with up to 1 error in "hello".
+    // (The space is part of the lookbehind — the pattern must describe the text
+    // immediately before "world".)
+    let re = FuzzyRegex::new("(?<=(?:hello){e<=1} )world").unwrap();
 
     assert!(re.is_match("hello world")); // Exact
     assert!(re.is_match("hallo world")); // 1 substitution
@@ -93,25 +95,24 @@ fn main() {
 
 ### Fuzzy Lookbehind Examples
 
-```rust,no_run
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
-    // Allow insertions in lookbehind
-    let re = FuzzyRegex::new("(?<=(?:hello){i<=2})world").unwrap();
-    assert!(re.is_match("helllo world")); // 2 insertions (ll)
-    assert!(re.is_match("hellllo world")); // 3 insertions - no match
+    // Allow insertions in lookbehind (the space is part of the lookbehind).
+    let re = FuzzyRegex::new("(?<=(?:hello){i<=2} )world").unwrap();
+    assert!(re.is_match("hellllo world")); // 2 extra 'l's, within i<=2
+    assert!(!re.is_match("helllllo world")); // 3 extra 'l's, exceeds i<=2
 
     // Allow deletions in lookbehind
-    let re = FuzzyRegex::new("(?<=(?:hello){d<=1})world").unwrap();
+    let re = FuzzyRegex::new("(?<=(?:hello){d<=1} )world").unwrap();
     assert!(re.is_match("helo world")); // 1 deletion (one 'l')
     assert!(!re.is_match("heo world")); // 2 deletions - no match
 
     // Combined: substitutions and insertions
-    let re = FuzzyRegex::new("(?<=(?:hello){s<=1,i<=1})world").unwrap();
+    let re = FuzzyRegex::new("(?<=(?:hello){s<=1,i<=1} )world").unwrap();
     assert!(re.is_match("hallo world")); // 1 substitution
     assert!(re.is_match("helloh world")); // 1 insertion
-    assert!(re.is_match("hallo world")); // matches, prefers lower edits
 }
 ```
 
@@ -151,15 +152,17 @@ fn main() {
 
 Fuzzy matching also works with lookahead:
 
-```rust,ignore
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
-    // Match "hello" followed by "world" with up to 1 error
-    let re = FuzzyRegex::new("hello(?= {e<=1}world)").unwrap();
+    // Match "hello" only if followed by " world" (with up to 1 error). The
+    // fuzzy part must be a group; the space lives inside the looked-ahead text.
+    let re = FuzzyRegex::new(r"hello(?=(?: world){e<=1})").unwrap();
 
-    assert!(re.is_match("hello world")); // Exact
-    assert!(!re.is_match("hello world!")); // ! is not space, lookahead fails
+    assert!(re.is_match("hello world"));  // exact " world"
+    assert!(re.is_match("hello wrld"));   // " wrld" — 1 deletion
+    assert!(!re.is_match("hello earth")); // too different
 }
 ```
 

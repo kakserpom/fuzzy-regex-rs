@@ -25,12 +25,14 @@ fn main() {
 
 Assign different costs to different edit types:
 
-```rust,no_run
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
-    // Insertions cost 2, others cost 1, total ≤ 3
-    let re = FuzzyRegex::new("(?:ab){2i+1d+1s+1t<=3}").unwrap();
+    // Insertions cost 2, others cost 1, total <= 3. Anchored with ^...$ so the
+    // cost is measured against the whole string (otherwise a bare "ab" substring
+    // would match at cost 0).
+    let re = FuzzyRegex::new("^(?:ab){2i+1d+1s+1t<=3}$").unwrap();
 
     assert!(re.is_match("abc")); // 1 insertion (cost=2)
     assert!(re.is_match("a"));   // 1 deletion (cost=1)

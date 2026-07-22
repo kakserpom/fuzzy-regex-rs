@@ -21,7 +21,7 @@ fn main() {
 
 When enabled, matches that reach the end of the input are marked as "partial":
 
-```rust,no_run
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegexBuilder;
 
@@ -34,8 +34,8 @@ fn main() {
     let m1 = re.find("hello").unwrap();
     assert!(m1.partial());
 
-    // Match not at end - not partial
-    let m2 = re.find("say hello").unwrap();
+    // Match not at end - not partial ("hello" is followed by more text)
+    let m2 = re.find("say hello world").unwrap();
     assert!(!m2.partial());
 
     // Fuzzy match reaching end - also partial

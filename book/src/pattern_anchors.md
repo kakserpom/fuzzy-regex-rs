@@ -42,7 +42,7 @@ fn main() {
 | `\b` | Word boundary |
 | `\B` | Non-word boundary |
 
-```rust,no_run
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
@@ -52,10 +52,11 @@ fn main() {
     assert!(re1.is_match("the cat sat"));
     assert!(!re1.is_match("category"));
 
-    // Match "cat" not at word boundary
+    // Match "cat" only when NOT at a word boundary (i.e. inside a word)
     let re2 = FuzzyRegex::new(r"\Bcat\B").unwrap();
-    assert!(re2.is_match("category"));
-    assert!(!re2.is_match("cat"));
+    assert!(re2.is_match("concatenate")); // "cat" is mid-word
+    assert!(!re2.is_match("cat"));        // standalone word - boundaries on both sides
+    assert!(!re2.is_match("category"));   // "cat" is at the start (a boundary)
 }
 ```
 

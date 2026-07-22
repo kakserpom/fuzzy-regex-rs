@@ -226,7 +226,7 @@ assert_eq!(m.as_str(), " привет");
 
 Use multiple handlers in the same pattern:
 
-```rust,no_run
+```rust
 use fuzzy_regex::{FuzzyRegexBuilder, HandlerResult};
 
 let re = FuzzyRegexBuilder::new(r"(?call:foo).*(?call:bar)")
@@ -248,7 +248,7 @@ let re = FuzzyRegexBuilder::new(r"(?call:foo).*(?call:bar)")
     .unwrap();
 
 let caps = re.captures("START middle END").unwrap();
-assert_eq!(caps.get(0).unwrap().as_str(), "START middle END");
+assert_eq!(caps.get(0).unwrap().as_str(), "start middle end"); // handler overrides applied
 ```
 
 ### Validation Handlers

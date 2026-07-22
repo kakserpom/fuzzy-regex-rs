@@ -73,13 +73,14 @@ fn main() {
 
 Apply fuzziness to specific character classes:
 
-```rust,no_run
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
-    // Apply different limits to different parts
-    let re = FuzzyRegex::new("(?:hello){e<=1} world{e<=1}").unwrap();
-    println!("{}", re.is_match("helo worled"));
+    // Apply different limits to different parts. Each fuzzy piece must be a
+    // group, so the second word is written `(?:world){e<=1}`.
+    let re = FuzzyRegex::new("(?:hello){e<=1} (?:world){e<=1}").unwrap();
+    assert!(re.is_match("helo worled")); // 1 edit in each piece
 }
 ```
 
@@ -87,25 +88,25 @@ fn main() {
 
 When a **non-capturing group** has its own fuzziness, the edit budget is shared across all pieces inside it:
 
-```rust,no_run
+```rust
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
-    // Shared budget: total edits across "hello" and "world" combined ≤ 2
+    // Shared budget: total edits across "hello" and "world" combined <= 2
     let re = FuzzyRegex::new("(?:hello world){e<=2}").unwrap();
     // "hello" and "world" draw from the same pool of 2 edits
 
-    assert!(re.is_match("hello world"));   // 0 edits
-    assert!(re.is_match("helo world"));    // 1 deletion (hello) → 1 remaining
-    assert!(!re.is_match("helo worl"));    // 1 deletion each → 2 total, still OK
-    assert!(!re.is_match("hlo wrld"));     // 3 deletions → exceeds budget
+    assert!(re.is_match("hello world"));  // 0 edits
+    assert!(re.is_match("helo world"));   // 1 deletion, 1 remaining
+    assert!(re.is_match("helo worl"));    // 1 deletion each = 2 total, within budget
+    assert!(!re.is_match("hlo wrld"));    // 3 deletions, exceeds budget
 
     // Per-type limits also shared across the group
     let re2 = FuzzyRegex::new("(?:hello world){i<=1,d<=1}").unwrap();
     // Maximum 1 insertion AND 1 deletion across all pieces
-    
-    assert!(re2.is_match("helo world"));   // 1 deletion
-    assert!(!re2.is_match("helo worl"));   // 2 deletions → exceeds budget
+
+    assert!(re2.is_match("helo world")); // 1 deletion
+    assert!(!re2.is_match("helo worl")); // 2 deletions, exceeds d<=1
 }
 ```
 
