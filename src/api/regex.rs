@@ -664,7 +664,11 @@ impl FuzzyRegex {
         let mut word_lists = self.word_lists.clone();
         word_lists.insert(name.into(), words.into_iter().map(Into::into).collect());
         // Rebuild the compiled struct so the resolved list is expanded into the
-        // NFA and matched uniformly by every engine path.
+        // NFA (or, for a large pure word-list, its Aho-Corasick automaton) and
+        // matched uniformly by every engine path. (Rebuilding only the automaton
+        // was tried and dropped: for a pure word-list pattern the rest of the
+        // compiled state is trivial to rebuild — ~2 µs — while the automaton
+        // construction that dominates must happen on any list change anyway.)
         *self = Self::assemble(
             self.pattern.clone(),
             self.config.clone(),

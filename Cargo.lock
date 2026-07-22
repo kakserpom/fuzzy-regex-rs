@@ -279,9 +279,9 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "fuzzy-aho-corasick"
-version = "0.3.7"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6325894f63245ddbc52c939f918def6fbdea201bc1f7f301e2b68f695553dbe7"
+checksum = "df7d8bcddd16d371e8d144b3a18eef7ba1b39472483e9c108d46ad03332ec3a3"
 dependencies = [
  "unicode-segmentation",
 ]
