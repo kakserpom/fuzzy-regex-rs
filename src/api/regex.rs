@@ -1609,6 +1609,52 @@ impl FuzzyRegex {
         last
     }
 
+    /// Find all non-overlapping matches in a single linear-time pass.
+    ///
+    /// For patterns that compile to a DFA, this uses a single-pass all-matches
+    /// scan that is O(n × |states|) — linear in the input — even for patterns
+    /// like `.*a|b` on a long run of `b`s, where the naive "find, advance,
+    /// repeat" loop (`find_iter`) is O(n²) because each match's longest extent
+    /// requires an independent look-ahead. Results are identical to
+    /// [`find_iter`](Self::find_iter).
+    ///
+    /// Patterns that require the NFA (fuzzy edits, lookaround, backreferences,
+    /// `\K`, word boundaries) have no DFA and fall back to
+    /// [`find_iter`](Self::find_iter).
+    ///
+    /// # Example
+    /// ```
+    /// use fuzzy_regex::FuzzyRegex;
+    /// let re = FuzzyRegex::new(".*a|b").unwrap();
+    /// let matches = re.find_all_hardened("bbbb");
+    /// assert_eq!(matches.len(), 4);
+    /// ```
+    #[must_use]
+    pub fn find_all_hardened<'t>(&self, text: &'t str) -> Vec<Match<'t>> {
+        // An unresolved \L<name> matches nothing (see has_unresolved_named_lists).
+        if self.has_unresolved_named_lists() {
+            return Vec::new();
+        }
+        if let Some(ref dfa_cell) = self.dfa {
+            return dfa_cell
+                .borrow_mut()
+                .find_all_hardened(text)
+                .into_iter()
+                .map(|m| {
+                    Match::new(
+                        text,
+                        m.start,
+                        m.end,
+                        1.0,
+                        crate::engine::EditCounts::default(),
+                    )
+                })
+                .collect();
+        }
+        // No DFA (fuzzy / lookaround / ...): fall back to the general iterator.
+        self.find_iter(text).collect()
+    }
+
     /// Find all matches from the end (reverse order).
     ///
     /// Returns matches in reverse order (rightmost first).

@@ -124,7 +124,8 @@ let matches = dfa.find_all_two_pass("bbbbbb");
 
 ### Hardened Mode (O(n))
 
-Tracks all active DFA states simultaneously as we scan left-to-right:
+A single left-to-right pass over the text (exposed publicly as
+[`FuzzyRegex::find_all_hardened`](api_fuzzy_regex.md)):
 
 ```rust,ignore
 let mut dfa = Dfa::new(".*a|b").unwrap();
@@ -133,20 +134,28 @@ let matches = dfa.find_all_hardened("bbbbbb");
 
 **How it works:**
 
-1. Start with one state at current position
-2. Process all characters, tracking active states
-3. When no state can continue, emit the leftmost match
-4. Move to next position, repeat
+1. Maintain the set of live threads `(state, start)`, deduplicated by DFA state
+   keeping the earliest start (a later start in the same state is dominated for
+   leftmost-longest).
+2. Seed a new thread at each position and step every thread by one character.
+3. Whenever a thread is in an accepting state, record a candidate `(start, end)`.
+4. After the pass, select leftmost-longest, non-overlapping matches from the
+   recorded candidates.
+
+Because dedup bounds the live threads to `|states|`, each character is processed
+once — O(n × |states|) — with no per-match re-scan.
 
 ### Benchmark: Pathological Pattern
 
-Pattern `.*a|b` on text of all 'b's (worst case):
+Pattern `.*a|b` on text of all 'b's (worst case). `find_all` re-scans per match
+(O(n²)); `find_all_hardened` is linear (~77 ns/char, roughly independent of
+size):
 
-| Text Size | find_all | two_pass | hardened | Speedup |
-|-----------|----------|----------|----------|---------|
-| 1,000 bytes | 1.08s | 1.10s | **69ms** | 15x |
-| 5,000 bytes | 5.47s | 5.43s | **69ms** | 79x |
-| 10,000 bytes | 10.76s | 10.85s | **69ms** | **156x** |
+| Text Size | find_all | hardened |
+|-----------|----------|----------|
+| 100,000 | seconds | ~8 ms |
+| 400,000 | ~16× slower | ~40 ms |
+| 1,600,000 | impractical | ~123 ms |
 
 ### When to Use Each
 

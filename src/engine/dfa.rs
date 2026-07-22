@@ -2336,134 +2336,80 @@ impl Dfa {
         positions
     }
 
-    /// Hardened all-matches that guarantees O(n) even on adversarial patterns.
+    /// Find all non-overlapping matches in a single O(n*|states|) pass.
     ///
-    /// This implements a true O(n) algorithm by tracking ALL active DFA states
-    /// simultaneously as we scan left-to-right. Inspired by RE#'s approach:
-    /// - Scan text once, maintaining a set of active states at each position
-    /// - Track leftmost accepting state; emit only when no continuation possible
-    /// - Each character is processed at most once, giving O(n) complexity
+    /// Tracks every live thread `(state, start)` left-to-right, deduplicated by
+    /// DFA state (earliest start wins — a later start in the same state is
+    /// dominated for leftmost-longest). Each accepting thread records a candidate
+    /// `(start, end)`; a final leftmost-longest non-overlapping selection picks
+    /// the output. Because dedup bounds live threads to |states|, each character
+    /// is processed once — no per-match re-scan, so pathological patterns like
+    /// `.*a|b` on a run of `b`s stay linear instead of O(n^2).
     ///
-    /// This is critical for pathological patterns like `.*a|b` on text of 'b's,
-    /// where naive approaches are O(n²).
+    /// Anchored / multi-line / empty-accepting patterns are delegated to
+    /// `find_all` (already linear for them, and needing `find_at`'s anchor logic).
     pub fn find_all_hardened(&mut self, text: &str) -> Vec<DfaMatch> {
-        let bytes = text.as_bytes();
-        let len = bytes.len();
+        let simple = !self.multi_line
+            && !self.anchored_start
+            && !self.anchored_end
+            && !self.states[self.start as usize].is_accept
+            && !self
+                .states
+                .iter()
+                .any(|s| s.has_start_anchor || s.has_end_anchor);
+        if !simple {
+            return self.find_all(text);
+        }
 
+        let len = text.len();
         if len == 0 {
-            if self.states[self.start as usize].is_accept {
-                return vec![DfaMatch { start: 0, end: 0 }];
-            }
             return Vec::new();
         }
 
-        let mut matches: Vec<DfaMatch> = Vec::new();
-
-        let mut pos = 0;
-        while pos < len {
-            // Track active DFA states. Each is (state_id, start_pos).
-            let mut active_states: Vec<(DfaStateId, usize)> = vec![(self.start, pos)];
-
-            // Track the leftmost-start / longest-end accepting match seen so far.
-            // `pending_end` is the position where that accepting state accepted,
-            // NOT where scanning happens to stop: a live-but-non-accepting branch
-            // (e.g. `.*` in `.*a|b` still hoping for an `a`) must not stretch the
-            // emitted match past the real accept.
-            let mut pending_start: Option<usize> = None;
-            let mut pending_end: usize = pos;
-
-            let mut cur_pos = pos;
-
-            while cur_pos <= len {
-                let mut new_states: Vec<(DfaStateId, usize)> = Vec::new();
-                let mut has_continuation = false;
-
-                // Process all active states
-                for &(state_id, start_pos) in &active_states {
-                    let state_idx = state_id as usize;
-
-                    // Check if this state is accepting
-                    if self.states[state_idx].is_accept
-                        && (!self.states[state_idx].has_end_anchor || cur_pos == len)
-                    {
-                        // Prefer the leftmost start; for that start, the longest
-                        // (current) end. Record the accepting end position.
-                        match pending_start {
-                            None => {
-                                pending_start = Some(start_pos);
-                                pending_end = cur_pos;
-                            }
-                            Some(ps) if start_pos < ps => {
-                                pending_start = Some(start_pos);
-                                pending_end = cur_pos;
-                            }
-                            Some(ps) if start_pos == ps && cur_pos > pending_end => {
-                                pending_end = cur_pos;
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // If at end, don't compute transitions
-                    if cur_pos == len {
-                        continue;
-                    }
-
-                    // Compute transition for current character
-                    let ch = text[cur_pos..].chars().next().unwrap();
-                    if let Some(next_id) = self.next_state(state_id, ch) {
-                        new_states.push((next_id, start_pos));
-                        has_continuation = true;
-                    }
+        // Single forward pass, recording every accept.
+        let mut accepts: Vec<(usize, usize)> = Vec::new();
+        let mut active: FxHashMap<DfaStateId, usize> = FxHashMap::default();
+        let mut i = 0;
+        loop {
+            for (&st, &start) in &active {
+                if self.states[st as usize].is_accept {
+                    accepts.push((start, i));
                 }
-
-                // If no continuations possible from ANY state, emit and break
-                if !has_continuation {
-                    // Emit the accepting match (pending_start, pending_end), NOT
-                    // cur_pos — see the note where pending_end is declared.
-                    if let Some(start) = pending_start {
-                        matches.push(DfaMatch {
-                            start,
-                            end: pending_end,
-                        });
-                        // Move past this match (prevent overlap)
-                        pos = if pending_end > pos {
-                            pending_end
-                        } else {
-                            pos + 1
-                        };
-                    } else {
-                        // No match found, advance by one
-                        pos += text[pos..].chars().next().map_or(1, char::len_utf8);
-                    }
-                    break;
-                }
-
-                // Advance to next position
-                cur_pos += text[cur_pos..].chars().next().unwrap().len_utf8();
-
-                // Deduplicate: keep earliest start_pos per state
-                let mut deduped: FxHashMap<DfaStateId, usize> = FxHashMap::default();
-                for (state_id, start_pos) in new_states {
-                    deduped.entry(state_id).or_insert(start_pos);
-                }
-                active_states = deduped.into_iter().collect();
             }
+            if i >= len {
+                break;
+            }
+            // Seed a new run starting here (earliest start wins on collision).
+            active.entry(self.start).or_insert(i);
+            let ch = text[i..].chars().next().unwrap();
+            let mut next: FxHashMap<DfaStateId, usize> = FxHashMap::default();
+            for (&st, &start) in &active {
+                if let Some(ns) = self.next_state(st, ch) {
+                    next.entry(ns)
+                        .and_modify(|e| {
+                            if start < *e {
+                                *e = start;
+                            }
+                        })
+                        .or_insert(start);
+                }
+            }
+            active = next;
+            i += ch.len_utf8();
         }
 
-        // Apply leftmost-longest deduplication (should already be done, but safety check)
+        // Leftmost-longest, non-overlapping selection: leftmost start, then
+        // longest end for that start, then skip anything it overlaps.
+        accepts.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
         let mut result: Vec<DfaMatch> = Vec::new();
-        let mut last_end = 0;
-        for m in &matches {
-            if m.start >= last_end {
-                result.push(DfaMatch {
-                    start: m.start,
-                    end: m.end,
-                });
-                last_end = m.end;
+        let mut cursor = 0;
+        for &(start, end) in &accepts {
+            if start < cursor {
+                continue;
             }
+            result.push(DfaMatch { start, end });
+            cursor = if end > start { end } else { start + 1 };
         }
-
         result
     }
 
@@ -3085,6 +3031,43 @@ mod tests {
             matches_regular.len(),
             "len mismatch"
         );
+    }
+
+    #[test]
+    fn test_find_all_hardened_matches_find_all_property() {
+        // Property: for DFA-compatible patterns, the single-pass hardened
+        // all-matches must equal the reference `find_all` on every input.
+        let patterns = [
+            ".*a|b", "[a-z]+", "[a-z]+a", ".*x", "x.*y", "ab|abc", "abc|ab", "a+b", "(ab)+",
+            "cat|dog", "a.c", "[01]+", ".b", "b.", ".*", "a*b", "aa|a", "(a|ab)c", ".*(ab)",
+            "[ab]*c", "a.*a",
+        ];
+        let alphabet = [b'a', b'b', b'c', b'x', b'y', b'0', b'1', b' '];
+        // deterministic LCG for reproducible "random" inputs
+        let mut seed: u64 = 0x1234_5678_9abc_def0;
+        let mut rng = |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % n
+        };
+        for pat in patterns {
+            let Some(mut dfa) = make_dfa(pat) else {
+                continue;
+            };
+            for _ in 0..200 {
+                let n = rng(12);
+                let input: String = (0..n)
+                    .map(|_| alphabet[rng(alphabet.len())] as char)
+                    .collect();
+                let hardened = dfa.find_all_hardened(&input);
+                let reference = dfa.find_all(&input);
+                assert_eq!(
+                    hardened, reference,
+                    "mismatch for pattern {pat:?} on input {input:?}:\n  hardened={hardened:?}\n  find_all={reference:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -3983,13 +3966,7 @@ mod tests {
         );
     }
 
-    // NOTE: `find_all_hardened` is NOT O(n) for `.*a|b` — its outer loop
-    // re-scans from every position, so it is O(n^2) (and slower than
-    // `find_all`). Ignored to keep the default test run fast; a genuine
-    // single-pass O(n) all-matches would be needed to make this benchmark
-    // meaningful (and to justify a public "hardened" API).
     #[test]
-    #[ignore = "find_all_hardened is O(n^2) for .*a|b; see note above"]
     fn benchmark_pathological_pattern() {
         // Pattern: .*a|b - produces O(n) matches on text of 'b's
         // This is the pathological case mentioned in the RE# blog post

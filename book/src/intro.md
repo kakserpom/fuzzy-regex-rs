@@ -47,13 +47,25 @@ Typical throughput: **1.4-2.0 Gbps** for streaming fuzzy matching on modern hard
 
 ### Pathological Pattern Protection
 
-Some regex patterns can cause O(n²) behavior in naive implementations. `fuzzy-regex` includes hardened mode that guarantees O(n) performance even for patterns like `.*a|b`:
+Some patterns make the naive "find, advance, repeat" all-matches loop O(n²) —
+for example `.*a|b` on a long run of `b`s, where each match's longest extent
+needs an independent look-ahead. `find_all_hardened` uses a single-pass
+all-matches scan that stays O(n) (linear) on such patterns, with results
+identical to `find_iter`:
 
-```rust,ignore
-let re = FuzzyRegex::new(".*a|b").unwrap();
-// Guaranteed O(n) even on pathological patterns
-let matches = re.find_all_hardened(text);
+```rust
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
+
+    let re = FuzzyRegex::new(".*a|b").unwrap();
+    // Linear even on pathological input:
+    let matches = re.find_all_hardened("bbbbbbbb");
+    assert_eq!(matches.len(), 8);
+}
 ```
+
+(A single search — `find` / `is_match` — is always O(n): the engine is a
+nonbacktracking automaton, so it has no catastrophic-backtracking blowup.)
 
 ## Ecosystem
 

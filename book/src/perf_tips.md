@@ -263,33 +263,34 @@ Some regex patterns can cause O(n²) behavior in naive implementations:
 - **Overlapping matches**: Many ways to match the same text
 - **Backtracking patterns**: Complex alternation
 
-### Solution: Hardened Mode
+### Solution: `find_all_hardened`
 
-Use `find_all_hardened()` for O(n) guaranteed performance:
+`find_all_hardened` finds all non-overlapping matches in a single linear-time
+DFA pass, instead of `find_iter`'s "find, advance, repeat" loop (which repeats an
+O(n) look-ahead per match on these patterns). Results are identical to
+`find_iter`:
 
-```rust,ignore
-use fuzzy_regex::FuzzyRegex;
+```rust
+fn main() {
+    use fuzzy_regex::FuzzyRegex;
 
-let re = FuzzyRegex::new(".*a|b").unwrap();
-let text = "bbbbbbbbbbbbbbbb";
+    let re = FuzzyRegex::new(".*a|b").unwrap();
+    let text = "bbbbbbbbbbbbbbbb";
 
-// Hardened mode: O(n) guaranteed
-let matches = re.find_all_hardened(text);
+    let matches = re.find_all_hardened(text); // O(n)
+    assert_eq!(matches.len(), 16);
+}
 ```
 
-### Performance Comparison
+### Scaling
 
-| Text Size | Standard | Hardened |
-|-----------|----------|----------|
-| 1,000 bytes | 1.08s | 69ms |
-| 10,000 bytes | 10.76s | 69ms |
+For `.*a|b` on a run of `b`s, `find_iter` is O(n²) while `find_all_hardened`
+is O(n): the hardened scan handles ~1.6 million characters in ~120 ms
+(roughly constant nanoseconds per character), whereas the naive loop degrades
+quadratically with input size.
 
-The hardened mode maintains constant time regardless of text size.
+### When to use it
 
-### Trade-offs
-
-Hardened mode may be slightly slower for well-behaved patterns (where O(n²) doesn't occur), but it's the safest choice when:
-
-- Pattern behavior is unknown
-- Text comes from untrusted sources
-- Worst-case performance is critical
+`find_all_hardened` is the safest choice when the pattern behavior is unknown or
+the text comes from untrusted sources. For DFA-incompatible patterns (fuzzy
+edits, lookaround, backreferences) it transparently falls back to `find_iter`.

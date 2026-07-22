@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FuzzyRegex::find_all_hardened` — find all non-overlapping matches in a single
+  linear-time DFA pass. For patterns like `.*a|b` on a long run of `b`s, the
+  usual "find, advance, repeat" loop (`find_iter`) is O(n²) because each match's
+  longest extent needs an independent look-ahead; the hardened scan is O(n) (it
+  tracks all live threads deduplicated by DFA state, records every accept, then
+  selects leftmost-longest non-overlapping). Results are identical to
+  `find_iter` (verified by a property test against `find_all` over 21 patterns ×
+  200 random inputs each). ~1.6M chars in ~120 ms vs. quadratic blowup. Patterns
+  that need the NFA fall back to `find_iter`. The internal `Dfa::find_all_hardened`
+  was also **fixed**: it previously emitted the scan-stop position instead of the
+  accepting end (so `.*a|b` on `"bbbb"` returned one bogus `(0,4)` instead of four
+  `"b"` matches), and its outer loop re-scanned from every position (O(n²)); the
+  single-pass rewrite is both correct and linear.
 - Aho-Corasick fast path for large `\L<name>` word lists, behind the new
   default-on `word-list-ac` feature (uses the
   [`fuzzy-aho-corasick`](https://github.com/kakserpom/fuzzy-aho-corasick-rs)
