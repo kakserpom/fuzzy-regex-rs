@@ -111,6 +111,60 @@ fn main() {
 }
 ```
 
+### Match End Policy
+
+When several end positions are valid within the edit budget, `match_end_policy`
+chooses which one is reported. The default, `LongestWithinBudget`, reports the
+widest span the budget allows; `MinEdit` reports the tightest alignment (fewest
+edits, then closest to the pattern length, then shortest span), matching
+mrab-regex's minimal-error reporting for large or unlimited `{e}` budgets.
+
+```rust
+fn main() {
+    use fuzzy_regex::{FuzzyRegexBuilder, MatchEndPolicy};
+
+    // Unlimited budget: many ends are valid for "(?:error){e}" in "regex failure".
+    let default = FuzzyRegexBuilder::new(r"(?:error){e}").build().unwrap();
+    assert_eq!(
+        default.find("regex failure").map(|m| (m.start(), m.end())),
+        Some((0, 8)) // widest span within budget
+    );
+
+    let min = FuzzyRegexBuilder::new(r"(?:error){e}")
+        .match_end_policy(MatchEndPolicy::MinEdit)
+        .build()
+        .unwrap();
+    assert_eq!(
+        min.find("regex failure").map(|m| (m.start(), m.end())),
+        Some((0, 5)) // tightest alignment: "regex"
+    );
+}
+```
+
+`find`, `find_iter`, and `captures` all agree under the chosen policy.
+
+### Word List Aho-Corasick Threshold
+
+For large `\L<name>` word lists, fuzzy-regex can match with an Aho-Corasick
+automaton instead of an NFA alternation (see [Word Lists](advanced_wordlists.md)).
+`word_list_ac_threshold` sets the minimum list size that triggers the automaton;
+smaller lists use the NFA. It never changes results, only performance. Defaults
+to `DEFAULT_WORD_LIST_AC_THRESHOLD` (64). Only relevant with the `word-list-ac`
+feature (enabled by default).
+
+```rust
+fn main() {
+    use fuzzy_regex::FuzzyRegexBuilder;
+
+    let mut re = FuzzyRegexBuilder::new(r"\b\L<w>\b")
+        .word_list_ac_threshold(1000)
+        .build()
+        .unwrap();
+    re.set_word_list("w", vec!["cat", "dog"]);
+    assert!(re.is_match("cat"));
+}
+```
+
 ## Chaining Options
 
 ```rust

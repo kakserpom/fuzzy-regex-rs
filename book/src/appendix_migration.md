@@ -8,15 +8,16 @@ fuzzy-regex extends the standard `regex` crate with fuzzy matching:
 
 ```rust
 fn main() {
-    // Standard regex
-    let re = regex::new("hello").unwrap();
+    // Standard regex (the `regex` crate):
+    //   let re = regex::Regex::new("hello").unwrap();
 
     // fuzzy-regex
     let re = fuzzy_regex::FuzzyRegex::new("hello").unwrap();
 
     // Add fuzziness
     let re = fuzzy_regex::FuzzyRegex::new("(?:hello){e<=1}").unwrap();
-    
+
+    let _ = re;
     println!("Created");
 }
 ```
@@ -31,12 +32,13 @@ The fuzzy syntax is compatible:
 
 ```rust
 fn main() {
-    // mrab-regex
-    let _re = regex::new(r"(?i)(?:hello){e<=1}");
+    // mrab-regex (Python):
+    //   re = regex.compile(r"(?i)(?:hello){e<=1}")
 
     // fuzzy-regex (same syntax)
     let re = fuzzy_regex::FuzzyRegex::new(r"(?i)(?:hello){e<=1}").unwrap();
-    
+
+    let _ = re;
     println!("Created");
 }
 ```
