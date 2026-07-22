@@ -84,3 +84,4 @@ Complete reference for all pattern syntax.
 | `(?b)` | Best match |
 | `(?e)` | Enhance match |
 | `(?p)` | POSIX mode |
+| `(?r)` | Reverse (search from the end; rightmost match) |

@@ -28,6 +28,9 @@ pub struct MatchFlags {
     pub global: bool,
     /// Unicode flag (`(?u)`) - enable Unicode character classes.
     pub unicode: bool,
+    /// Reverse flag (`(?r)`) - search from the end of the text toward the start,
+    /// so `find` returns the rightmost match and `find_iter` yields right-to-left.
+    pub reverse: bool,
 }
 
 impl MatchFlags {

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `(?r)` reverse-matching inline flag (and `FuzzyRegexBuilder::reverse`). When
+  set, the engine searches from the end of the text toward the start: `find`
+  returns the rightmost match, `find_iter` yields matches right-to-left, and
+  `captures` returns the rightmost match's groups. Match existence (`is_match`)
+  is direction-independent. The flag composes with the others (e.g. `(?er)`,
+  `(?ri)`). Reverse search reuses the existing right-to-left DFA scan
+  (`Dfa::find_rev`) and falls back to enumerating forward matches and taking the
+  rightmost for fuzzy/lookaround/capture patterns. This unblocks 10 previously
+  compile-failing mrab corpus cases (reverse + word lists / lookaround).
+
 - `FuzzyRegex::find_all_hardened` — find all non-overlapping matches in a single
   linear-time DFA pass. For patterns like `.*a|b` on a long run of `b`s, the
   usual "find, advance, repeat" loop (`find_iter`) is O(n²) because each match's

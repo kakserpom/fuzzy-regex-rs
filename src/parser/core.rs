@@ -563,6 +563,7 @@ impl<'a> Parser<'a> {
                 self.flags.case_insensitive |= f.case_insensitive;
                 self.flags.global |= f.global;
                 self.flags.unicode |= f.unicode;
+                self.flags.reverse |= f.reverse;
                 Ok(Ast::Empty)
             }
 

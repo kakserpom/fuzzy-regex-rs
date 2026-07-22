@@ -63,6 +63,9 @@ pub struct MatchFlags {
     /// `(?u)` - Unicode mode (enable Unicode character classes).
     /// When set, \w, \d, \s match Unicode characters instead of ASCII only.
     pub unicode: bool,
+    /// `(?r)` - Reverse mode (search from the end of the text toward the start).
+    /// `find` returns the rightmost match; `find_iter` yields matches right-to-left.
+    pub reverse: bool,
 }
 
 /// Policy for choosing a fuzzy match's end position when several ends are valid
@@ -293,6 +296,18 @@ impl FuzzyRegexBuilder {
     #[must_use]
     pub fn global(mut self, yes: bool) -> Self {
         self.config.match_flags.global = yes;
+        self
+    }
+
+    /// Enable reverse mode (search from the end of the text toward the start).
+    ///
+    /// When enabled, `find()` returns the rightmost match, `find_iter()` yields
+    /// matches right-to-left, and `captures()` returns the rightmost match's
+    /// groups. Match existence (`is_match()`) is unaffected. This is equivalent
+    /// to the `(?r)` inline flag.
+    #[must_use]
+    pub fn reverse(mut self, yes: bool) -> Self {
+        self.config.match_flags.reverse = yes;
         self
     }
 

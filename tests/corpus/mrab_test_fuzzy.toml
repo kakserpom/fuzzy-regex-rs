@@ -349,22 +349,19 @@ pattern = '(?e)\b\L<words>{e<=1}\b'
 compiles = true
 
 [[test]]
-name = "L2741 (?r) \\L<words> e<=1 - named word list + reverse unsupported"
+name = "L2741 (?r) \\L<words> e<=1"
 pattern = '(?r)\b\L<words>{e<=1}\b'
 compiles = true
-ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 [[test]]
-name = "L2743 (?er) \\L<words> e<=1 - named word list + reverse unsupported"
+name = "L2743 (?er) \\L<words> e<=1"
 pattern = '(?er)\b\L<words>{e<=1}\b'
 compiles = true
-ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 [[test]]
-name = "L2745 (?r) \\L<words> e<=1 (2) - named word list + reverse unsupported"
+name = "L2745 (?r) \\L<words> e<=1 (2)"
 pattern = '(?r)\b\L<words>{e<=1}\b'
 compiles = true
-ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 [[test]]
 name = "L2747 br \\L<words> e<=1 (deferred; resolve via set_word_list)"
@@ -382,22 +379,19 @@ pattern = '(?e)\b\L<words>{e<=1}\b'
 compiles = true
 
 [[test]]
-name = "L2753 br (?r) \\L<words> e<=1 - byte pattern + word list + reverse unsupported"
+name = "L2753 br (?r) \\L<words> e<=1"
 pattern = '(?r)\b\L<words>{e<=1}\b'
 compiles = true
-ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 [[test]]
-name = "L2755 br (?er) \\L<words> e<=1 - byte pattern + word list + reverse unsupported"
+name = "L2755 br (?er) \\L<words> e<=1"
 pattern = '(?er)\b\L<words>{e<=1}\b'
 compiles = true
-ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 [[test]]
-name = "L2757 br (?r) \\L<words> e<=1 (2) - byte pattern + word list + reverse unsupported"
+name = "L2757 br (?r) \\L<words> e<=1 (2)"
 pattern = '(?r)\b\L<words>{e<=1}\b'
 compiles = true
-ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
 
 # Backreference inside fuzzy (unsupported)
 [[test]]
@@ -406,10 +400,10 @@ pattern = '(\w+) (\1{e<=1})'
 compiles = true
 
 [[test]]
-name = "L2762 (?r) (\\2 e<=1) (\\w+) - backreference + reverse unsupported"
+name = "L2762 (?r) (\\2 e<=1) (\\w+) - backreference unsupported"
 pattern = '(?r)(\2{e<=1}) (\w+)'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference unsupported)
 
 [[test]]
 name = "L2764 br (\\w+) (\\1 e<=1) - byte pattern + backreference unsupported"
@@ -581,22 +575,22 @@ input = "x"
 is_match = false
 
 [[test]]
-name = "L3786 issue196 (?r)(x{6})e<=1 xxxxxx - reverse unsupported"
+name = "L3786 issue196 (?r)(x{6})e<=1 xxxxxx"
 pattern = "(?r)(x{6}){e<=1}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (fuzzy {e} on capturing group unsupported)
 
 [[test]]
-name = "L3788 issue196 (?r)(x{6})e<=1 xxxxx - reverse unsupported"
+name = "L3788 issue196 (?r)(x{6})e<=1 xxxxx"
 pattern = "(?r)(x{6}){e<=1}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (fuzzy {e} on capturing group unsupported)
 
 [[test]]
-name = "L3790 issue196 (?r)(x{6})e<=1 x - reverse unsupported"
+name = "L3790 issue196 (?r)(x{6})e<=1 x"
 pattern = "(?r)(x{6}){e<=1}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (fuzzy {e} on capturing group unsupported)
 
 # Hg issue 198: malformed fuzzy fails to compile (mrab uses byte pattern)
 [[test]]
@@ -689,28 +683,24 @@ is_match = true
 span = [5, 13]
 
 [[test]]
-name = "L3944 issue247 (?r) ESTONIA(?!\\w) e<=1 - reverse unsupported"
+name = "L3944 issue247 (?r) ESTONIA(?!\\w) e<=1"
 pattern = '(?r)(?:ESTONIA(?!\w)){e<=1}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 [[test]]
-name = "L3946 issue247 (?r) ESTONIA(?=\\W) e<=1 - reverse unsupported"
+name = "L3946 issue247 (?r) ESTONIA(?=\\W) e<=1"
 pattern = '(?r)(?:ESTONIA(?=\W)){e<=1}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 [[test]]
-name = "L3949 issue247 (?r) (?<!\\w)ESTONIA e<=1 - reverse unsupported"
+name = "L3949 issue247 (?r) (?<!\\w)ESTONIA e<=1"
 pattern = '(?r)(?:(?<!\w)ESTONIA){e<=1}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 [[test]]
-name = "L3951 issue247 (?r) (?<=\\W)ESTONIA e<=1 - reverse unsupported"
+name = "L3951 issue247 (?r) (?<=\\W)ESTONIA e<=1"
 pattern = '(?r)(?:(?<=\W)ESTONIA){e<=1}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (reverse unsupported)
 
 # Hg issue 248: fuzzy + multiple non-greedy quantifiers; group() = whole
 [[test]]
@@ -1015,13 +1005,13 @@ is_match = false
 name = "L4330 issue525 (\\L<foo>)e<=5 empty list - named word list unsupported"
 pattern = '(\L<foo>){e<=5}'
 compiles = true
-ignore = true   # GAP: mrab compiles (with words=); ours errors (reverse (?r) / fuzzy {e} on capturing group unsupported)
+ignore = true   # GAP: mrab compiles (with words=); ours errors (fuzzy {e} on capturing group unsupported)
 
 # ---------------------------------------------------------------------------
 # def test_fuzzy_ext (L4411-4497): fullmatch bool cases
 # ---------------------------------------------------------------------------
 [[test]]
-name = "L4412 (?r)(?:a){e<=1:[a-z]} e - reverse unsupported"
+name = "L4412 (?r)(?:a){e<=1:[a-z]} e"
 pattern = "(?:a){e<=1:[a-z]}"
 compiles = true
 
@@ -1038,7 +1028,7 @@ input = "-"
 is_match = false
 
 [[test]]
-name = "L4418 (?r)(?:a){e<=1:[a-z]} dash - reverse unsupported"
+name = "L4418 (?r)(?:a){e<=1:[a-z]} dash"
 pattern = "(?:a){e<=1:[a-z]}"
 compiles = true
 
@@ -1049,7 +1039,7 @@ input = "ae"
 is_match = true
 
 [[test]]
-name = "L4423 (?r)(?:a){e<=1:[a-z]} ae - reverse unsupported"
+name = "L4423 (?r)(?:a){e<=1:[a-z]} ae"
 pattern = "(?:a){e<=1:[a-z]}"
 compiles = true
 
@@ -1060,7 +1050,7 @@ input = "a-"
 is_match = false
 
 [[test]]
-name = "L4427 (?r)(?:a){e<=1:[a-z]} a- - reverse unsupported"
+name = "L4427 (?r)(?:a){e<=1:[a-z]} a-"
 pattern = "(?:a){e<=1:[a-z]}"
 compiles = true
 
@@ -1071,7 +1061,7 @@ input = "ae"
 is_match = true
 
 [[test]]
-name = "L4432 (?r)(?:ab){e<=1:[a-z]} ae - reverse unsupported"
+name = "L4432 (?r)(?:ab){e<=1:[a-z]} ae"
 pattern = "(?:ab){e<=1:[a-z]}"
 compiles = true
 
@@ -1082,7 +1072,7 @@ input = "a-"
 is_match = false
 
 [[test]]
-name = "L4436 (?r)(?:ab){e<=1:[a-z]} a- - reverse unsupported"
+name = "L4436 (?r)(?:ab){e<=1:[a-z]} a-"
 pattern = "(?:ab){e<=1:[a-z]}"
 compiles = true
 
@@ -1092,10 +1082,10 @@ pattern = '(a)\1{e<=1:[a-z]}'
 compiles = true
 
 [[test]]
-name = "L4441 (?r)\\1{e<=1:[a-z]}(a) ea - backreference + reverse unsupported"
+name = "L4441 (?r)\\1{e<=1:[a-z]}(a) ea - backreference unsupported"
 pattern = '(?r)\1{e<=1:[a-z]}(a)'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference unsupported)
 
 [[test]]
 name = "L4443 (a)\\1{e<=1:[a-z]} a- - backreference inside fuzzy unsupported"
@@ -1103,10 +1093,10 @@ pattern = '(a)\1{e<=1:[a-z]}'
 compiles = true
 
 [[test]]
-name = "L4445 (?r)\\1{e<=1:[a-z]}(a) -a - backreference + reverse unsupported"
+name = "L4445 (?r)\\1{e<=1:[a-z]}(a) -a - backreference unsupported"
 pattern = '(?r)\1{e<=1:[a-z]}(a)'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference unsupported)
 
 [[test]]
 name = "L4448 (?fiu) sharp-s e<=1:[a-z] ts - \\N{} + fullcase unsupported"
@@ -1121,16 +1111,16 @@ compiles = true
 ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4452 (?firu) sharp-s e<=1:[a-z] st - \\N{} + fullcase + reverse unsupported"
+name = "L4452 (?firu) sharp-s e<=1:[a-z] st - \\N{} + fullcase unsupported"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4454 (?firu) sharp-s e<=1:[a-z] ts - \\N{} + fullcase + reverse unsupported"
+name = "L4454 (?firu) sharp-s e<=1:[a-z] ts - \\N{} + fullcase unsupported"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
 name = "L4456 (?fiu) sharp-s e<=1:[a-z] -s - \\N{} + fullcase unsupported"
@@ -1145,16 +1135,16 @@ compiles = true
 ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4460 (?firu) sharp-s e<=1:[a-z] s- - \\N{} + fullcase + reverse unsupported"
+name = "L4460 (?firu) sharp-s e<=1:[a-z] s- - \\N{} + fullcase unsupported"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4462 (?firu) sharp-s e<=1:[a-z] -s - \\N{} + fullcase + reverse unsupported"
+name = "L4462 (?firu) sharp-s e<=1:[a-z] -s - \\N{} + fullcase unsupported"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
 name = "L4465 (?fiu)(sharp-s)\\1 e<=1:[a-z] ssst - backreference + \\N{} unsupported"
@@ -1169,16 +1159,16 @@ compiles = true
 ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4469 (?firu)\\1(sharp-s) stss - backreference + \\N{} + reverse unsupported"
+name = "L4469 (?firu)\\1(sharp-s) stss - backreference + \\N{} unsupported"
 pattern = '(?firu)\1{e<=1:[a-z]}(\N{LATIN SMALL LETTER SHARP S})'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4471 (?firu)\\1(sharp-s) tsss - backreference + \\N{} + reverse unsupported"
+name = "L4471 (?firu)\\1(sharp-s) tsss - backreference + \\N{} unsupported"
 pattern = '(?firu)\1{e<=1:[a-z]}(\N{LATIN SMALL LETTER SHARP S})'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
 name = "L4473 (?fiu)(sharp-s)\\1 ss-s - backreference + \\N{} unsupported"
@@ -1193,16 +1183,16 @@ compiles = true
 ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4477 (?firu)(sharp-s)\\1 -s - backreference + \\N{} + reverse unsupported"
+name = "L4477 (?firu)(sharp-s)\\1 -s - backreference + \\N{} unsupported"
 pattern = '(?firu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4479 (?firu)(sharp-s)\\1 s- - backreference + \\N{} + reverse unsupported"
+name = "L4479 (?firu)(sharp-s)\\1 s- - backreference + \\N{} unsupported"
 pattern = '(?firu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
 name = "L4482 (?fiu)(ss)\\1 e<=1:[a-z] sharp-s ts - backreference + \\N{} unsupported"
@@ -1215,16 +1205,16 @@ pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
 compiles = true
 
 [[test]]
-name = "L4486 (?firu)\\1(ss) st sharp-s - backreference + \\N{} + reverse unsupported"
+name = "L4486 (?firu)\\1(ss) st sharp-s - backreference + \\N{} unsupported"
 pattern = '(?firu)\1{e<=1:[a-z]}(ss)'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4488 (?firu)\\1(ss) ts sharp-s - backreference + \\N{} + reverse unsupported"
+name = "L4488 (?firu)\\1(ss) ts sharp-s - backreference + \\N{} unsupported"
 pattern = '(?firu)\1{e<=1:[a-z]}(ss)'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
 name = "L4490 (?fiu)(ss)\\1 sharp-s -s - backreference + \\N{} unsupported"
@@ -1237,13 +1227,13 @@ pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
 compiles = true
 
 [[test]]
-name = "L4494 (?firu)(ss)\\1 s- sharp-s - backreference + \\N{} + reverse unsupported"
+name = "L4494 (?firu)(ss)\\1 s- sharp-s - backreference + \\N{} unsupported"
 pattern = '(?firu)(ss)\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4496 (?firu)(ss)\\1 -s sharp-s - backreference + \\N{} + reverse unsupported"
+name = "L4496 (?firu)(ss)\\1 -s sharp-s - backreference + \\N{} unsupported"
 pattern = '(?firu)(ss)\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} + reverse unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)

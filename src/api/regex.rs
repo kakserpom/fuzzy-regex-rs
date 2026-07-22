@@ -203,6 +203,9 @@ impl FuzzyRegex {
         if result.flags.unicode {
             config.match_flags.unicode = true;
         }
+        if result.flags.reverse {
+            config.match_flags.reverse = true;
+        }
 
         Ok(Self::assemble(pattern, config, ast, FxHashMap::default()))
     }
@@ -774,6 +777,13 @@ impl FuzzyRegex {
     /// Never panics (all fast paths are pre-validated at construction time).
     #[inline]
     pub fn find<'t>(&self, text: &'t str) -> Option<Match<'t>> {
+        // Reverse mode (`(?r)`): search from the end and return the rightmost
+        // match. `find_rev` owns the right-to-left machinery (reverse DFA scan,
+        // or all-matches fallback for fuzzy/capture patterns).
+        if self.config.match_flags.reverse {
+            return self.find_rev(text);
+        }
+
         let result = self.find_dispatch(text);
 
         // Consistency guard (this crate's own tests only — zero cost and no
@@ -786,9 +796,14 @@ impl FuzzyRegex {
         #[cfg(test)]
         {
             let flags = &self.config.match_flags;
-            if !self.has_recursion && !flags.best_match && !flags.enhance_match && !flags.posix {
+            if !self.has_recursion
+                && !flags.best_match
+                && !flags.enhance_match
+                && !flags.posix
+                && !flags.reverse
+            {
                 let span = |m: &Option<Match<'t>>| m.as_ref().map(|x| (x.start(), x.end()));
-                let iter_first = self.find_iter(text).next();
+                let iter_first = self.find_iter_forward(text).next();
                 assert_eq!(
                     span(&result),
                     span(&iter_first),
@@ -1250,7 +1265,7 @@ impl FuzzyRegex {
         // returned "b,.2-1" instead of ",". Routing through `find_iter`
         // guarantees `find(x) == find_iter(x).next()`.
         if self.is_class_plus_with_literal {
-            return self.find_iter(text).next();
+            return self.find_iter_forward(text).next();
         }
 
         // Fast path for digit sequences: \d{4}-\d{2}-\d{2}
@@ -1362,7 +1377,7 @@ impl FuzzyRegex {
         }
 
         // Fallback: use full matcher
-        self.find_iter(text).next()
+        self.find_iter_forward(text).next()
     }
 
     /// Find the first match with a timeout.
@@ -1457,7 +1472,7 @@ impl FuzzyRegex {
 
         // Fallback: find all and get longest
         let mut longest = None;
-        for m in self.find_iter(text) {
+        for m in self.find_iter_forward(text) {
             let end = m.end();
             longest = Some(end);
         }
@@ -1603,7 +1618,7 @@ impl FuzzyRegex {
 
         // Fallback: find all matches and return the rightmost one
         let mut last = None;
-        for m in self.find_iter(text) {
+        for m in self.find_iter_forward(text) {
             last = Some(m);
         }
         last
@@ -1652,7 +1667,7 @@ impl FuzzyRegex {
                 .collect();
         }
         // No DFA (fuzzy / lookaround / ...): fall back to the general iterator.
-        self.find_iter(text).collect()
+        self.find_iter_forward(text).collect()
     }
 
     /// Find all matches from the end (reverse order).
@@ -1710,17 +1725,38 @@ impl FuzzyRegex {
         }
 
         // Fallback
-        let mut all = self.find_iter(text).collect::<Vec<_>>();
+        let mut all = self.find_iter_forward(text).collect::<Vec<_>>();
         all.reverse();
         all
     }
 
     /// Find all non-overlapping matches.
     ///
+    /// In reverse mode (`(?r)`) the matches are yielded right-to-left (rightmost
+    /// first); otherwise left-to-right.
+    ///
     /// # Panics
     ///
     /// Panics if the fast path literal pointer is null (internal invariant).
     pub fn find_iter<'t>(&self, text: &'t str) -> Matches<'t> {
+        // Reverse mode (`(?r)`): yield matches right-to-left. `find_iter_rev`
+        // uses the forward primitives internally, so this does not recurse.
+        if self.config.match_flags.reverse {
+            return Matches::new(self.find_iter_rev(text));
+        }
+        self.find_iter_forward(text)
+    }
+
+    /// Forward (left-to-right) implementation of [`find_iter`](Self::find_iter).
+    ///
+    /// This is the direction-agnostic primitive the reverse paths
+    /// (`find_rev`, `find_iter_rev`) build on, so they must call this rather than
+    /// the public `find_iter` to avoid re-entering reverse dispatch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fast path literal pointer is null (internal invariant).
+    fn find_iter_forward<'t>(&self, text: &'t str) -> Matches<'t> {
         // Unresolved \L<name> matches nothing.
         if self.has_unresolved_named_lists() {
             return Matches::new(Vec::new());
@@ -3037,6 +3073,12 @@ impl FuzzyRegex {
         // Unresolved \L<name> matches nothing.
         if self.has_unresolved_named_lists() {
             return None;
+        }
+        // Reverse mode (`(?r)`): return the rightmost match's captures, to stay
+        // consistent with `find`/`find_iter`. `captures_iter` enumerates
+        // left-to-right, so its last item is the rightmost match.
+        if self.config.match_flags.reverse {
+            return self.captures_iter(text).last();
         }
         #[cfg(feature = "word-list-ac")]
         if let Some(ac) = &self.word_list_ac {

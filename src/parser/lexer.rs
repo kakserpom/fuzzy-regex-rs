@@ -25,6 +25,8 @@ pub struct InlineFlags {
     pub global: bool,
     /// `u` - unicode.
     pub unicode: bool,
+    /// `r` - reverse (search from the end of the text toward the start).
+    pub reverse: bool,
 }
 
 /// Token produced by the lexer.
@@ -415,7 +417,7 @@ impl<'a> Lexer<'a> {
     fn is_inline_flag_char(c: char) -> bool {
         matches!(
             c,
-            'b' | 'e' | 'p' | 'x' | 's' | 'm' | 'U' | 'i' | 'g' | 'u' | 'f'
+            'b' | 'e' | 'p' | 'x' | 's' | 'm' | 'U' | 'i' | 'g' | 'u' | 'f' | 'r'
         )
     }
 
@@ -435,6 +437,7 @@ impl<'a> Lexer<'a> {
                 'i' => flags.case_insensitive = true,
                 'g' => flags.global = true,
                 'u' => flags.unicode = true,
+                'r' => flags.reverse = true,
                 // FULLCASE: accepted, no-op (see is_inline_flag_char).
                 'f' => {}
                 ')' => {
