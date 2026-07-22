@@ -14,7 +14,8 @@ pub mod streaming;
 pub(crate) mod word_list_ac;
 
 pub use builder::{
-    FuzzyRegexBuilder, Handler, HandlerMap, HandlerResult, MatchEndPolicy, MatchFlags, RegexConfig,
+    DEFAULT_WORD_LIST_AC_THRESHOLD, FuzzyRegexBuilder, Handler, HandlerMap, HandlerResult,
+    MatchEndPolicy, MatchFlags, RegexConfig,
 };
 pub use match_result::{CaptureMatches, Captures, Match, Matches, Replacer, Split};
 pub use regex::FuzzyRegex;

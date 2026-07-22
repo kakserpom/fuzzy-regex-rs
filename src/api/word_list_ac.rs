@@ -23,10 +23,6 @@ use fuzzy_aho_corasick::{FuzzyAhoCorasick, FuzzyAhoCorasickBuilder, FuzzyLimits}
 
 use crate::engine::EditCounts;
 
-/// Only use the Aho-Corasick path for lists larger than this. Smaller lists are
-/// expanded into the NFA, which is already correct and fast enough.
-pub(crate) const THRESHOLD: usize = 64;
-
 /// A single word-list match in absolute byte offsets.
 pub(crate) struct WlMatch {
     pub start: usize,

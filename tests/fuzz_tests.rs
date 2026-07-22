@@ -412,3 +412,37 @@ fn large_word_list_matches_nfa_alternation() {
         Some("cot".into())
     );
 }
+
+/// The AC threshold is configurable via the builder: lowering it engages the AC
+/// path on a small list, raising it past the list size keeps the NFA. Both must
+/// produce the same results (the point is transparency, not behavior).
+#[test]
+fn word_list_ac_threshold_is_configurable() {
+    let words = vec!["cat", "dog", "frog"]; // only 3 words
+
+    // Threshold 1: a 3-word list (> 1) now uses the AC path.
+    let mut low = FuzzyRegexBuilder::new(r"\b\L<w>\b")
+        .word_list_ac_threshold(1)
+        .build()
+        .unwrap();
+    low.set_word_list("w", words.clone());
+
+    // Threshold very high: the same list stays on the NFA.
+    let mut high = FuzzyRegexBuilder::new(r"\b\L<w>\b")
+        .word_list_ac_threshold(usize::MAX)
+        .build()
+        .unwrap();
+    high.set_word_list("w", words);
+
+    for text in ["a dog x", "adogx", "cat dog", "nope", ""] {
+        let l = low.find(text).map(|m| (m.start(), m.end()));
+        let h = high.find(text).map(|m| (m.start(), m.end()));
+        assert_eq!(l, h, "AC and NFA disagree on {text:?}");
+    }
+    // Sanity: results are correct regardless of path.
+    assert_eq!(
+        low.find("a dog x").map(|m| (m.start(), m.end())),
+        Some((2, 5))
+    );
+    assert!(low.find("adogx").is_none());
+}

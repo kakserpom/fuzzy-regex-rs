@@ -90,6 +90,10 @@ pub enum MatchEndPolicy {
     MinEdit,
 }
 
+/// Default minimum `\L<name>` list size for the Aho-Corasick fast path
+/// (see [`RegexConfig::word_list_ac_threshold`]).
+pub const DEFAULT_WORD_LIST_AC_THRESHOLD: usize = 64;
+
 /// Configuration for regex matching.
 #[allow(clippy::struct_excessive_bools)]
 pub struct RegexConfig {
@@ -142,6 +146,15 @@ pub struct RegexConfig {
     /// Set to [`MatchEndPolicy::MinEdit`] to report the tightest (minimum-edit)
     /// alignment instead.
     pub match_end_policy: MatchEndPolicy,
+
+    /// Minimum `\L<name>` word-list size for the Aho-Corasick fast path.
+    ///
+    /// A pure word-list pattern (a single `\L<name>` wrapped only in anchors /
+    /// word boundaries) whose resolved list has strictly more than this many
+    /// words is matched by an Aho-Corasick automaton instead of an NFA
+    /// alternation. Smaller lists keep using the NFA. Only relevant with the
+    /// `word-list-ac` feature (enabled by default); ignored otherwise.
+    pub word_list_ac_threshold: usize,
 }
 
 impl Clone for RegexConfig {
@@ -166,6 +179,7 @@ impl Clone for RegexConfig {
             minimize_dfa: self.minimize_dfa,
             full_dfa: self.full_dfa,
             match_end_policy: self.match_end_policy,
+            word_list_ac_threshold: self.word_list_ac_threshold,
         }
     }
 }
@@ -195,6 +209,7 @@ impl Default for RegexConfig {
             minimize_dfa: false,
             full_dfa: false,
             match_end_policy: MatchEndPolicy::default(),
+            word_list_ac_threshold: DEFAULT_WORD_LIST_AC_THRESHOLD,
         }
     }
 }
@@ -316,6 +331,22 @@ impl FuzzyRegexBuilder {
     #[must_use]
     pub fn match_end_policy(mut self, policy: MatchEndPolicy) -> Self {
         self.config.match_end_policy = policy;
+        self
+    }
+
+    /// Set the minimum `\L<name>` word-list size for the Aho-Corasick fast path.
+    ///
+    /// A pure word-list pattern (a single `\L<name>` wrapped only in anchors /
+    /// word boundaries) whose resolved list has strictly more than `threshold`
+    /// words is matched by an Aho-Corasick automaton instead of an NFA
+    /// alternation; smaller lists keep using the NFA. Lower it to favor the AC
+    /// path sooner, or set it very high to effectively disable the AC path.
+    ///
+    /// Defaults to [`DEFAULT_WORD_LIST_AC_THRESHOLD`]. Only relevant with the
+    /// `word-list-ac` feature (enabled by default); ignored otherwise.
+    #[must_use]
+    pub fn word_list_ac_threshold(mut self, threshold: usize) -> Self {
+        self.config.word_list_ac_threshold = threshold;
         self
     }
 

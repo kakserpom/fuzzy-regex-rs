@@ -3523,7 +3523,7 @@ fn build_word_list_ac(
     let Some(words) = word_lists.get(shape.name.as_str()) else {
         return (None, None);
     };
-    if words.len() <= crate::api::word_list_ac::THRESHOLD {
+    if words.len() <= config.word_list_ac_threshold {
         return (None, None);
     }
     if config.multi_line && (shape.start_anchor || shape.end_anchor) {

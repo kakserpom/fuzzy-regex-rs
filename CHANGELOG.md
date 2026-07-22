@@ -22,7 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly (verified in tests). Small lists and non-pure patterns keep using the
   NFA. Disable the feature for a lighter dependency tree if you do not use large
   named lists. A 5000-word list compiles in a few milliseconds and matches in
-  microseconds.
+  microseconds. The size threshold is configurable via
+  `FuzzyRegexBuilder::word_list_ac_threshold(n)` (default
+  `DEFAULT_WORD_LIST_AC_THRESHOLD` = 64); set it very high to keep every list on
+  the NFA, or low to favor the AC path sooner.
 - Real expected values for the 73 mrab corpus "skeleton" cases (previously just a
   name + pattern with no assertion, so they verified nothing). These mirror
   mrab's compile-only tests (`repr(type(regex.compile(...))) == PATTERN_CLASS`),
