@@ -28,6 +28,12 @@ jobs:
       - name: Run doc tests
         run: cargo test --doc
 
+      - name: Compile book code examples
+        # The book's `rust` code blocks are included as `#[cfg(doctest)]` doc
+        # modules (src/book_doctests.rs), so this compiles every non-`ignore`
+        # example in book/src against the crate and catches doc drift.
+        run: cargo test --doc book_doctests
+
       - name: Run clippy
         run: cargo clippy --all-features -- -D warnings
 

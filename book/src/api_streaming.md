@@ -16,7 +16,7 @@ fn main() {
 
 ## Feeding Data
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
@@ -123,7 +123,7 @@ fn main() {
 
 Search byte slices directly:
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
 

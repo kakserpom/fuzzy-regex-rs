@@ -267,7 +267,7 @@ Some regex patterns can cause O(n²) behavior in naive implementations:
 
 Use `find_all_hardened()` for O(n) guaranteed performance:
 
-```rust
+```rust,ignore
 use fuzzy_regex::FuzzyRegex;
 
 let re = FuzzyRegex::new(".*a|b").unwrap();

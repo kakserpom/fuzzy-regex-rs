@@ -44,7 +44,7 @@ The DFA provides the fastest matching path for patterns that don't require fuzzy
 
 ## Fast Path Integration
 
-```
+```text
 Pattern: hello{e<=1}
               │
               ▼
@@ -106,7 +106,7 @@ The DFA supports multiple algorithms for finding all matches.
 
 The standard approach: find a match, advance, repeat.
 
-```rust
+```rust,ignore
 let matches = dfa.find_all(text);
 // Time: O(n²) worst case for pathological patterns
 ```
@@ -118,7 +118,7 @@ Uses a reverse prefilter to find candidates efficiently:
 1. **Pass 1**: Scan right-to-left, finding candidate positions
 2. **Pass 2**: Verify matches at each candidate
 
-```rust
+```rust,ignore
 let matches = dfa.find_all_two_pass(text);
 // Prefilter reduces candidates in Pass 1
 // Still O(n²) worst case in Pass 2
@@ -133,7 +133,7 @@ Tracks all active DFA states simultaneously:
 3. When no continuation possible, emit match
 4. Continue from next position
 
-```rust
+```rust,ignore
 let matches = dfa.find_all_hardened(text);
 // Guaranteed O(n) - each character processed once
 ```

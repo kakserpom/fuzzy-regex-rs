@@ -6,7 +6,7 @@ Understanding and handling errors.
 
 ### Invalid Syntax
 
-```
+```rust,ignore
 Error: regex parse error
 ```
 
@@ -16,7 +16,7 @@ Error: regex parse error
 
 ### Unsupported Feature
 
-```
+```rust,ignore
 Error: Feature not supported: backreferences
 ```
 
@@ -26,7 +26,7 @@ Error: Feature not supported: backreferences
 
 ### Empty Pattern
 
-```
+```rust,ignore
 Error: pattern cannot be empty
 ```
 
@@ -38,7 +38,7 @@ Error: pattern cannot be empty
 
 ### Fuzzy Limit Out of Range
 
-```
+```rust,ignore
 Error: edit limit too high
 ```
 
@@ -48,7 +48,7 @@ Error: edit limit too high
 
 ### Invalid Character Class
 
-```
+```rust,ignore
 Error: invalid character class
 ```
 
@@ -60,7 +60,7 @@ Error: invalid character class
 
 ### Timeout
 
-```
+```rust,ignore
 Error: timeout after ...
 ```
 
@@ -72,7 +72,7 @@ Error: timeout after ...
 
 Not an error - use `find()` returning `Option`.
 
-```rust
+```rust,ignore
 if let Some(m) = re.find(text) {
     // Match found
 } else {

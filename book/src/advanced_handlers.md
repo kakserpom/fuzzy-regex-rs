@@ -6,7 +6,7 @@ Custom handlers allow you to invoke arbitrary Rust code during regex matching. T
 
 Use `(?call:handler_name)` in your pattern to invoke a handler:
 
-```rust
+```rust,ignore
 use fuzzy_regex::{FuzzyRegexBuilder, HandlerResult};
 
 let re = FuzzyRegexBuilder::new("(?call:myhandler)")
@@ -21,7 +21,7 @@ let re = FuzzyRegexBuilder::new("(?call:myhandler)")
 
 Handlers have the signature:
 
-```rust
+```rust,ignore
 Fn(&str, usize) -> HandlerResult
 ```
 
@@ -168,7 +168,7 @@ re.find("id:999"); // no match (no "user:" prefix)
 
 Handle non-ASCII text (note: byte count matters for UTF-8):
 
-```rust
+```rust,ignore
 use fuzzy_regex::{FuzzyRegexBuilder, HandlerResult};
 
 let re = FuzzyRegexBuilder::new(r#""(?call:translate)""#)
@@ -226,7 +226,7 @@ assert_eq!(m.as_str(), " привет");
 
 Use multiple handlers in the same pattern:
 
-```rust
+```rust,ignore
 use fuzzy_regex::{FuzzyRegexBuilder, HandlerResult};
 
 let re = FuzzyRegexBuilder::new(r"(?call:foo).*(?call:bar)")

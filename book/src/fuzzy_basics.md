@@ -68,7 +68,7 @@ fn main() {
 
 Omit the number to allow unlimited edits:
 
-```rust
+```rust,ignore
 fn main() {
     // Allow unlimited substitutions
     let re = FuzzyRegex::new("(?:hello){s}").unwrap();

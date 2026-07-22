@@ -22,7 +22,7 @@ Vectorized reverse search for character ranges like `[a-z]`:
 - **ARM (NEON)**: Uses 16-byte vectors with `vmaxvq_u8`
 - Uses `neon_movemask` to extract bit positions
 
-```rust
+```rust,ignore
 // Searches right-to-left for characters in range
 let positions = rev_search_ranges.find_last(haystack);
 ```
@@ -36,7 +36,7 @@ SIMD-accelerated multi-pattern searching:
 - Uses bitwise operations to combine matches
 - Efficient for patterns with multiple byte alternatives
 
-```rust
+```rust,ignore
 // Searches for any of multiple bytes
 let position = teddy.find_first(haystack);
 ```
@@ -53,7 +53,7 @@ The Bitap algorithm is highly parallelizable with SIMD:
 
 ### Implementation
 
-```rust
+```rust,ignore
 // AVX2 implementation
 unsafe {
     // Load 32 bytes

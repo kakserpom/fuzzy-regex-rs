@@ -4,7 +4,7 @@ How fuzzy-regex chooses the matching algorithm.
 
 ## Decision Tree
 
-```
+```text
 Pattern Analysis
       │
       ▼
@@ -65,7 +65,7 @@ The library automatically selects based on:
 
 Patterns like `.*`, `^.*$`, `.*$` always match. The engine detects these and returns instantly without scanning:
 
-```rust
+```rust,ignore
 let re = FuzzyRegex::new(".*").unwrap();
 // Returns match immediately - no text scanning
 ```
@@ -74,7 +74,7 @@ let re = FuzzyRegex::new(".*").unwrap();
 
 Patterns like `.*test` or `.*test~2` use reverse search to avoid O(n²) behavior:
 
-```rust
+```rust,ignore
 let re = FuzzyRegex::new(".*test").unwrap();
 // Finds "test" from the right, then .* matches everything before it
 // O(n) instead of O(n²)
@@ -84,10 +84,10 @@ let re = FuzzyRegex::new(".*test").unwrap();
 
 DFA now works with capturing groups like `(?m)^(.*)test$`:
 
-```rust
+```rust,ignore
 let re = FuzzyRegex::new("(?m)^(.*)test$").unwrap();
 // Uses DFA - much faster than NFA
-```
+```text
 
 ## All-Matches Algorithms
 
@@ -97,7 +97,7 @@ When finding all matches in text (`find_iter`, `find_all`), fuzzy-regex supports
 
 Some patterns produce many overlapping matches, causing naive "find, advance, repeat" to be O(n²):
 
-```rust
+```text
 // Pattern: .*a|b on text: "bbbbbbbb"
 // Each 'b' matches individually → O(n) matches × O(n) scan = O(n²)
 ```
@@ -117,7 +117,7 @@ Uses a reverse prefilter to find candidate positions, then verifies matches:
 1. **Pass 1**: Scan right-to-left using prefilter (memchr, Teddy, etc.)
 2. **Pass 2**: For each candidate, find the match
 
-```rust
+```rust,ignore
 let mut dfa = Dfa::new(".*a|b").unwrap();
 let matches = dfa.find_all_two_pass("bbbbbb");
 ```
@@ -126,7 +126,7 @@ let matches = dfa.find_all_two_pass("bbbbbb");
 
 Tracks all active DFA states simultaneously as we scan left-to-right:
 
-```rust
+```rust,ignore
 let mut dfa = Dfa::new(".*a|b").unwrap();
 let matches = dfa.find_all_hardened("bbbbbb");
 ```
@@ -150,7 +150,7 @@ Pattern `.*a|b` on text of all 'b's (worst case):
 
 ### When to Use Each
 
-```rust
+```rust,ignore
 // Default: smart selection based on pattern
 let matches = dfa.find_all(text);
 
@@ -176,7 +176,7 @@ The two-pass algorithm uses prefilters optimized for different patterns:
 
 Not currently exposed, but internal selection can be inspected:
 
-```rust
+```rust,ignore
 // Check which engine was used
 let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
 if re.supports_streaming() {

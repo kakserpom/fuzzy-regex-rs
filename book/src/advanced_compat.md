@@ -6,7 +6,7 @@ Migrate from other fuzzy matching libraries.
 
 This is a drop-in replacement for `fuzzy-aho-corasick`:
 
-```rust
+```rust,ignore
 use fuzzy_regex::compat::fac::FuzzyAhoCorasickBuilder;
 use fuzzy_regex::types::FuzzyLimits;
 

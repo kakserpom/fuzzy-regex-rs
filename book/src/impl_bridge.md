@@ -14,7 +14,7 @@ The Fuzzy Bridge coordinates between the NFA-based regex engine and specialized 
 
 ## Architecture
 
-```
+```text
 Regex Pattern:  hello (?:world){e<=1}
                     │
                     ▼

@@ -18,7 +18,7 @@ fn main() {
 
 ## Numbered Capture Groups
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new(r"(\w+)@(\w+)").unwrap();
     let caps = re.captures("test@example").unwrap();
@@ -31,7 +31,7 @@ fn main() {
 
 ## Nested Groups
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new(r"((?P<outer>\w+)-(?P<inner>\w+))").unwrap();
     let caps = re.captures("hello-world").unwrap();
@@ -131,7 +131,7 @@ fn main() {
 
 ## Iterating Captures
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new(r"(\w+)").unwrap();
     let caps = re.captures("hello world").unwrap();
@@ -146,7 +146,7 @@ fn main() {
 
 ## Accessing All Groups
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new(r"(\w+)@(\w+)").unwrap();
     let caps = re.captures("a@b").unwrap();

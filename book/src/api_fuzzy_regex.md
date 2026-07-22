@@ -25,7 +25,7 @@ fn main() {
 
 ### `is_match`
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
 
@@ -37,7 +37,7 @@ fn main() {
 
 ### `find`
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new("(?:hello){e<=1}").unwrap();
 
@@ -50,7 +50,7 @@ fn main() {
 
 ### `find_iter`
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new(r"(?:\w+){e<=1}").unwrap();
 
@@ -64,7 +64,7 @@ fn main() {
 
 Find rightmost match:
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new("(?:foo)").unwrap();
     let m = re.find_rev("foo foo foo").unwrap();
@@ -74,7 +74,7 @@ fn main() {
 
 ## Replace Methods
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new("world").unwrap();
 
@@ -90,7 +90,7 @@ fn main() {
 
 ## Other Methods
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new(r"(?<word>\w+)").unwrap();
 

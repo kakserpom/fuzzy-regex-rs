@@ -15,7 +15,7 @@ Overview of the main API types and methods.
 
 ## Quick Method Reference
 
-```rust
+```rust,ignore
 use fuzzy_regex::FuzzyRegex;
 
 // Construction

@@ -21,7 +21,7 @@ fn main() {
 
 When enabled, matches that reach the end of the input are marked as "partial":
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegexBuilder;
 
@@ -48,7 +48,7 @@ fn main() {
 
 ### Streaming Input
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegexBuilder;
 

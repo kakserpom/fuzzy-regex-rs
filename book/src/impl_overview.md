@@ -4,7 +4,7 @@ How fuzzy-regex works internally.
 
 ## High-Level Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────┐
 │              FuzzyRegex                      │
 │         (Public API Layer)                   │

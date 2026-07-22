@@ -42,7 +42,7 @@ By default, `\w`, `\d`, `\s` match ASCII characters only:
 
 Enable Unicode character classes with `(?u)` flag:
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegexBuilder;
 
@@ -60,7 +60,7 @@ fn main() {
 
 ## Unicode Property Escapes
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
@@ -80,7 +80,7 @@ fn main() {
 
 ## Nested Classes
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 

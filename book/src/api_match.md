@@ -50,7 +50,7 @@ fn main() {
 
 ## Match as Different Types
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 

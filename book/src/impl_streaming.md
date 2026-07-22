@@ -4,7 +4,7 @@ Processing data incrementally without loading everything into memory.
 
 ## Streaming Architecture
 
-```
+```text
 Input Data
     │
     ▼
@@ -30,7 +30,7 @@ Input Data
 
 Stores unprocessed data between feed calls:
 
-```rust
+```rust,ignore
 struct StreamingMatcher {
     buffer: Vec<u8>,      // Unprocessed bytes
     position: usize,      // Current position in stream
@@ -42,7 +42,7 @@ struct StreamingMatcher {
 
 Tracks absolute position in the stream:
 
-```rust
+```rust,ignore
 let mut stream = re.stream();
 
 stream.feed(b"hello");      // position = 5
@@ -55,7 +55,7 @@ assert_eq!(stream.position(), 11);
 
 Matches can span chunk boundaries:
 
-```rust
+```rust,ignore
 let mut stream = re.stream();
 
 // Chunk 1: no complete match
@@ -68,7 +68,7 @@ let matches = stream.feed(b"hello").collect();
 
 ### Buffer Management
 
-```rust
+```rust,ignore
 // Keep some overlap between chunks
 // for cross-boundary matches
 
@@ -82,7 +82,7 @@ let mut stream = re.stream();
 
 Process any `Read` source:
 
-```rust
+```rust,ignore
 use std::io::BufReader;
 use std::fs::File;
 
@@ -98,20 +98,20 @@ for m in re.stream().with_chunk_size(8192).search_reader(reader) {
 
 ### Feed
 
-```rust
+```rust,ignore
 stream.feed(b"data chunk");
 ```
 
 ### Finish
 
-```rust
+```rust,ignore
 // After all data fed, check for remaining matches
 stream.finish();
 ```
 
 ### Reset
 
-```rust
+```rust,ignore
 // Start over with fresh state
 stream.reset();
 ```
@@ -134,7 +134,7 @@ Streaming uses O(max_pattern_length + buffer) memory regardless of input size.
 
 ### State Management
 
-```rust
+```rust,ignore
 // Between feed calls:
 // 1. Save current state
 // 2. Process new chunk

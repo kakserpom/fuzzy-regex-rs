@@ -49,7 +49,7 @@ Typical throughput: **1.4-2.0 Gbps** for streaming fuzzy matching on modern hard
 
 Some regex patterns can cause O(n²) behavior in naive implementations. `fuzzy-regex` includes hardened mode that guarantees O(n) performance even for patterns like `.*a|b`:
 
-```rust
+```rust,ignore
 let re = FuzzyRegex::new(".*a|b").unwrap();
 // Guaranteed O(n) even on pathological patterns
 let matches = re.find_all_hardened(text);

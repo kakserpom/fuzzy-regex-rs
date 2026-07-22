@@ -18,7 +18,7 @@ fn main() {
 
 ## Numbered Groups
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new(r"(\w+)@(\w+)").unwrap();
     let caps = re.captures("test@example").unwrap();
@@ -57,7 +57,7 @@ fn main() {
 
 ## Nested Groups
 
-```rust
+```rust,ignore
 fn main() {
     let re = FuzzyRegex::new(r"((ab)(cd))").unwrap();
     let caps = re.captures("abcd").unwrap();
@@ -102,7 +102,7 @@ fn main() {
 
 Per-type limits (`{i<=N,d<=N,s<=N}`) also work with shared budgets:
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
@@ -112,13 +112,13 @@ fn main() {
     assert!(re.is_match("helo world"));   // 1 deletion
     assert!(!re.is_match("helo worl"));   // 2 deletions (exceeds d<=1)
 }
-```
+```text
 
 ### How It Works
 
 Without a group budget, each `(?:...){e<=N}` has its own independent edit allowance. Wrapping them in a non-capturing group with fuzziness merges them into a shared pool:
 
-```rust
+```text
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 

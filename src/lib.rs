@@ -129,6 +129,9 @@ pub use api::{
     FuzzyRegexBuilder, Handler, HandlerMap, HandlerResult, Match, MatchEndPolicy, MatchFlags,
     Matches, ReaderMatches, RegexConfig, Replacer, Split, StreamingMatch, StreamingMatcher,
 };
+#[cfg(doctest)]
+mod book_doctests;
+
 pub use engine::EditCounts;
 pub use error::{Error, Result};
 pub use types::{FuzzyLimits, FuzzyPenalties};

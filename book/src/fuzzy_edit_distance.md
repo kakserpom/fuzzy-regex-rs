@@ -8,7 +8,7 @@ The edit distance (Damerau-Levenshtein distance) measures how many operations it
 
 Adding a character to the text:
 
-```
+```rust,ignore
 Pattern: "cat"
 Text:    "cart" 
 Edit:    Insert 'r' after 'c'
@@ -19,7 +19,7 @@ Cost:    1
 
 Removing a character from the text:
 
-```
+```rust,ignore
 Pattern: "cat"  
 Text:    "ct"
 Edit:    Delete 'a'
@@ -30,7 +30,7 @@ Cost:    1
 
 Replacing one character with another:
 
-```
+```rust,ignore
 Pattern: "cat"
 Text:    "bat"
 Edit:    Replace 'c' with 'b'
@@ -41,7 +41,7 @@ Cost:    1
 
 Swapping two adjacent characters:
 
-```
+```rust,ignore
 Pattern: "cat"
 Text:    "act"
 Edit:    Swap 'c' and 'a'

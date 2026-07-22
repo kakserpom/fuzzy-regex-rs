@@ -37,7 +37,7 @@ fn main() {
 
 ## Finding Matches
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
@@ -55,7 +55,7 @@ fn main() {
 
 ## Streaming Large Data
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 

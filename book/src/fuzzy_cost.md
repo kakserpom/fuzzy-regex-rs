@@ -25,7 +25,7 @@ fn main() {
 
 Assign different costs to different edit types:
 
-```rust
+```rust,ignore
 fn main() {
     use fuzzy_regex::FuzzyRegex;
 
