@@ -836,10 +836,31 @@ input = "$ 10,112.111.12"
 fuzzy_counts = [1, 0, 0]
 
 [[test]]
-name = "[GAP: complex anchored pattern no-match] L4203 issue370 (?e) money s<=1,i<=1,d<=1 fuzzy_counts"
-ignore = true
+name = "L4203 issue370 (?e) money s<=1,i<=1,d<=1 fuzzy_counts"
 pattern = '(?e)^(?:^(?:\$ )?\d{1,3}(?:,\d{3})*(?:\.\d{2})$){s<=1,i<=1,d<=1}'
 input = "$ 10,112.111.12"
+fuzzy_counts = [1, 0, 0]
+
+# L4203 minimal repro family: a substitution that enters a repetition must win
+# over spending an insertion+deletion budget. Each specified per-op limit must
+# not remove the minimal (1,0,0) alignment that a subset of the limits already
+# admits (monotonicity: adding an insertion budget must not lose the match).
+[[test]]
+name = "L4203-min s<=1,i<=1,d<=1 substitution-into-repetition beats i+d"
+pattern = '^(?:X(?:,\d\d)*\.\d$){s<=1,i<=1,d<=1}'
+input = "X.12.3"
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "L4203-min s<=1,i<=1,d<=0 insertion budget must not drop the match"
+pattern = '^(?:X(?:,\d\d)*\.\d$){s<=1,i<=1,d<=0}'
+input = "X.12.3"
+fuzzy_counts = [1, 0, 0]
+
+[[test]]
+name = "L4203-min s<=1,i<=0,d<=1 baseline"
+pattern = '^(?:X(?:,\d\d)*\.\d$){s<=1,i<=0,d<=1}'
+input = "X.12.3"
 fuzzy_counts = [1, 0, 0]
 
 [[test]]

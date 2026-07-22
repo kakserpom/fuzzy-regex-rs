@@ -391,14 +391,10 @@ impl FuzzyBridge {
             }
         }
 
-        // Sort each entry by similarity (highest first), then by length (longest first)
-        // Longer matches are preferred when similarities are equal, as they allow
-        // subsequent pattern parts to match correctly
+        // Rank each entry so `get` returns the fewest-edit, longest base
+        // alignment (see `cmp_cached_candidates`).
         for matches in cached.by_pattern_and_start.values_mut() {
-            matches.sort_by(|a, b| match b.similarity.partial_cmp(&a.similarity) {
-                Some(std::cmp::Ordering::Equal) | None => b.end.cmp(&a.end),
-                Some(ord) => ord,
-            });
+            matches.sort_by(cmp_cached_candidates);
         }
 
         cached
@@ -471,12 +467,10 @@ impl FuzzyBridge {
             }
         }
 
-        // Sort each entry by similarity (highest first), then by length (longest first)
+        // Rank each entry so `get` returns the fewest-edit, longest base
+        // alignment (see `cmp_cached_candidates`).
         for matches in cached.by_pattern_and_start.values_mut() {
-            matches.sort_by(|a, b| match b.similarity.partial_cmp(&a.similarity) {
-                Some(std::cmp::Ordering::Equal) | None => b.end.cmp(&a.end),
-                Some(ord) => ord,
-            });
+            matches.sort_by(cmp_cached_candidates);
         }
 
         cached
@@ -840,12 +834,10 @@ impl FuzzyBridge {
             }
         }
 
-        // Sort each entry by similarity (highest first), then by length (longest first)
+        // Rank each entry so `get` returns the fewest-edit, longest base
+        // alignment (see `cmp_cached_candidates`).
         for matches in cached.by_pattern_and_start.values_mut() {
-            matches.sort_by(|a, b| match b.similarity.partial_cmp(&a.similarity) {
-                Some(std::cmp::Ordering::Equal) | None => b.end.cmp(&a.end),
-                Some(ord) => ord,
-            });
+            matches.sort_by(cmp_cached_candidates);
         }
 
         cached
@@ -2580,6 +2572,31 @@ impl FuzzyMatchResult {
             .saturating_add(self.substitutions)
             .saturating_add(self.swaps)
     }
+}
+
+/// Ordering for the cached candidate alignments of an embedded fuzzy literal.
+///
+/// `CachedMatches::get` returns the first entry, so this ranks the alignment
+/// the matcher should use as its base for a fuzzy literal at a given position:
+/// fewest edits first, then the longest span, then the highest similarity.
+///
+/// Edit count leads rather than similarity because the similarity score
+/// saturates for short sub-matches — a 1-edit and a 2-edit match of a single
+/// character both score 0.0 — so similarity alone cannot separate the minimal
+/// alignment from an over-consuming one (e.g. matching `,` on `.12` as the
+/// 1-edit `.`→`,` versus the 2-edit `.1`→`,`+insert). Feeding the matcher the
+/// fewest-edit base lets its trailing-insertion logic re-derive the longer
+/// variants, so the globally-minimal alignment survives. Longest-within-
+/// fewest-edits preserves leftmost-longest for the base itself.
+fn cmp_cached_candidates(a: &FuzzyMatchResult, b: &FuzzyMatchResult) -> std::cmp::Ordering {
+    a.total_edits()
+        .cmp(&b.total_edits())
+        .then_with(|| b.end.cmp(&a.end))
+        .then_with(|| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 #[test]

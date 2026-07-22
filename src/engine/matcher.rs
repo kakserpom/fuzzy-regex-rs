@@ -1529,18 +1529,37 @@ impl<'a> Matcher<'a> {
                         // At same start:
                         || (m.start == best.start && {
                         if is_special_mode {
-                            // BESTMATCH/ENHANCEMATCH: prefer higher similarity/length
-                            m.similarity > best.similarity
-                                || (m.similarity == best.similarity && if prefer_shorter {
-                                m.end - m.start < best.end - best.start
-                            } else {
-                                m.end - m.start > best.end - best.start
-                            })
+                            // BESTMATCH/ENHANCEMATCH: minimise errors, so prefer higher
+                            // similarity, then FEWER total edits, then length. As in the
+                            // default branch, edit count outranks length because the
+                            // similarity score saturates and can't separate a 1-edit
+                            // alignment from a 2-edit one over the same span.
+                            match m.similarity.partial_cmp(&best.similarity) {
+                                Some(std::cmp::Ordering::Greater) => true,
+                                Some(std::cmp::Ordering::Less) | None => false,
+                                Some(std::cmp::Ordering::Equal) => {
+                                    match m.edits.total().cmp(&best.edits.total()) {
+                                        std::cmp::Ordering::Less => true,
+                                        std::cmp::Ordering::Greater => false,
+                                        std::cmp::Ordering::Equal => {
+                                            if prefer_shorter {
+                                                m.end - m.start < best.end - best.start
+                                            } else {
+                                                m.end - m.start > best.end - best.start
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         } else if is_simple_alt {
                             // Simple alternation (no fuzzy/captures): first match wins
                             false
                         } else {
-                            // Default behavior: prefer higher similarity, then longer
+                            // Default behavior: prefer higher similarity, then longer.
+                            // Length (not edit count) is the tie-break here: default
+                            // fuzzy matching is leftmost-longest, so a longer span with
+                            // more edits outranks a shorter, lower-edit one (e.g.
+                            // `(?:Q+){e}` on "abc" matches all of "abc", not just "a").
                             m.similarity > best.similarity
                                 || (m.similarity == best.similarity && if prefer_shorter {
                                 m.end - m.start < best.end - best.start
