@@ -1092,100 +1092,84 @@ pattern = '(?r)\1{e<=1:[a-z]}(a)'
 compiles = true
 
 [[test]]
-name = "L4448 (?fiu) sharp-s e<=1:[a-z] ts - \\N{} + fullcase unsupported"
+name = "L4448 (?fiu) sharp"
 pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4450 (?fiu) sharp-s e<=1:[a-z] st - \\N{} + fullcase unsupported"
+name = "L4450 (?fiu) sharp"
 pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4452 (?firu) sharp-s e<=1:[a-z] st - \\N{} + fullcase unsupported"
+name = "L4452 (?firu) sharp"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4454 (?firu) sharp-s e<=1:[a-z] ts - \\N{} + fullcase unsupported"
+name = "L4454 (?firu) sharp"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4456 (?fiu) sharp-s e<=1:[a-z] -s - \\N{} + fullcase unsupported"
+name = "L4456 (?fiu) sharp"
 pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4458 (?fiu) sharp-s e<=1:[a-z] s- - \\N{} + fullcase unsupported"
+name = "L4458 (?fiu) sharp"
 pattern = '(?fiu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4460 (?firu) sharp-s e<=1:[a-z] s- - \\N{} + fullcase unsupported"
+name = "L4460 (?firu) sharp"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4462 (?firu) sharp-s e<=1:[a-z] -s - \\N{} + fullcase unsupported"
+name = "L4462 (?firu) sharp"
 pattern = '(?firu)(?:\N{LATIN SMALL LETTER SHARP S}){e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (\\N{} + fullcase unsupported)
 
 [[test]]
-name = "L4465 (?fiu)(sharp-s)\\1 e<=1:[a-z] ssst - backreference + \\N{} unsupported"
+name = "L4465 (?fiu)(sharp"
 pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4467 (?fiu)(sharp-s)\\1 e<=1:[a-z] ssts - backreference + \\N{} unsupported"
+name = "L4467 (?fiu)(sharp"
 pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4469 (?firu)\\1(sharp-s) stss - backreference + \\N{} unsupported"
+name = "L4469 (?firu)\\1(sharp"
 pattern = '(?firu)\1{e<=1:[a-z]}(\N{LATIN SMALL LETTER SHARP S})'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4471 (?firu)\\1(sharp-s) tsss - backreference + \\N{} unsupported"
+name = "L4471 (?firu)\\1(sharp"
 pattern = '(?firu)\1{e<=1:[a-z]}(\N{LATIN SMALL LETTER SHARP S})'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4473 (?fiu)(sharp-s)\\1 ss-s - backreference + \\N{} unsupported"
+name = "L4473 (?fiu)(sharp"
 pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4475 (?fiu)(sharp-s)\\1 sss- - backreference + \\N{} unsupported"
+name = "L4475 (?fiu)(sharp"
 pattern = '(?fiu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4477 (?firu)(sharp-s)\\1 -s - backreference + \\N{} unsupported"
+name = "L4477 (?firu)(sharp"
 pattern = '(?firu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4479 (?firu)(sharp-s)\\1 s- - backreference + \\N{} unsupported"
+name = "L4479 (?firu)(sharp"
 pattern = '(?firu)(\N{LATIN SMALL LETTER SHARP S})\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
 name = "L4482 (?fiu)(ss)\\1 e<=1:[a-z] sharp-s ts - backreference + \\N{} unsupported"

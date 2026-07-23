@@ -631,6 +631,9 @@ impl<'a> Lexer<'a> {
             // Named backreference \k<name> or \k{name}
             'k' => self.lex_named_backreference(),
 
+            // Named Unicode escape \N{NAME} or \N{U+XXXX}
+            'N' => self.lex_named_unicode(),
+
             _ => Err(Error::invalid_escape(ch, self.position - 1)),
         }
     }
@@ -728,6 +731,61 @@ impl<'a> Lexer<'a> {
             }
         }
         Err(Error::unclosed("named backreference", self.position))
+    }
+
+    /// Lex a named Unicode escape: `\N{NAME}` (Unicode character name) or
+    /// `\N{U+XXXX}` (codepoint). Resolves to the single character as an escaped
+    /// literal. The leading `\N` has been consumed.
+    fn lex_named_unicode(&mut self) -> Result<Token> {
+        if self.peek_char() != Some('{') {
+            return Err(Error::parse(self.position, "expected '{' after '\\N'"));
+        }
+        self.next_char(); // consume '{'
+
+        let mut body = String::new();
+        let mut closed = false;
+        while let Some(ch) = self.peek_char() {
+            self.next_char();
+            if ch == '}' {
+                closed = true;
+                break;
+            }
+            body.push(ch);
+        }
+        if !closed {
+            return Err(Error::unclosed("named unicode escape", self.position));
+        }
+
+        let name = body.trim();
+        if name.is_empty() {
+            return Err(Error::parse(self.position, "empty '\\N{}' escape"));
+        }
+
+        // `\N{U+XXXX}` codepoint form.
+        if let Some(hex) = name.strip_prefix("U+").or_else(|| name.strip_prefix("u+")) {
+            let cp = u32::from_str_radix(hex, 16).map_err(|_| {
+                Error::parse(
+                    self.position,
+                    format!("invalid codepoint in '\\N{{{name}}}'"),
+                )
+            })?;
+            let ch = char::from_u32(cp).ok_or_else(|| {
+                Error::parse(
+                    self.position,
+                    format!("invalid codepoint in '\\N{{{name}}}'"),
+                )
+            })?;
+            return Ok(Token::Escaped(ch));
+        }
+
+        // Unicode character-name lookup.
+        match unicode_names2::character(name) {
+            Some(ch) => Ok(Token::Escaped(ch)),
+            None => Err(Error::parse(
+                self.position,
+                format!("unknown Unicode character name '{name}' in '\\N{{...}}'"),
+            )),
+        }
     }
 
     /// Lex a named backreference: `\k<name>` or `\k{name}`.

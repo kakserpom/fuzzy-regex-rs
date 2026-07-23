@@ -71,4 +71,6 @@ nonbacktracking automaton, so it has no catastrophic-backtracking blowup.)
 
 - **MSRV**: Rust 1.88+
 - **Features**: SIMD (default), mimalloc (optional)
-- **Dependencies**: Zero runtime dependencies
+- **Dependencies**: a small, focused set — `memchr` (SIMD search),
+  `thiserror` (errors), `unicode-segmentation` and `unicode-names2` (Unicode
+  grapheme/name support); Aho-Corasick backends are optional features

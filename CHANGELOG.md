@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `\N{...}` named-Unicode escapes: `\N{NAME}` resolves a Unicode character name
+  (e.g. `\N{LATIN SMALL LETTER SHARP S}`, `\N{BULLET}`) via the `unicode-names2`
+  database, and `\N{U+XXXX}` resolves a codepoint. Works anywhere a literal
+  character does — in sequences, character classes, with quantifiers and
+  fuzziness. Unknown names, malformed forms, and out-of-range codepoints are
+  compile errors. Unblocks the mrab corpus sharp-s cases (L4448–L4496). Adds a
+  dependency on `unicode-names2` (its table generator is a build-only dep).
+
 - Forward references — a backreference to a capture group defined later in the
   pattern (`\1(a)`, `\k<x>(?P<x>a)`, and the `(?r)` reverse-mode forms). A
   pre-scan counts groups and collects names before parsing, so the reference

@@ -31,6 +31,16 @@ Complete reference for all pattern syntax.
 | `\s` | Whitespace |
 | `\S` | Non-whitespace |
 
+## Character Escapes
+
+| Syntax | Description |
+|--------|-------------|
+| `\n`, `\r`, `\t`, `\f`, `\v`, `\0` | Control characters |
+| `\xHH` | Byte by hex code |
+| `\u{HHHH}`, `\uHHHH` | Codepoint by hex |
+| `\N{NAME}` | Character by Unicode name, e.g. `\N{BULLET}` |
+| `\N{U+XXXX}` | Character by codepoint, e.g. `\N{U+1F600}` |
+
 ## Quantifiers
 
 | Syntax | Description |
