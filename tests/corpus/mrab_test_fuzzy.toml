@@ -491,10 +491,10 @@ fuzzy_counts = [1, 0, 0]
 
 # Incorrect fuzzy changes (fuzzy_changes unsupported)
 [[test]]
-name = "L2798 issue fuzzy_changes GTTTTCATTCCTCATA - fuzzy_changes unsupported"
+name = "L2798 issue fuzzy_changes GTTTTCATTCCTCATA - cost expression i+d+s<=N unsupported"
 pattern = "(?e)(GTTTTCATTCCTCATA){i<=4,d<=4,s<=4,i+d+s<=8}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (fuzzy_changes unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (cost expression i+d+s<=N unsupported)
 
 # Fuzzy constraints ignored when checking for prefix/suffix in branches
 [[test]]
@@ -578,19 +578,16 @@ is_match = false
 name = "L3786 issue196 (?r)(x{6})e<=1 xxxxxx"
 pattern = "(?r)(x{6}){e<=1}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (fuzzy {e} on capturing group unsupported)
 
 [[test]]
 name = "L3788 issue196 (?r)(x{6})e<=1 xxxxx"
 pattern = "(?r)(x{6}){e<=1}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (fuzzy {e} on capturing group unsupported)
 
 [[test]]
 name = "L3790 issue196 (?r)(x{6})e<=1 x"
 pattern = "(?r)(x{6}){e<=1}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (fuzzy {e} on capturing group unsupported)
 
 # Hg issue 198: malformed fuzzy fails to compile (mrab uses byte pattern)
 [[test]]
@@ -771,10 +768,10 @@ is_match = true
 
 # Hg issue 353: fuzzy changes negative indexes (fuzzy_changes unsupported)
 [[test]]
-name = "L4181 issue353 (?be) AGTGT...{s<=5,i<=5,d<=5,s+i+d<=10} - fuzzy_changes unsupported"
+name = "L4181 issue353 (?be) AGTGT...{s<=5,i<=5,d<=5,s+i+d<=10} - cost expression s+i+d<=N unsupported"
 pattern = "(?be)(AGTGTTCCCCGCGCCAGCGGGGATAAACCG){s<=5,i<=5,d<=5,s+i+d<=10}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (fuzzy_changes unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (cost expression i+d+s<=N unsupported)
 
 # Git issue 364: fuzzy_counts vs fuzzy_changes (match -> ^)
 [[test]]
@@ -1002,10 +999,9 @@ is_match = false
 
 # Git issue 525: fuzzy matching empty word list (unsupported)
 [[test]]
-name = "L4330 issue525 (\\L<foo>)e<=5 empty list - named word list unsupported"
+name = "L4330 issue525 (\\L<foo>)e<=5 empty list"
 pattern = '(\L<foo>){e<=5}'
 compiles = true
-ignore = true   # GAP: mrab compiles (with words=); ours errors (fuzzy {e} on capturing group unsupported)
 
 # ---------------------------------------------------------------------------
 # def test_fuzzy_ext (L4411-4497): fullmatch bool cases

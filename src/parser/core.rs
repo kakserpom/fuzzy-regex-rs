@@ -689,12 +689,23 @@ impl<'a> Parser<'a> {
             _ => return Err(Error::unclosed("group", self.lexer.position())),
         }
 
-        // Check for fuzziness on the group
-        let fuzziness = if matches!(self.lexer.peek_token()?, Token::Tilde) {
-            self.lexer.next_token()?;
-            self.parse_fuzziness()?
-        } else {
-            Fuzziness::Inherited
+        // Check for fuzziness on the group - supports both `~N` and mrab-style
+        // `{i<=1}`/`{e<=1}` (mirrors the named-capture and non-capturing paths).
+        let fuzziness = match self.lexer.peek_token()? {
+            Token::Tilde => {
+                self.lexer.next_token()?;
+                self.parse_fuzziness()?
+            }
+            Token::OpenBrace => {
+                // Distinguish mrab fuzziness `{e<=1}` from a repetition `{1,2}`.
+                if self.peek_is_mrab_fuzziness() {
+                    self.lexer.next_token()?; // consume '{'
+                    self.parse_mrab_fuzziness()?
+                } else {
+                    Fuzziness::Inherited
+                }
+            }
+            _ => Fuzziness::Inherited,
         };
 
         // If there's fuzziness on a capture group, wrap the content

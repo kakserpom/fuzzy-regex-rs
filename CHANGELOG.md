@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- mrab-style fuzzy quantifiers (`{e<=1}`, `{i<=1,d<=2}`, `{s<=1}`, …) on unnamed
+  capturing groups, e.g. `(abc){e<=1}`. Previously only non-capturing
+  `(?:abc){e<=1}` and named `(?P<n>abc){e<=1}` groups accepted the syntax; the
+  unnamed capturing path recognised only the `~N` form and rejected `{e}` with
+  "invalid quantifier: expected number". Unnamed captures now behave exactly like
+  named captures (same `apply_group_fuzziness` lowering), populate the group, and
+  compose with `(?r)`. Unblocks mrab corpus cases L3786/L3788/L3790
+  (`(?r)(x{6}){e<=1}`) and L4330 (`(\L<foo>){e<=5}`).
+
 - `(?r)` reverse-matching inline flag (and `FuzzyRegexBuilder::reverse`). When
   set, the engine searches from the end of the text toward the start: `find`
   returns the rightmost match, `find_iter` yields matches right-to-left, and
