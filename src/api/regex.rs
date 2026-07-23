@@ -170,7 +170,7 @@ impl FuzzyRegex {
     pub(crate) fn compile(pattern: String, mut config: RegexConfig) -> Result<Self> {
         // Parse the pattern with flags (verbose, dot_all, and ungreedy affect parsing)
         let result = parse_with_flags(&pattern, config.verbose, config.dot_all, config.ungreedy)?;
-        let ast = result.ast;
+        let mut ast = result.ast;
 
         // Apply pattern flags to config (pattern flags override builder settings)
         if result.flags.best_match {
@@ -205,6 +205,15 @@ impl FuzzyRegex {
         }
         if result.flags.reverse {
             config.match_flags.reverse = true;
+        }
+        if result.flags.fullcase {
+            config.match_flags.fullcase = true;
+        }
+
+        // Full case folding (`(?f)`) is only meaningful with case-insensitive
+        // matching; rewrite the AST so both fold directions (ß↔"ss") match.
+        if config.match_flags.fullcase && config.case_insensitive {
+            ast = crate::parser::fullcase::apply(ast);
         }
 
         Ok(Self::assemble(pattern, config, ast, FxHashMap::default()))

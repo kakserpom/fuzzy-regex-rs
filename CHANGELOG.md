@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `(?f)` full case folding (only effective with `(?i)`): matches Unicode
+  characters with multi-character case foldings against their expansions,
+  bidirectionally — `(?fi)\N{LATIN SMALL LETTER SHARP S}` matches "ss"/"SS"/"ß",
+  and `(?fi)ss` matches "ß"; likewise the ligatures (ﬀ↔"ff", etc.). Implemented
+  as an opt-in AST rewrite (a fold-expanding character becomes `(?:char|fold)`
+  and a literal run equal to a fold gains the collapsed character as an
+  alternative), so it composes with fuzziness and does not affect patterns that
+  do not set `(?f)`. A pattern character never matches a partial expansion (a
+  bare "s" does not match "ß"). Adds a dependency on `caseless`. Also adds
+  `FuzzyRegexBuilder`-level parsing of the flag.
+
 - `\N{...}` named-Unicode escapes: `\N{NAME}` resolves a Unicode character name
   (e.g. `\N{LATIN SMALL LETTER SHARP S}`, `\N{BULLET}`) via the `unicode-names2`
   database, and `\N{U+XXXX}` resolves a codepoint. Works anywhere a literal

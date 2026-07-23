@@ -604,6 +604,7 @@ impl<'a> Parser<'a> {
                 self.flags.global |= f.global;
                 self.flags.unicode |= f.unicode;
                 self.flags.reverse |= f.reverse;
+                self.flags.fullcase |= f.fullcase;
                 Ok(Ast::Empty)
             }
 

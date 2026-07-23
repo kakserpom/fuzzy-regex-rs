@@ -106,3 +106,4 @@ matching a repeat of the captured text within the given edit budget.
 | `(?e)` | Enhance match |
 | `(?p)` | POSIX mode |
 | `(?r)` | Reverse (search from the end; rightmost match) |
+| `(?f)` | Full case folding (e.g. `ß` ↔ `ss`); only with `(?i)` |

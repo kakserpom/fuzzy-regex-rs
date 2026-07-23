@@ -66,6 +66,9 @@ pub struct MatchFlags {
     /// `(?r)` - Reverse mode (search from the end of the text toward the start).
     /// `find` returns the rightmost match; `find_iter` yields matches right-to-left.
     pub reverse: bool,
+    /// `(?f)` - Full case-folding (e.g. `ß` matches `"ss"`). Only has an effect
+    /// together with case-insensitive matching.
+    pub fullcase: bool,
 }
 
 /// Policy for choosing a fuzzy match's end position when several ends are valid
@@ -308,6 +311,17 @@ impl FuzzyRegexBuilder {
     #[must_use]
     pub fn reverse(mut self, yes: bool) -> Self {
         self.config.match_flags.reverse = yes;
+        self
+    }
+
+    /// Enable full case folding (equivalent to the `(?f)` inline flag).
+    ///
+    /// Matches characters with multi-character case foldings against their
+    /// expansions in both directions (e.g. `ß` ↔ `"ss"`). Only has an effect
+    /// together with [`case_insensitive`](Self::case_insensitive).
+    #[must_use]
+    pub fn fullcase(mut self, yes: bool) -> Self {
+        self.config.match_flags.fullcase = yes;
         self
     }
 

@@ -27,6 +27,8 @@ pub struct InlineFlags {
     pub unicode: bool,
     /// `r` - reverse (search from the end of the text toward the start).
     pub reverse: bool,
+    /// `f` - full case folding (ß matches "ss", etc.); only effective with `i`.
+    pub fullcase: bool,
 }
 
 /// Token produced by the lexer.
@@ -445,8 +447,7 @@ impl<'a> Lexer<'a> {
                 'g' => flags.global = true,
                 'u' => flags.unicode = true,
                 'r' => flags.reverse = true,
-                // FULLCASE: accepted, no-op (see is_inline_flag_char).
-                'f' => {}
+                'f' => flags.fullcase = true,
                 ')' => {
                     self.next_char();
                     // Verbose must take effect for the rest of this lex pass.

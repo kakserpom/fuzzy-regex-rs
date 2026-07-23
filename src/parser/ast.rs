@@ -31,6 +31,9 @@ pub struct MatchFlags {
     /// Reverse flag (`(?r)`) - search from the end of the text toward the start,
     /// so `find` returns the rightmost match and `find_iter` yields right-to-left.
     pub reverse: bool,
+    /// Full case-folding flag (`(?f)`) - fold characters with multi-character
+    /// case foldings (e.g. `ß` matches `"ss"`). Only effective with `(?i)`.
+    pub fullcase: bool,
 }
 
 impl MatchFlags {

@@ -5,6 +5,7 @@
 
 pub mod ast;
 mod core;
+pub mod fullcase;
 pub mod lexer;
 
 pub use ast::*;
