@@ -1368,6 +1368,10 @@ impl<'a> Matcher<'a> {
         let mut best_cost: FxHashMap<(StateId, usize), u16> = FxHashMap::default();
         best_cost.insert((self.nfa.start, start), 0);
 
+        // Reused across batches to avoid a fresh allocation per BFS level.
+        let mut best_at_pos: FxHashMap<(StateId, usize), usize> = FxHashMap::default();
+        let mut admitted: Vec<usize> = Vec::new();
+
         while !threads.is_empty() {
             // Early termination for lazy quantifiers: once we have a match, stop exploring
             if self.config.prefer_shortest && best_match.is_some() {
@@ -1394,7 +1398,7 @@ impl<'a> Matcher<'a> {
             // supersedes; equal or higher cost is dropped. This keeps the
             // minimal-edit alignment while letting exact continuations reclaim a
             // key a costlier path reached earlier.
-            let mut best_at_pos: FxHashMap<(StateId, usize), usize> = FxHashMap::default();
+            best_at_pos.clear();
             for (idx, thread) in next_threads.iter().enumerate() {
                 let key = (thread.state, thread.pos);
                 let cost = thread.edits.cost(1, 1, 1, 1);
@@ -1406,23 +1410,30 @@ impl<'a> Matcher<'a> {
                     }
                 }
             }
-            let mut admitted: Vec<usize> = best_at_pos
-                .iter()
-                .filter_map(|(key, &idx)| {
-                    let cost = next_threads[idx].edits.cost(1, 1, 1, 1);
-                    match best_cost.get(key) {
-                        Some(&prev) if cost >= prev => None,
-                        _ => {
-                            best_cost.insert(*key, cost);
-                            Some(idx)
-                        }
+            admitted.clear();
+            admitted.extend(best_at_pos.iter().filter_map(|(key, &idx)| {
+                let cost = next_threads[idx].edits.cost(1, 1, 1, 1);
+                match best_cost.get(key) {
+                    Some(&prev) if cost >= prev => None,
+                    _ => {
+                        best_cost.insert(*key, cost);
+                        Some(idx)
                     }
-                })
-                .collect();
+                }
+            }));
             admitted.sort_unstable();
+            // Move (not clone) the surviving threads into the next batch. Because
+            // `admitted` is sorted ascending, walking `next_threads` by consuming
+            // it in order and taking the admitted indices preserves the original
+            // (earliest-first) order without cloning each thread's captures /
+            // group_edits vectors.
+            let mut ai = 0;
             let mut deduped = Vec::with_capacity(admitted.len());
-            for idx in admitted {
-                deduped.push(next_threads[idx].clone());
+            for (i, thread) in next_threads.drain(..).enumerate() {
+                if ai < admitted.len() && admitted[ai] == i {
+                    deduped.push(thread);
+                    ai += 1;
+                }
             }
             next_threads = deduped;
 
