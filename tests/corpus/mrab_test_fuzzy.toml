@@ -84,8 +84,8 @@ span = [9, 17]
 
 # text = 'anaconda foo bar baz smith anderson'
 [[test]]
-name = "[DIVERGENCE: minimal-vs-default-alignment] L2639 fuu i<=3,d<=3,e<=5"
-ignore = true
+name = "[DIVERGENCE: zero-width-deletion] L2639 fuu i<=3,d<=3,e<=5"
+ignore = true   # DIVERGENCE: mrab returns the empty match [0,0] by deleting the whole pattern (3 dels <= d<=3) at the leftmost position; we decline zero-width whole-pattern-deletion matches (deliberate policy: otherwise find() returns [0,0] for any pattern whose deletion budget >= its length). Reconciling needs cross-cutting matcher work across multiple match engines.
 pattern = "(?:fuu){i<=3,d<=3,e<=5}"
 input = "anaconda foo bar baz smith anderson"
 span = [0, 0]
@@ -109,8 +109,8 @@ input = "anaconda foo bar baz smith anderson"
 span = [9, 10]
 
 [[test]]
-name = "[DIVERGENCE: minimal-vs-default-alignment] L2647 fuu i<=3,d<=3,e"
-ignore = true
+name = "[DIVERGENCE: zero-width-deletion] L2647 fuu i<=3,d<=3,e"
+ignore = true   # DIVERGENCE: as L2639 (unbounded {e}): mrab deletes the whole pattern -> empty [0,0]; we decline zero-width whole-pattern-deletion at the start.
 pattern = "(?:fuu){i<=3,d<=3,e}"
 input = "anaconda foo bar baz smith anderson"
 span = [0, 0]
@@ -128,15 +128,15 @@ compiles = true
 
 # No cost limit
 [[test]]
-name = "[DIVERGENCE: minimal-vs-default-alignment] L2656 foobar e"
-ignore = true
+name = "[DIVERGENCE: unbounded-alignment] L2656 foobar e"
+ignore = true   # DIVERGENCE: unbounded {e}: many alignments fit; mrab reports a leftmost 6-char span [0,6], we report [1,9]. Budget is unbounded so no minimal-edit definition applies; alignment-selection order differs.
 pattern = "(?:foobar){e}"
 input = "xirefoabralfobarxie"
 span = [0, 6]
 
 [[test]]
-name = "[DIVERGENCE: (?e) now global-min ([11,16], 1 edit); mrab leftmost-improve quirk gives [0,3]] L2658 (?e) foobar e"
-ignore = true
+name = "[DIVERGENCE: enhancematch-global-min] L2658 (?e) foobar e"
+ignore = true   # DIVERGENCE: (?e) ENHANCEMATCH: mrab does leftmost-then-local-improve -> [0,3]; we compute the true global minimum-edit match -> [11,16] (1 edit). Ours has fewer edits.
 pattern = "(?e)(?:foobar){e}"
 input = "xirefoabralfobarxie"
 span = [0, 3]
@@ -174,8 +174,7 @@ input = "zfoobarz"
 span = [0, 8]
 
 [[test]]
-name = "[DIVERGENCE: minimal-vs-default-alignment] L2675 \\b foobar e \\b sentence"
-ignore = true
+name = "L2675 \b foobar e \b sentence"
 pattern = '\b(?:foobar){e}\b'
 input = "boing zfoobarz goobar woop"
 span = [0, 6]
@@ -279,8 +278,8 @@ is_match = false
 
 # Weighted cost constraint
 [[test]]
-name = "[DIVERGENCE: minimal-vs-default-alignment] L2710 foobar i<=1,d<=2,s<=3,2d+1s<4"
-ignore = true
+name = "[DIVERGENCE: weighted-cost-alignment] L2710 foobar i<=1,d<=2,s<=3,2d+1s<4"
+ignore = true   # DIVERGENCE: weighted cost: mrab reports leftmost [6,13]; we report a later span [26,33]. Both satisfy the constraint but the leftmost selection differs under the weighted-cost bound (possible leftmost gap on our side; not yet investigated).
 pattern = "(?:foobar){i<=1,d<=2,s<=3,2d+1s<4}"
 input = "3oifaowefbaoraofuiebofasebfaobfaorfeoaro"
 span = [6, 13]
@@ -324,8 +323,8 @@ input = "www.cnn.com 64.236.16.20\nwww.slashdot.org 66.35.250.150\nFor useful in
 span = [0, 120]
 
 [[test]]
-name = "[DIVERGENCE: dot/anchor semantics or BESTMATCH start] L2730 ^.*(dot.org)e.*$ (no dotall)"
-ignore = true
+name = "[DIVERGENCE: dollar-dot-newline] L2730 ^.*(dot.org)e.*$ (no dotall)"
+ignore = true   # DIVERGENCE: multi-line input with a trailing newline: mrab ends at [0,119] (before the final newline); we end at [0,124]. `$`/`.`-vs-newline/`.*` end-position semantics differ.
 pattern = "^.*(?:dot.org){e}.*$"
 input = "www.cnn.com 64.236.16.20\nwww.slashdot.org 66.35.250.150\nFor useful information, use www.slashdot.org\nthis is demo data!\n"
 span = [0, 119]
@@ -455,8 +454,8 @@ span = [0, 20]
 
 # Hg issue 109: edit distance / fuzzy_counts; fullmatch -> ^...$
 [[test]]
-name = "[DIVERGENCE: fuzzy-regex reports minimal (0 edits) like mrab (?e); mrab default is non-minimal (0,0,1)] L2784 issue109 (cats|cat) e<=1 cat"
-ignore = true
+name = "[DIVERGENCE: alternation-first-vs-minimal] L2784 issue109 (cats|cat) e<=1 cat"
+ignore = true   # DIVERGENCE: mrab takes the FIRST alternative 'cats' and matches 'cat' via 1 deletion -> fc [0,0,1]; we prefer the alternative that matches with fewest edits ('cat' exact) -> [0,0,0]. Ours is minimal (exact preferred).
 pattern = "^(?:cats|cat){e<=1}$"
 input = "cat"
 fuzzy_counts = [0, 0, 1]
@@ -468,8 +467,8 @@ input = "cat"
 fuzzy_counts = [0, 0, 0]
 
 [[test]]
-name = "[DIVERGENCE: fuzzy-regex reports minimal (0 edits) like mrab (?e); mrab default is non-minimal (0,1,0)] L2789 issue109 (cat|cats) e<=1 cats"
-ignore = true
+name = "[DIVERGENCE: alternation-first-vs-minimal] L2789 issue109 (cat|cats) e<=1 cats"
+ignore = true   # DIVERGENCE: mrab takes the first alternative 'cat' + 1 insertion -> fc [0,1,0]; we match 'cats' exactly -> [0,0,0]. Ours is minimal.
 pattern = "^(?:cat|cats){e<=1}$"
 input = "cats"
 fuzzy_counts = [0, 1, 0]
@@ -505,8 +504,8 @@ is_match = true
 
 # Hg issue 82: error range
 [[test]]
-name = "[DIVERGENCE: dot/anchor semantics or BESTMATCH start] L3287 issue82 (?b) CAGCC...{1<e<=2} BESTMATCH"
-ignore = true
+name = "[DIVERGENCE: bestmatch-start] L3287 issue82 (?b) CAGCC...{1<e<=2} BESTMATCH"
+ignore = true   # DIVERGENCE: (?b) BESTMATCH with min-error {1<e<=2}: mrab starts the match at 31 (span [31,58]); we start at 33 (span [33,58]), same end. BESTMATCH start-position/alignment differs; both is_match=true.
 pattern = "(?b)(?:CAGCCTCCCATTTCAGAATATACATCC){1<e<=2}"
 input = "tcagacgagtgcgttgtaaaacgacggccagtCAGCCTCCCATTCAGAATATACATCCcgacggccagttaaaaacaatgccaaggaggtcatagctgtttcctgccagttaaaaacaatgccaaggaggtcatagctgtttcctgacgcactcgtctgagcgggctggcaagg"
 is_match = true
@@ -768,8 +767,8 @@ compiles = true
 
 # Git issue 364: fuzzy_counts vs fuzzy_changes (match -> ^)
 [[test]]
-name = "[DIVERGENCE: minimal-vs-default-alignment] L4185 issue364 (?:bc)e c fuzzy_counts"
-ignore = true
+name = "[DIVERGENCE: non-minimal-alignment] L4185 issue364 (?:bc)e c fuzzy_counts"
+ignore = true   # DIVERGENCE: ^(?:bc){e} on 'c': mrab reports fc [1,0,1] (sub b->c then del c, 2 edits); we report [0,0,1] (del b, match c, 1 edit). Ours uses fewer edits.
 pattern = "^(?:bc){e}"
 input = "c"
 fuzzy_counts = [1, 0, 1]
@@ -803,8 +802,8 @@ compiles = true
 
 # Git issue 370: fuzzy matching behavior (match -> ^; inner ^...$ kept)
 [[test]]
-name = "[DIVERGENCE: (?e) now global-min (9 edits); mrab reports non-minimal (11 edits)] L4199 issue370 (?e) money e fuzzy_counts"
-ignore = true
+name = "[DIVERGENCE: enhancematch-global-min] L4199 issue370 (?e) money e fuzzy_counts"
+ignore = true   # DIVERGENCE: (?e) with unbounded {e}: mrab's leftmost-improve gives fc [6,0,5] (11 edits); we compute the global minimum (4 edits). Ours far fewer edits.
 pattern = '(?e)^(?:^(?:\$ )?\d{1,3}(?:,\d{3})*(?:\.\d{2})$){e}'
 input = "$ 10,112.111.12"
 fuzzy_counts = [6, 0, 5]
