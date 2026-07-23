@@ -65,7 +65,7 @@ Complete reference for all pattern syntax.
 | `{s<=N}` | Max N substitutions |
 | `{t<=N}` | Max N transpositions |
 | `{c<=N}` | Max total cost N |
-| `{Ni+Md...<=N}` | Weighted costs |
+| `{Ni+Md...<=N}` | Weighted costs (coefficients optional: `{i+d+s<=N}`) |
 | `{e<=N:[class]}` | Restricted edits |
 | `~N` | Shorthand for {e<=N} |
 

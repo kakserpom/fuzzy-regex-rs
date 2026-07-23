@@ -1038,6 +1038,25 @@ impl<'a> Parser<'a> {
                                 _ => {}
                             }
                         }
+                        Token::Plus | Token::Char('+') => {
+                            // Coefficient-less cost expression, e.g. `i+d+s<=8`
+                            // (equivalent to `1i+1d+1s<=8`). The leading term has
+                            // an implicit coefficient of 1; the continuation
+                            // handles the remaining `+`-separated terms and bound.
+                            match key {
+                                'i' => mrab.insertion_cost = Some(1),
+                                'd' => mrab.deletion_cost = Some(1),
+                                's' => mrab.substitution_cost = Some(1),
+                                't' => mrab.transposition_cost = Some(1),
+                                _ => {
+                                    return Err(Error::invalid_fuzziness(
+                                        start_pos,
+                                        "only i/d/s/t may appear in a cost expression",
+                                    ));
+                                }
+                            }
+                            self.parse_cost_continuation(&mut mrab, start_pos)?;
+                        }
                         Token::Char(',' | ':') | Token::CloseBrace => {
                             // Just the type allowed (unlimited); `:` introduces a
                             // char restriction on that unlimited op, e.g. `{i:[ ]}`
@@ -1176,7 +1195,15 @@ impl<'a> Parser<'a> {
             match self.lexer.peek_token()? {
                 Token::Plus | Token::Char('+') => {
                     self.lexer.next_token()?;
-                    let cost = self.parse_number_u8()?;
+                    // The coefficient is optional and defaults to 1, so both
+                    // `2d` (weighted) and a bare `d` (as in `i+d+s<=N`) are
+                    // accepted.
+                    let cost = if matches!(self.lexer.peek_token()?, Token::Char(c) if c.is_ascii_digit())
+                    {
+                        self.parse_number_u8()?
+                    } else {
+                        1
+                    };
                     let key = match self.lexer.next_token()? {
                         Token::Char(k) if "idst".contains(k) => k,
                         _ => {

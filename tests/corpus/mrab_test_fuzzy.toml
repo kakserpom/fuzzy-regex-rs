@@ -490,10 +490,9 @@ fuzzy_counts = [1, 0, 0]
 
 # Incorrect fuzzy changes (fuzzy_changes unsupported)
 [[test]]
-name = "L2798 issue fuzzy_changes GTTTTCATTCCTCATA - cost expression i+d+s<=N unsupported"
+name = "L2798 issue fuzzy_changes GTTTTCATTCCTCATA"
 pattern = "(?e)(GTTTTCATTCCTCATA){i<=4,d<=4,s<=4,i+d+s<=8}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (cost expression i+d+s<=N unsupported)
 
 # Fuzzy constraints ignored when checking for prefix/suffix in branches
 [[test]]
@@ -766,10 +765,9 @@ is_match = true
 
 # Hg issue 353: fuzzy changes negative indexes (fuzzy_changes unsupported)
 [[test]]
-name = "L4181 issue353 (?be) AGTGT...{s<=5,i<=5,d<=5,s+i+d<=10} - cost expression s+i+d<=N unsupported"
+name = "L4181 issue353 (?be) AGTGT...{s<=5,i<=5,d<=5,s+i+d<=10}"
 pattern = "(?be)(AGTGTTCCCCGCGCCAGCGGGGATAAACCG){s<=5,i<=5,d<=5,s+i+d<=10}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (cost expression i+d+s<=N unsupported)
 
 # Git issue 364: fuzzy_counts vs fuzzy_changes (match -> ^)
 [[test]]

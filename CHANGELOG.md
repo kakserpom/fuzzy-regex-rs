@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Coefficient-less cost expressions in fuzziness, e.g. `{i+d+s<=N}`,
+  `{s+i+d<=N}`, `{i+d<=N}`. Previously the weighted-cost syntax required an
+  explicit coefficient on every term (`{1i+1d+1s<=N}`); a bare `i`/`d`/`s`/`t`
+  now defaults to coefficient 1. Caps the total weighted edit cost (for unit
+  coefficients, `{i+d+s<=N}` is equivalent to `{e<=N}`), and composes with
+  per-op caps (`{i<=4,d<=4,s<=4,i+d+s<=8}`). Unblocks mrab corpus L2798, L4181.
+
 - Recursive patterns: `(?R)`/`(?0)` (whole pattern), `(?1)`/`(?2)`/… (numbered
   group), and `(?&name)`/`(?P>name)` (named group). Recursion is executed by the
   backtracking engine as a subroutine call stack integrated into the single
