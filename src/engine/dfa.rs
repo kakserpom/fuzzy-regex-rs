@@ -959,7 +959,10 @@ impl Dfa {
                     use crate::parser::ast::Anchor;
                     match kind {
                         Anchor::Start | Anchor::End => {}
-                        Anchor::WordBoundary | Anchor::NotWordBoundary => return false,
+                        Anchor::WordBoundary
+                        | Anchor::NotWordBoundary
+                        | Anchor::WordStart
+                        | Anchor::WordEnd => return false,
                     }
                 }
 

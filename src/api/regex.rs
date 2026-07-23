@@ -3600,7 +3600,9 @@ fn detect_word_list_shape(ast: &Ast) -> Option<WordListShape> {
                 Anchor::End => shape.end_anchor = true,
                 Anchor::WordBoundary if i < gi => shape.start_wb = true,
                 Anchor::WordBoundary => shape.end_wb = true,
-                Anchor::NotWordBoundary => {}
+                // `\B`/`\m`/`\M` don't drive this `\b`-shaped fast path; the
+                // general matcher handles them.
+                Anchor::NotWordBoundary | Anchor::WordStart | Anchor::WordEnd => {}
             }
         }
     }

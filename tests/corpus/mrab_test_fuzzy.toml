@@ -8,13 +8,11 @@ description = "Ported from mrab-regex tests/test_regex.py fuzzy assertions"
 name = "L654 word e<=3 with fuzzy lookbehind (V0)"
 pattern = '(?iV0)\m(?:word){e<=3}\M(?<!\m(?:word){e<=1}\M)'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors ()
 
 [[test]]
-name = "L657 word e<=3 with fuzzy lookbehind (V1) - fuzzy inside lookbehind + \\m/\\M unsupported"
+name = "L657 word e<=3 with fuzzy lookbehind (V1)"
 pattern = '(?iV1)\m(?:word){e<=3}\M(?<!\m(?:word){e<=1}\M)'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (fuzzy inside lookbehind + \\m/\\M unsupported)
 
 # ---------------------------------------------------------------------------
 # def test_fuzzy (L2612-2803)

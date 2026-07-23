@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `\m` (start-of-word) and `\M` (end-of-word) boundary markers — the directional
+  halves of `\b`. `\m` matches a non-word→word transition (or string start
+  before a word char); `\M` matches a word→non-word transition (or string end
+  after a word char). They compose with fuzziness and lookaround. Also accept
+  the mrab `(?V0)`/`(?V1)` version flags (no behavioural effect). Together these
+  unblock mrab corpus L654, L657.
+
 - Coefficient-less cost expressions in fuzziness, e.g. `{i+d+s<=N}`,
   `{s+i+d<=N}`, `{i+d<=N}`. Previously the weighted-cost syntax required an
   explicit coefficient on every term (`{1i+1d+1s<=N}`); a bare `i`/`d`/`s`/`t`

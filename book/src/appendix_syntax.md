@@ -30,6 +30,8 @@ Complete reference for all pattern syntax.
 | `\W` | Non-word |
 | `\s` | Whitespace |
 | `\S` | Non-whitespace |
+| `\b`, `\B` | Word boundary / non-boundary |
+| `\m`, `\M` | Start-of-word / end-of-word boundary |
 
 ## Character Escapes
 

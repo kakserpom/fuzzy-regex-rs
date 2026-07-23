@@ -719,6 +719,8 @@ impl<'a> Parser<'a> {
             )),
             NamedClassToken::WordBoundary => Ast::Anchor(Anchor::WordBoundary),
             NamedClassToken::NotWordBoundary => Ast::Anchor(Anchor::NotWordBoundary),
+            NamedClassToken::WordStart => Ast::Anchor(Anchor::WordStart),
+            NamedClassToken::WordEnd => Ast::Anchor(Anchor::WordEnd),
         }
     }
 
@@ -1375,10 +1377,14 @@ impl<'a> Parser<'a> {
                 NamedClassToken::Whitespace => NamedClass::Whitespace,
                 NamedClassToken::NotWhitespace => NamedClass::NotWhitespace,
                 // Word boundaries don't make sense inside character classes
-                NamedClassToken::WordBoundary | NamedClassToken::NotWordBoundary => {
+                NamedClassToken::WordBoundary
+                | NamedClassToken::NotWordBoundary
+                | NamedClassToken::WordStart
+                | NamedClassToken::WordEnd => {
                     return Err(Error::invalid_char_class(
                         self.lexer.position(),
-                        "word boundary \\b/\\B not valid inside character class".to_string(),
+                        "word boundary \\b/\\B/\\m/\\M not valid inside character class"
+                            .to_string(),
                     ));
                 }
             };

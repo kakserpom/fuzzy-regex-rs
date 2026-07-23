@@ -152,6 +152,10 @@ pub enum NamedClassToken {
     WordBoundary,
     /// Non-word boundary `\B` - matches at a non-word boundary position.
     NotWordBoundary,
+    /// Start of word `\m` - matches at the start of a word.
+    WordStart,
+    /// End of word `\M` - matches at the end of a word.
+    WordEnd,
 }
 
 /// Lexer for regex patterns.
@@ -420,13 +424,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Whether `c` is a recognized inline-flag letter.
-    /// `f` (mrab FULLCASE) is accepted but treated as a no-op: full Unicode case
-    /// folding isn't implemented, so `(?fi)` degrades to plain `(?i)`.
+    /// Whether `c` is a recognized inline-flag letter. `V` introduces an mrab
+    /// version flag (`(?V0)`/`(?V1)`), which is accepted but has no behavioural
+    /// effect here.
     fn is_inline_flag_char(c: char) -> bool {
         matches!(
             c,
-            'b' | 'e' | 'p' | 'x' | 's' | 'm' | 'U' | 'i' | 'g' | 'u' | 'f' | 'r'
+            'b' | 'e' | 'p' | 'x' | 's' | 'm' | 'U' | 'i' | 'g' | 'u' | 'f' | 'r' | 'V'
         )
     }
 
@@ -448,6 +452,15 @@ impl<'a> Lexer<'a> {
                 'u' => flags.unicode = true,
                 'r' => flags.reverse = true,
                 'f' => flags.fullcase = true,
+                'V' => {
+                    // mrab version flag (?V0)/(?V1): accepted, no behavioural
+                    // effect. Consume the 'V' and its version digit here.
+                    self.next_char();
+                    if matches!(self.peek_char(), Some('0' | '1')) {
+                        self.next_char();
+                    }
+                    continue;
+                }
                 ')' => {
                     self.next_char();
                     // Verbose must take effect for the rest of this lex pass.
@@ -589,6 +602,8 @@ impl<'a> Lexer<'a> {
             'S' => Ok(Token::NamedClass(NamedClassToken::NotWhitespace)),
             'b' => Ok(Token::NamedClass(NamedClassToken::WordBoundary)),
             'B' => Ok(Token::NamedClass(NamedClassToken::NotWordBoundary)),
+            'm' => Ok(Token::NamedClass(NamedClassToken::WordStart)),
+            'M' => Ok(Token::NamedClass(NamedClassToken::WordEnd)),
 
             // Named list \L<name>
             'L' => self.lex_named_list(),

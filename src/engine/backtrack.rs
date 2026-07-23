@@ -356,6 +356,8 @@ impl<'a> BacktrackMatcher<'a> {
                         Anchor::End => pos == text.len(),
                         Anchor::WordBoundary => self.is_word_boundary_at(text_bytes, pos),
                         Anchor::NotWordBoundary => !self.is_word_boundary_at(text_bytes, pos),
+                        Anchor::WordStart => self.is_word_start_at(text_bytes, pos),
+                        Anchor::WordEnd => self.is_word_end_at(text_bytes, pos),
                     };
 
                     if matches {
@@ -613,29 +615,44 @@ impl<'a> BacktrackMatcher<'a> {
 
     /// Check if position is at a word boundary.
     #[allow(clippy::unused_self)]
+    fn word_before(text: &[u8], pos: usize) -> bool {
+        if pos == 0 {
+            return false;
+        }
+        let mut start = pos - 1;
+        while start > 0 && (text[start] & 0xC0) == 0x80 {
+            start -= 1;
+        }
+        let ch = &text[start..pos];
+        !ch.is_empty() && ch.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+    }
+
+    fn word_after(text: &[u8], pos: usize) -> bool {
+        if pos >= text.len() {
+            return false;
+        }
+        let mut end = pos;
+        while end < text.len() && (text[end] & 0xC0) == 0x80 {
+            end += 1;
+        }
+        let ch = &text[pos..end.min(text.len())];
+        !ch.is_empty() && ch.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+    }
+
+    #[allow(clippy::unused_self)]
     fn is_word_boundary_at(&self, text: &[u8], pos: usize) -> bool {
-        let before_is_word = if pos > 0 {
-            let mut start = pos - 1;
-            while start > 0 && (text[start] & 0xC0) == 0x80 {
-                start -= 1;
-            }
-            let ch = &text[start..pos];
-            !ch.is_empty() && ch.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
-        } else {
-            false
-        };
+        Self::word_before(text, pos) != Self::word_after(text, pos)
+    }
 
-        let after_is_word = if pos < text.len() {
-            let mut end = pos;
-            while end < text.len() && (text[end] & 0xC0) == 0x80 {
-                end += 1;
-            }
-            let ch = &text[pos..end.min(text.len())];
-            !ch.is_empty() && ch.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_')
-        } else {
-            false
-        };
+    /// `\m` — start of a word.
+    #[allow(clippy::unused_self)]
+    fn is_word_start_at(&self, text: &[u8], pos: usize) -> bool {
+        !Self::word_before(text, pos) && Self::word_after(text, pos)
+    }
 
-        before_is_word != after_is_word
+    /// `\M` — end of a word.
+    #[allow(clippy::unused_self)]
+    fn is_word_end_at(&self, text: &[u8], pos: usize) -> bool {
+        Self::word_before(text, pos) && !Self::word_after(text, pos)
     }
 }

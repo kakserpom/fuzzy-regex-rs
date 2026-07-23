@@ -317,7 +317,13 @@ impl Nfa {
     pub fn has_word_boundary(&self) -> bool {
         self.states.iter().any(|state| {
             if let State::Anchor { kind, .. } = state {
-                matches!(kind, Anchor::WordBoundary | Anchor::NotWordBoundary)
+                matches!(
+                    kind,
+                    Anchor::WordBoundary
+                        | Anchor::NotWordBoundary
+                        | Anchor::WordStart
+                        | Anchor::WordEnd
+                )
             } else {
                 false
             }

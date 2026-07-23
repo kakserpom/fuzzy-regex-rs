@@ -2234,6 +2234,8 @@ impl<'a> Matcher<'a> {
                     }
                     Anchor::WordBoundary => Self::is_word_boundary(text, thread.pos),
                     Anchor::NotWordBoundary => !Self::is_word_boundary(text, thread.pos),
+                    Anchor::WordStart => Self::is_word_start(text, thread.pos),
+                    Anchor::WordEnd => Self::is_word_end(text, thread.pos),
                 };
 
                 if matches {
@@ -2448,33 +2450,46 @@ impl<'a> Matcher<'a> {
     /// Check if position is at a word boundary.
     /// Optimized to avoid O(n) scan - walks backwards at most 4 bytes (max UTF-8 char length).
     #[inline]
-    fn is_word_boundary(text: &str, pos: usize) -> bool {
+    /// Whether the character immediately before `pos` is a word character.
+    fn word_char_before(text: &str, pos: usize) -> bool {
+        if pos == 0 {
+            return false;
+        }
         let bytes = text.as_bytes();
-
-        // Get character before pos (walk backwards to find UTF-8 char start)
-        let before_is_word = if pos > 0 {
-            // UTF-8 continuation bytes have pattern 10xxxxxx (0x80-0xBF)
-            // Walk back at most 4 bytes to find the leading byte
-            let mut start = pos - 1;
-            while start > 0 && (bytes[start] & 0xC0) == 0x80 {
-                start -= 1;
-            }
-            // Decode the single character
-            text[start..pos]
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_')
-        } else {
-            false
-        };
-
-        // Get character at pos
-        let after_is_word = text[pos..]
+        // UTF-8 continuation bytes have pattern 10xxxxxx (0x80-0xBF); walk back
+        // to the leading byte of the previous character.
+        let mut start = pos - 1;
+        while start > 0 && (bytes[start] & 0xC0) == 0x80 {
+            start -= 1;
+        }
+        text[start..pos]
             .chars()
             .next()
-            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    }
 
-        before_is_word != after_is_word
+    /// Whether the character at `pos` is a word character.
+    fn word_char_at(text: &str, pos: usize) -> bool {
+        text[pos..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    }
+
+    fn is_word_boundary(text: &str, pos: usize) -> bool {
+        Self::word_char_before(text, pos) != Self::word_char_at(text, pos)
+    }
+
+    /// `\m` — start of a word: a non-word (or the string start) followed by a
+    /// word character.
+    fn is_word_start(text: &str, pos: usize) -> bool {
+        !Self::word_char_before(text, pos) && Self::word_char_at(text, pos)
+    }
+
+    /// `\M` — end of a word: a word character followed by a non-word character
+    /// (or the string end).
+    fn is_word_end(text: &str, pos: usize) -> bool {
+        Self::word_char_before(text, pos) && !Self::word_char_at(text, pos)
     }
 
     /// Check if position is at the start of a line (after newline or at string start).

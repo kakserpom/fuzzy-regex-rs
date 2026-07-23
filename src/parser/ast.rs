@@ -818,4 +818,8 @@ pub enum Anchor {
     WordBoundary,
     /// `\B` - non-word boundary.
     NotWordBoundary,
+    /// `\m` - start of a word (non-word→word transition).
+    WordStart,
+    /// `\M` - end of a word (word→non-word transition).
+    WordEnd,
 }
