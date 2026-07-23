@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Named backreferences: `\k<name>`, `\k{name}`, and Python-style `(?P=name)`.
+  The name is resolved to the group's index at parse time and matched via the
+  existing backreference machinery (numeric `\1`…`\9` were already supported),
+  so named backreferences also accept a fuzziness suffix (`\k<w>{e<=1}`). Unknown
+  or malformed names are a compile error.
+
 - mrab-style fuzzy quantifiers (`{e<=1}`, `{i<=1,d<=2}`, `{s<=1}`, …) on unnamed
   capturing groups, e.g. `(abc){e<=1}`. Previously only non-capturing
   `(?:abc){e<=1}` and named `(?P<n>abc){e<=1}` groups accepted the syntax; the

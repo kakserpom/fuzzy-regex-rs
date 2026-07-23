@@ -42,6 +42,8 @@ pub enum Token {
     NamedList(String),
     /// Backreference `\1`, `\2`, etc.
     Backreference(usize),
+    /// Named backreference `\k<name>`, `\k{name}`, or `(?P=name)`.
+    NamedBackreference(String),
     /// `(` - open group.
     OpenParen,
     /// `)` - close group.
@@ -331,9 +333,14 @@ impl<'a> Lexer<'a> {
                             self.next_char();
                             self.lex_recursive_name()
                         }
+                        Some('=') => {
+                            // Named backreference: (?P=name)
+                            self.next_char();
+                            self.lex_named_backreference_until_paren()
+                        }
                         _ => Err(Error::parse(
                             self.position,
-                            "expected '<' or '>' after '(?P'",
+                            "expected '<', '>', or '=' after '(?P'",
                         )),
                     }
                 }
@@ -621,6 +628,9 @@ impl<'a> Lexer<'a> {
             // \K - reset match start
             'K' => Ok(Token::ResetMatchStart),
 
+            // Named backreference \k<name> or \k{name}
+            'k' => self.lex_named_backreference(),
+
             _ => Err(Error::invalid_escape(ch, self.position - 1)),
         }
     }
@@ -695,6 +705,68 @@ impl<'a> Lexer<'a> {
     }
 
     /// Lex a named list reference \L<name>.
+    /// Lex the name of a `(?P=name)` backreference, up to the closing `)`.
+    /// The leading `(?P=` has already been consumed.
+    fn lex_named_backreference_until_paren(&mut self) -> Result<Token> {
+        let mut name = String::new();
+        while let Some(ch) = self.peek_char() {
+            if ch == ')' {
+                self.next_char(); // consume ')'
+                if name.is_empty() {
+                    return Err(Error::parse(self.position, "empty backreference name"));
+                }
+                return Ok(Token::NamedBackreference(name));
+            }
+            if ch.is_alphanumeric() || ch == '_' {
+                name.push(ch);
+                self.next_char();
+            } else {
+                return Err(Error::parse(
+                    self.position,
+                    format!("invalid character in backreference name: '{ch}'"),
+                ));
+            }
+        }
+        Err(Error::unclosed("named backreference", self.position))
+    }
+
+    /// Lex a named backreference: `\k<name>` or `\k{name}`.
+    fn lex_named_backreference(&mut self) -> Result<Token> {
+        let close = match self.peek_char() {
+            Some('<') => '>',
+            Some('{') => '}',
+            _ => {
+                return Err(Error::parse(
+                    self.position,
+                    "expected '<' or '{' after '\\k'",
+                ));
+            }
+        };
+        self.next_char(); // consume the opening delimiter
+
+        let mut name = String::new();
+        while let Some(ch) = self.peek_char() {
+            if ch == close {
+                self.next_char(); // consume the closing delimiter
+                if name.is_empty() {
+                    return Err(Error::parse(self.position, "empty backreference name"));
+                }
+                return Ok(Token::NamedBackreference(name));
+            }
+            if ch.is_alphanumeric() || ch == '_' {
+                name.push(ch);
+                self.next_char();
+            } else {
+                return Err(Error::parse(
+                    self.position,
+                    format!("invalid character in backreference name: '{ch}'"),
+                ));
+            }
+        }
+
+        Err(Error::unclosed("named backreference", self.position))
+    }
+
     fn lex_named_list(&mut self) -> Result<Token> {
         // Expect < after \L
         let Some(ch) = self.peek_char() else {

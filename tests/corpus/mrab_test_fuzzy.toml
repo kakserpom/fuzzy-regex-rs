@@ -1223,13 +1223,11 @@ pattern = '(?fiu)(ss)\1{e<=1:[a-z]}'
 compiles = true
 
 [[test]]
-name = "L4494 (?firu)(ss)\\1 s- sharp-s - backreference + \\N{} unsupported"
+name = "L4494 (?firu)(ss)\\1 s"
 pattern = '(?firu)(ss)\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)
 
 [[test]]
-name = "L4496 (?firu)(ss)\\1 -s sharp-s - backreference + \\N{} unsupported"
+name = "L4496 (?firu)(ss)\\1"
 pattern = '(?firu)(ss)\1{e<=1:[a-z]}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (backreference + \\N{} unsupported)

@@ -65,12 +65,23 @@ Complete reference for all pattern syntax.
 |--------|-------------|
 | `(...)` | Capture group |
 | `(?:...)` | Non-capture |
-| `(?<name>...)` | Named capture |
+| `(?<name>...)`, `(?P<name>...)` | Named capture |
 | `(?=...)` | Lookahead |
 | `(?!...)` | Negative lookahead |
 | `(?<=...)` | Lookbehind |
 | `(?<!...)` | Negative lookbehind |
 | `(?>...)` | Atomic group |
+
+## Backreferences
+
+| Syntax | Description |
+|--------|-------------|
+| `\1` … `\9` | Backreference to a numbered group |
+| `\k<name>`, `\k{name}` | Backreference to a named group |
+| `(?P=name)` | Backreference to a named group (Python style) |
+
+Backreferences accept a fuzziness suffix, e.g. `\1{e<=1}` or `\k<w>{s<=1}`,
+matching a repeat of the captured text within the given edit budget.
 
 ## Flags
 

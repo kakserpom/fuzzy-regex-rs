@@ -25,6 +25,9 @@ use crate::error::{Error, Result};
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
     capture_count: usize,
+    /// Names of capture groups seen so far, mapped to their 1-based index.
+    /// Used to resolve named backreferences (`\k<name>`, `(?P=name)`).
+    capture_names: std::collections::HashMap<String, usize>,
     /// Match flags accumulated during parsing.
     flags: MatchFlags,
 }
@@ -35,6 +38,7 @@ impl<'a> Parser<'a> {
         Parser {
             lexer: Lexer::new(pattern),
             capture_count: 0,
+            capture_names: std::collections::HashMap::new(),
             flags: MatchFlags::default(),
         }
     }
@@ -44,6 +48,7 @@ impl<'a> Parser<'a> {
         Parser {
             lexer: Lexer::new_with_flags(pattern, verbose),
             capture_count: 0,
+            capture_names: std::collections::HashMap::new(),
             flags: MatchFlags {
                 verbose,
                 dot_all,
@@ -580,23 +585,23 @@ impl<'a> Parser<'a> {
                         format!("backreference to group {n} that doesn't exist yet"),
                     ))
                 } else {
-                    // Check for optional fuzziness specifier {e<=1}
-                    let fuzziness = if matches!(self.lexer.peek_token()?, Token::OpenBrace) {
-                        // Need to check if this is mrab-style fuzziness vs quantifier
-                        if self.peek_is_mrab_fuzziness() {
-                            self.lexer.next_token()?; // consume '{'
-                            self.parse_mrab_fuzziness()?
-                        } else {
-                            Fuzziness::Inherited
-                        }
-                    } else {
-                        Fuzziness::Inherited
-                    };
+                    let fuzziness = self.parse_optional_backref_fuzziness()?;
                     Ok(Ast::Backreference {
                         group: n,
                         fuzziness,
                     })
                 }
+            }
+
+            Token::NamedBackreference(name) => {
+                let Some(&group) = self.capture_names.get(&name) else {
+                    return Err(Error::parse(
+                        self.lexer.position(),
+                        format!("backreference to unknown group name '{name}'"),
+                    ));
+                };
+                let fuzziness = self.parse_optional_backref_fuzziness()?;
+                Ok(Ast::Backreference { group, fuzziness })
             }
 
             Token::NamedList(name) => {
@@ -678,6 +683,19 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a capture group: (expr)
+    /// Parse an optional mrab-style fuzziness specifier following a
+    /// backreference, e.g. the `{e<=1}` in `\1{e<=1}` or `\k<n>{s<=1}`.
+    /// Returns `Fuzziness::Inherited` when none is present (or the `{...}` is a
+    /// plain repetition, which the caller/quantifier layer handles separately).
+    fn parse_optional_backref_fuzziness(&mut self) -> Result<Fuzziness> {
+        if matches!(self.lexer.peek_token()?, Token::OpenBrace) && self.peek_is_mrab_fuzziness() {
+            self.lexer.next_token()?; // consume '{'
+            self.parse_mrab_fuzziness()
+        } else {
+            Ok(Fuzziness::Inherited)
+        }
+    }
+
     fn parse_capture_group(&mut self) -> Result<Ast> {
         self.capture_count += 1;
         let index = self.capture_count;
@@ -727,6 +745,10 @@ impl<'a> Parser<'a> {
     fn parse_named_capture_group(&mut self, name: String) -> Result<Ast> {
         self.capture_count += 1;
         let index = self.capture_count;
+        // Register the name before parsing the body so a backreference inside
+        // the group can refer to an already-opened outer name, matching the
+        // behaviour of numeric groups.
+        self.capture_names.insert(name.clone(), index);
 
         let expr = self.parse_alternation()?;
 
