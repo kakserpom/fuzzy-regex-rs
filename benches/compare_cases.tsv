@@ -1,0 +1,24 @@
+name	op	corpus	iters	pattern
+exact_literal_short	find	short	50000	quick
+exact_literal_long	find	long	2000	exercitation
+fuzzy_e1_short	find	short	50000	(?:quick){e<=1}
+fuzzy_e2_short	find	short	50000	(?:qwick){e<=2}
+fuzzy_e2_medium	find	medium	10000	(?:Lorem){e<=2}
+fuzzy_e2_long	find	long	1000	(?:Lorem){e<=2}
+fuzzy_sub_short	find	short	50000	(?:quack){s<=2}
+fuzzy_perop_short	find	short	50000	(?:quikc){i<=1,d<=1,s<=1}
+fuzzy_cost_expr_short	find	short	50000	(?:quikc){1i+1d+1s<=2}
+fuzzy_weighted_short	find	short	50000	(?:quikc){2i+1d<3}
+alternation_short	find	short	50000	(?:quick|brown|fox)
+alternation_fuzzy	find	short	20000	(?:quikc|brwon|fx){e<=1}
+charclass_fuzzy	find	medium	10000	(?:\w+){e<=1} (?:\w+){e<=1}
+no_match_fullscan	find	medium	10000	(?:xyzzy){e<=1}
+find_all_matches	find_iter	long	500	(?:Lorem){e<=1}
+is_match_short	is_match	short	50000	(?:jumps){e<=1}
+dna_motif_e2	find	dna	2000	(?:ACGTACGT){e<=2}
+word_boundary	find	medium	20000	\b(?:ipsum){e<=1}\b
+reverse_find	find	long	2000	(?r)(?:Lorem){e<=1}
+backreference	find	repeats	20000	(\w+) (?:\w+ )*\1
+recursion_balanced	find	code	5000	\((?:[^()]|(?R))*\)
+fullcase_fold	find	unicode	20000	(?fi)stra(?:ss)e
+word_start_marker	find	medium	20000	\m(?:ipsum){e<=1}
