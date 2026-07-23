@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Forward references — a backreference to a capture group defined later in the
+  pattern (`\1(a)`, `\k<x>(?P<x>a)`, and the `(?r)` reverse-mode forms). A
+  pre-scan counts groups and collects names before parsing, so the reference
+  resolves against the full group set rather than only groups seen so far; a
+  reference to a group that never exists is still a compile error. When the
+  referenced group has not captured at the point the reference is reached, it
+  matches the empty string (matching Python's `regex` module). Unblocks mrab
+  corpus cases L2762, L4441, L4445, L4486, L4488.
+
 - Named backreferences: `\k<name>`, `\k{name}`, and Python-style `(?P=name)`.
   The name is resolved to the group's index at parse time and matched via the
   existing backreference machinery (numeric `\1`…`\9` were already supported),

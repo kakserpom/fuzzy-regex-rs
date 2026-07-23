@@ -2392,6 +2392,15 @@ impl<'a> Matcher<'a> {
                             group_edits: thread.group_edits.clone(),
                         });
                     }
+                } else {
+                    // The referenced group has not captured anything yet — a
+                    // forward reference (`\1(a)`) or a group on an untaken
+                    // branch. Per Python `regex`, an unset backreference matches
+                    // the empty string, so continue without consuming input.
+                    next_threads.push(Thread {
+                        state: *next,
+                        ..thread.clone()
+                    });
                 }
             }
 

@@ -25,30 +25,65 @@ use crate::error::{Error, Result};
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
     capture_count: usize,
-    /// Names of capture groups seen so far, mapped to their 1-based index.
-    /// Used to resolve named backreferences (`\k<name>`, `(?P=name)`).
+    /// Total number of capture groups in the whole pattern, counted by a
+    /// pre-scan. Lets a backreference resolve to a group defined *later*
+    /// (a forward reference, e.g. `\1(a)` or `(?r)\1(a)`).
+    total_captures: usize,
+    /// All capture-group names mapped to their 1-based index, from the pre-scan.
+    /// Used to resolve named backreferences (`\k<name>`, `(?P=name)`), including
+    /// forward references to a name defined later in the pattern.
     capture_names: std::collections::HashMap<String, usize>,
     /// Match flags accumulated during parsing.
     flags: MatchFlags,
 }
 
+/// Pre-scan the pattern to count capture groups and collect their names, in the
+/// same order the parser assigns indices (each capturing `(` / `(?<name>` opens
+/// the next group). Best-effort: a lex error just stops the scan and lets the
+/// main parse report it properly. Enables forward references, which need the
+/// group count/names known before the referencing token is parsed.
+fn prescan_captures(
+    pattern: &str,
+    verbose: bool,
+) -> (usize, std::collections::HashMap<String, usize>) {
+    let mut lexer = Lexer::new_with_flags(pattern, verbose);
+    let mut count = 0usize;
+    let mut names = std::collections::HashMap::new();
+    loop {
+        match lexer.next_token() {
+            Ok(Token::Eof) | Err(_) => break,
+            Ok(Token::OpenParen) => count += 1,
+            Ok(Token::NamedGroup(name)) => {
+                count += 1;
+                names.entry(name).or_insert(count);
+            }
+            Ok(_) => {}
+        }
+    }
+    (count, names)
+}
+
 impl<'a> Parser<'a> {
     /// Create a new parser for the given pattern.
     pub fn new(pattern: &'a str) -> Self {
+        let (total_captures, capture_names) = prescan_captures(pattern, false);
         Parser {
             lexer: Lexer::new(pattern),
             capture_count: 0,
-            capture_names: std::collections::HashMap::new(),
+            total_captures,
+            capture_names,
             flags: MatchFlags::default(),
         }
     }
 
     /// Create a new parser with initial flags.
     pub fn new_with_flags(pattern: &'a str, verbose: bool, dot_all: bool, ungreedy: bool) -> Self {
+        let (total_captures, capture_names) = prescan_captures(pattern, verbose);
         Parser {
             lexer: Lexer::new_with_flags(pattern, verbose),
             capture_count: 0,
-            capture_names: std::collections::HashMap::new(),
+            total_captures,
+            capture_names,
             flags: MatchFlags {
                 verbose,
                 dot_all,
@@ -578,11 +613,15 @@ impl<'a> Parser<'a> {
             Token::Dollar => Ok(Ast::Anchor(Anchor::End)),
 
             Token::Backreference(n) => {
-                if n > self.capture_count {
+                // Validate against the total group count (from the pre-scan), not
+                // just groups seen so far, so a forward reference to a group
+                // defined later in the pattern is accepted. A reference to a group
+                // that never exists is still an error.
+                if n == 0 || n > self.total_captures {
                     Err(Error::invalid_backreference(
                         n,
                         self.lexer.position(),
-                        format!("backreference to group {n} that doesn't exist yet"),
+                        format!("backreference to group {n} that does not exist"),
                     ))
                 } else {
                     let fuzziness = self.parse_optional_backref_fuzziness()?;
