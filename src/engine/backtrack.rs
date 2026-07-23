@@ -70,6 +70,11 @@ struct CallFrame {
     /// (a call to the same subpattern at the same position that makes no
     /// progress), which is failed rather than looped forever.
     start_pos: usize,
+    /// Max total edits allowed within this call (`(?R){e<=N}`); `None` = no cap.
+    edit_cap: Option<u8>,
+    /// Total edit count when the call was entered, so the edits consumed by the
+    /// recursive sub-match can be measured against `edit_cap` on return.
+    base_edits: u16,
 }
 
 /// Backtracking regex matcher.
@@ -159,6 +164,23 @@ impl<'a> BacktrackMatcher<'a> {
             if let Some(frame) = call_stack.last()
                 && state == frame.end_state
             {
+                // Enforce a fuzzy cap on the recursive sub-match (`(?R){e<=N}`):
+                // if the edits consumed since the call exceed the cap, this path
+                // fails and backtracks instead of returning.
+                let over_budget = matches!(frame.edit_cap, Some(cap)
+                    if u16::from(edits.total()).saturating_sub(frame.base_edits) > u16::from(cap));
+                if over_budget {
+                    let frame = backtrack_stack.pop()?;
+                    state = frame.state;
+                    pos = frame.pos;
+                    captures = frame.captures;
+                    similarity = frame.similarity;
+                    edits = frame.edits;
+                    match_start = frame.match_start;
+                    depth = frame.recursion_depth;
+                    call_stack = frame.call_stack;
+                    continue;
+                }
                 let return_state = frame.return_state;
                 call_stack.pop();
                 state = return_state;
@@ -500,7 +522,7 @@ impl<'a> BacktrackMatcher<'a> {
                     state = *next;
                 }
 
-                State::RecursivePattern { next } => {
+                State::RecursivePattern { next, max_edits } => {
                     // (?R) - call the whole pattern: start at the NFA start, and
                     // return when the accept state (0) is reached.
                     let target = Some((self.nfa.start, 0usize));
@@ -511,6 +533,8 @@ impl<'a> BacktrackMatcher<'a> {
                             end_state,
                             return_state: *next,
                             start_pos: pos,
+                            edit_cap: *max_edits,
+                            base_edits: u16::from(edits.total()),
                         });
                         state = start_state;
                     } else {
@@ -526,7 +550,11 @@ impl<'a> BacktrackMatcher<'a> {
                     }
                 }
 
-                State::RecursiveGroup { group, next } => {
+                State::RecursiveGroup {
+                    group,
+                    next,
+                    max_edits,
+                } => {
                     // (?0) = whole pattern; (?1), (?2), … = a numbered group.
                     let target = if *group == 0 {
                         Some((self.nfa.start, 0usize))
@@ -540,6 +568,8 @@ impl<'a> BacktrackMatcher<'a> {
                             end_state,
                             return_state: *next,
                             start_pos: pos,
+                            edit_cap: *max_edits,
+                            base_edits: u16::from(edits.total()),
                         });
                         state = start_state;
                     } else {
@@ -555,7 +585,11 @@ impl<'a> BacktrackMatcher<'a> {
                     }
                 }
 
-                State::RecursiveNamedGroup { name, next } => {
+                State::RecursiveNamedGroup {
+                    name,
+                    next,
+                    max_edits,
+                } => {
                     // (?&name) / (?P>name) - call a named group.
                     let target = self.nfa.named_group_states.get(name).copied();
                     if let Some((start_state, end_state)) =
@@ -565,6 +599,8 @@ impl<'a> BacktrackMatcher<'a> {
                             end_state,
                             return_state: *next,
                             start_pos: pos,
+                            edit_cap: *max_edits,
+                            base_edits: u16::from(edits.total()),
                         });
                         state = start_state;
                     } else {

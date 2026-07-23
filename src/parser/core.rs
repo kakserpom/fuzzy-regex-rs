@@ -673,18 +673,21 @@ impl<'a> Parser<'a> {
             Token::AtomicGroup => self.parse_atomic_group(),
 
             Token::RecursivePattern => {
-                // (?R) - recursively match the entire pattern
-                Ok(Ast::RecursivePattern)
+                // (?R) - recursively match the entire pattern, optionally fuzzy.
+                let max_edits = self.parse_optional_recursion_edits()?;
+                Ok(Ast::RecursivePattern { max_edits })
             }
 
             Token::RecursiveGroup(group) => {
-                // (?1), (?2), etc. - recursively match a capture group
-                Ok(Ast::RecursiveGroup { group })
+                // (?1), (?2), etc. - recursively match a capture group.
+                let max_edits = self.parse_optional_recursion_edits()?;
+                Ok(Ast::RecursiveGroup { group, max_edits })
             }
 
             Token::RecursiveNamedGroup(name) => {
-                // (?&name) or (?P>name) - recursively match a named capture group
-                Ok(Ast::RecursiveNamedGroup { name })
+                // (?&name) or (?P>name) - recursively match a named capture group.
+                let max_edits = self.parse_optional_recursion_edits()?;
+                Ok(Ast::RecursiveNamedGroup { name, max_edits })
             }
 
             Token::Handler(name) => {
@@ -736,6 +739,40 @@ impl<'a> Parser<'a> {
         } else {
             Ok(Fuzziness::Inherited)
         }
+    }
+
+    /// Parse an optional mrab-style fuzziness after a recursion reference (e.g.
+    /// the `{e<=2}` in `(?0){e<=2}`) and reduce it to a total-edit cap on the
+    /// recursive sub-match. Returns `None` when there is no fuzziness or the
+    /// fuzziness is unbounded (`{e}`), meaning "no cap".
+    fn parse_optional_recursion_edits(&mut self) -> Result<Option<u8>> {
+        let fuzziness = self.parse_optional_backref_fuzziness()?;
+        Ok(match fuzziness {
+            Fuzziness::Inherited => None,
+            other => match other.to_limits(0) {
+                None => None,
+                Some(limits) => {
+                    // Total edit budget: prefer an explicit `e<=N`, else the sum
+                    // of the per-op caps; `None` (unbounded) means no cap.
+                    limits.get_edits().or_else(|| {
+                        let i = limits.get_insertions();
+                        let d = limits.get_deletions();
+                        let s = limits.get_substitutions();
+                        let t = limits.get_swaps();
+                        if i.is_none() && d.is_none() && s.is_none() && t.is_none() {
+                            None
+                        } else {
+                            Some(
+                                i.unwrap_or(0)
+                                    .saturating_add(d.unwrap_or(0))
+                                    .saturating_add(s.unwrap_or(0))
+                                    .saturating_add(t.unwrap_or(0)),
+                            )
+                        }
+                    })
+                }
+            },
+        })
     }
 
     fn parse_capture_group(&mut self) -> Result<Ast> {

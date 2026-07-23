@@ -327,28 +327,33 @@ impl NfaBuilder {
                 NfaFragment::single(atomic_state, atomic_state)
             }
 
-            Hir::RecursivePattern => {
+            Hir::RecursivePattern { max_edits } => {
                 // (?R) - recursively match the entire pattern. Emit a real
                 // recursion state; the backtracker performs the subroutine call
                 // (`next` is patched to the continuation by the caller).
-                let state = self.nfa.add_state(State::RecursivePattern { next: 0 });
-                NfaFragment::single(state, state)
-            }
-
-            Hir::RecursiveGroup { group } => {
-                // (?0) = whole pattern, (?1), (?2), … = a numbered capture group.
-                let state = self.nfa.add_state(State::RecursiveGroup {
-                    group: *group,
+                let state = self.nfa.add_state(State::RecursivePattern {
                     next: 0,
+                    max_edits: *max_edits,
                 });
                 NfaFragment::single(state, state)
             }
 
-            Hir::RecursiveNamedGroup { name } => {
+            Hir::RecursiveGroup { group, max_edits } => {
+                // (?0) = whole pattern, (?1), (?2), … = a numbered capture group.
+                let state = self.nfa.add_state(State::RecursiveGroup {
+                    group: *group,
+                    next: 0,
+                    max_edits: *max_edits,
+                });
+                NfaFragment::single(state, state)
+            }
+
+            Hir::RecursiveNamedGroup { name, max_edits } => {
                 // (?&name) / (?P>name) - recursively match a named capture group.
                 let state = self.nfa.add_state(State::RecursiveNamedGroup {
                     name: name.clone(),
                     next: 0,
+                    max_edits: *max_edits,
                 });
                 NfaFragment::single(state, state)
             }

@@ -598,10 +598,9 @@ pattern = "((?0)){e}"
 compiles = true
 
 [[test]]
-name = "L3804 issue200 \\x00?(?0)e - fuzzy {e} on a recursion reference unsupported"
+name = "L3804 issue200 \\x00?(?0)e"
 pattern = '\x00?(?0){e}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (a fuzzy quantifier directly on a recursion reference `(?0){e}` is not supported)
 
 # Hg issue 201: ENHANCEMATCH findall (first match; groups converted)
 [[test]]

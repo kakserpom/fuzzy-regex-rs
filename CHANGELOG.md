@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Fuzzy quantifier on a recursion reference, e.g. `(?R){e<=2}` / `(?0){e}` /
+  `(?1){e<=1}`. The fuzziness is threaded onto the recursion states and enforced
+  by the backtracker as a total-edit cap on the recursive sub-match (an
+  unbounded `{e}` places no cap, so it behaves like plain `(?R)`); non-fuzzy
+  recursion is unchanged. Unblocks mrab corpus L3804 — the last non-divergence
+  entry, so every unsupported-feature gap in the corpus is now closed.
+
 - `\m` (start-of-word) and `\M` (end-of-word) boundary markers — the directional
   halves of `\b`. `\m` matches a non-word→word transition (or string start
   before a word char); `\M` matches a word→non-word transition (or string end

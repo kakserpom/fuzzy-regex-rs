@@ -418,22 +418,30 @@ pub enum Ast {
         expr: Box<Ast>,
     },
 
-    /// Recursive entire pattern: `(?R)`
+    /// Recursive entire pattern: `(?R)`, optionally fuzzy: `(?R){e<=2}`.
     /// Recursively matches the entire pattern.
-    RecursivePattern,
+    RecursivePattern {
+        /// Max total edits allowed within the recursive sub-match (`None` = no
+        /// cap, e.g. plain `(?R)` or the unbounded `(?R){e}`).
+        max_edits: Option<u8>,
+    },
 
-    /// Recursive numbered group: `(?1)`, `(?2)`, etc.
+    /// Recursive numbered group: `(?1)`, `(?2)`, etc., optionally fuzzy.
     /// Recursively matches a specific capture group.
     RecursiveGroup {
         /// The capture group number to recurse into.
         group: usize,
+        /// Max total edits allowed within the recursive sub-match.
+        max_edits: Option<u8>,
     },
 
-    /// Recursive named group: `(?&name)` or `(?P>name)`
+    /// Recursive named group: `(?&name)` or `(?P>name)`, optionally fuzzy.
     /// Recursively matches a named capture group.
     RecursiveNamedGroup {
         /// The name of the capture group to recurse into.
         name: String,
+        /// Max total edits allowed within the recursive sub-match.
+        max_edits: Option<u8>,
     },
 
     /// Custom handler invocation: `(?call:name)`

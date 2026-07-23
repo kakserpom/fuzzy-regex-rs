@@ -157,18 +157,25 @@ pub enum Hir {
 
     /// Recursive entire pattern: (?R)
     /// Recursively matches the entire pattern.
-    RecursivePattern,
+    RecursivePattern {
+        /// Max total edits allowed within the recursive sub-match (`None` = none).
+        max_edits: Option<u8>,
+    },
 
     /// Recursive numbered group: (?1), (?2), etc.
     RecursiveGroup {
         /// The capture group number to recurse into.
         group: usize,
+        /// Max total edits allowed within the recursive sub-match.
+        max_edits: Option<u8>,
     },
 
     /// Recursive named group: (?&name) or (?P>name)
     RecursiveNamedGroup {
         /// The name of the capture group to recurse into.
         name: String,
+        /// Max total edits allowed within the recursive sub-match.
+        max_edits: Option<u8>,
     },
 
     /// Custom handler invocation: (?call:name)
@@ -589,20 +596,27 @@ impl HirLowering {
                 }
             }
 
-            Ast::RecursivePattern => {
+            Ast::RecursivePattern { max_edits } => {
                 // (?R) - recursively match the entire pattern
-                // This will be resolved during NFA construction
-                Hir::RecursivePattern
+                Hir::RecursivePattern {
+                    max_edits: *max_edits,
+                }
             }
 
-            Ast::RecursiveGroup { group } => {
+            Ast::RecursiveGroup { group, max_edits } => {
                 // (?1), (?2), etc. - recursively match a capture group
-                Hir::RecursiveGroup { group: *group }
+                Hir::RecursiveGroup {
+                    group: *group,
+                    max_edits: *max_edits,
+                }
             }
 
-            Ast::RecursiveNamedGroup { name } => {
+            Ast::RecursiveNamedGroup { name, max_edits } => {
                 // (?&name) or (?P>name) - recursively match a named capture group
-                Hir::RecursiveNamedGroup { name: name.clone() }
+                Hir::RecursiveNamedGroup {
+                    name: name.clone(),
+                    max_edits: *max_edits,
+                }
             }
 
             Ast::Handler { name } => {

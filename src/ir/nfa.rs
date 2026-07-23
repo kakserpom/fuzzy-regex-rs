@@ -2112,6 +2112,8 @@ pub enum State {
     RecursivePattern {
         /// Next state after the recursive call.
         next: StateId,
+        /// Max total edits allowed within the recursive sub-match (`None` = none).
+        max_edits: Option<u8>,
     },
 
     /// Recursive numbered group - (?1), (?2), etc.
@@ -2120,6 +2122,8 @@ pub enum State {
         group: usize,
         /// Next state after the recursive call.
         next: StateId,
+        /// Max total edits allowed within the recursive sub-match.
+        max_edits: Option<u8>,
     },
 
     /// Recursive named group - (?&name) or (?P>name)
@@ -2128,6 +2132,8 @@ pub enum State {
         name: String,
         /// Next state after the recursive call.
         next: StateId,
+        /// Max total edits allowed within the recursive sub-match.
+        max_edits: Option<u8>,
     },
 
     /// Custom handler invocation - (?call:name)

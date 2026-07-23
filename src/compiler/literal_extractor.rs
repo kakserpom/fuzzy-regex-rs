@@ -62,7 +62,7 @@ fn extract_recursive(hir: &Hir, out: &mut Vec<LiteralPattern>) {
         | Hir::Backreference { .. }
         | Hir::NamedList { .. }
         | Hir::ResetMatchStart
-        | Hir::RecursivePattern
+        | Hir::RecursivePattern { .. }
         | Hir::RecursiveGroup { .. }
         | Hir::RecursiveNamedGroup { .. }
         | Hir::Handler { .. } => {}
