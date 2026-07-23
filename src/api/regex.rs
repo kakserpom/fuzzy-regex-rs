@@ -1385,7 +1385,30 @@ impl FuzzyRegex {
             return matcher.find(text).map(|m| self.convert_match(text, m));
         }
 
-        // Fallback: use full matcher
+        // First-match fast path. When `find_iter` would fall through to its
+        // general `matcher.find_all` path (i.e. none of its bespoke fast paths
+        // apply), the matcher's `find_n(_, 1)` runs the identical scan and stops
+        // after the first match instead of enumerating every non-overlapping one
+        // — ~Nx faster for patterns that match many times (e.g. `(?:\w+){e<=1}`
+        // and `(?:\w+){e<=1} (?:\w+){e<=1}`). Patterns that `find_iter` routes to
+        // a bespoke path (lazy, char-class-plus, word-bounded, simple-fuzzy)
+        // keep the exact `find_iter().next()` path so results stay identical.
+        // The `#[cfg(test)]` guard in `find` and the find==find_iter proptest
+        // verify the equality.
+        let find_iter_uses_general_path = !self.is_simple_fuzzy_only
+            && !self.has_lazy
+            && !self.has_literal_word_boundary
+            && !self.is_char_class_plus_or_lazy;
+        if find_iter_uses_general_path {
+            return self
+                .create_matcher(self.is_unanchored())
+                .find_n(text, 1)
+                .into_iter()
+                .next()
+                .map(|m| self.convert_match(text, m));
+        }
+
+        // Fallback: full matcher (leftmost via find_iter's first match).
         self.find_iter_forward(text).next()
     }
 

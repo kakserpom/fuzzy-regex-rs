@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- `find` on fuzzy patterns that match many times is no longer O(all matches).
+  The general fallback previously computed every non-overlapping match via
+  `find_iter` and discarded all but the first; it now stops at the first match
+  using the matcher's `find_n(_, 1)` (which shares `find_all`'s scan via a new
+  `find_up_to(text, limit)`), guarded so it only applies when `find_iter` would
+  use that same general path. E.g. `(?:\w+){e<=1} (?:\w+){e<=1}` drops from
+  ~215µs to ~34µs (~6x); a lone fuzzy `(?:[a-z]+){e<=1}` ~20x. Verified
+  identical to `find_iter().next()` by the 50k-case consistency proptest.
+
 ### Added
 
 - Fuzzy quantifier on a recursion reference, e.g. `(?R){e<=2}` / `(?0){e}` /

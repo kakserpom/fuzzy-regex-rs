@@ -1075,6 +1075,20 @@ impl<'a> Matcher<'a> {
     /// Find all non-overlapping matches.
     #[must_use]
     pub fn find_all(&self, text: &str) -> Vec<MatchResult> {
+        self.find_up_to(text, usize::MAX)
+    }
+
+    /// Find non-overlapping matches, stopping after `limit` of them. `find_all`
+    /// is `find_up_to(text, usize::MAX)` and `find_n(text, n)` is
+    /// `find_up_to(text, n)`, so a bounded first-match query (`limit == 1`)
+    /// uses the exact same scan orders — end-anchored window, literal-guide, and
+    /// plain left-to-right — as the full enumeration, and therefore returns the
+    /// same leftmost match as `find_iter().next()`, just without computing the
+    /// rest.
+    fn find_up_to(&self, text: &str, limit: usize) -> Vec<MatchResult> {
+        if limit == 0 {
+            return Vec::new();
+        }
         // For patterns where all literals are exact (no fuzzy edits), skip the cache entirely.
         // This avoids the overhead of building and querying the cache for common characters.
         let is_all_exact = self.fuzzy_bridge.is_none_or(FuzzyBridge::is_all_exact);
@@ -1156,12 +1170,12 @@ impl<'a> Matcher<'a> {
         if let Some(ref cache) = cached
             && !cache.is_empty()
         {
-            return self.find_all_with_literal_guide(text, cache);
+            return self.find_all_with_literal_guide(text, cache, limit);
         }
 
         let mut pos = 0;
 
-        while pos < text.len() {
+        while pos < text.len() && matches.len() < limit {
             // Get the character at the current position for quick rejection
             let ch = text[pos..].chars().next();
 
@@ -1195,7 +1209,8 @@ impl<'a> Matcher<'a> {
         }
 
         // Try at end for empty patterns (only if no first_char_class restriction)
-        if self.first_char_class.is_none()
+        if matches.len() < limit
+            && self.first_char_class.is_none()
             && let Some(m) = self.find_at_with_cache(text, text.len(), cached.as_ref())
         {
             matches.push(m);
@@ -1206,63 +1221,21 @@ impl<'a> Matcher<'a> {
 
     /// Find up to `n` non-overlapping matches.
     ///
-    /// This is more efficient than `find_all` when only a limited number of matches is needed,
-    /// as it stops searching after finding `n` matches.
+    /// More efficient than `find_all` when only a limited number is needed: it
+    /// uses the same scan as `find_all` but stops after `n` matches.
     #[must_use]
     pub fn find_n(&self, text: &str, n: usize) -> Vec<MatchResult> {
-        if n == 0 {
-            return Vec::new();
-        }
-
-        // For patterns where all literals are exact (no fuzzy edits), skip the cache entirely.
-        let is_all_exact = self.fuzzy_bridge.is_none_or(FuzzyBridge::is_all_exact);
-
-        // Search all fuzzy matches once upfront
-        let cached = if is_all_exact {
-            None
-        } else {
-            self.fuzzy_bridge
-                .map(|b| b.search_all(text, self.config.threshold))
-        };
-
-        let mut matches = Vec::with_capacity(n);
-        let mut pos = 0;
-
-        while pos < text.len() && matches.len() < n {
-            // Get the character at the current position for quick rejection
-            let ch = text[pos..].chars().next();
-
-            // Quick reject: if first_char_class is set and doesn't match, skip
-            let should_try = match (&self.first_char_class, ch) {
-                (Some(fcc), Some(c)) => fcc.matches(c),
-                _ => true,
-            };
-
-            if should_try && let Some(m) = self.find_at_with_cache(text, pos, cached.as_ref()) {
-                let end = m.end;
-                matches.push(m);
-                // For a forward match jump to its end; a zero-width match falls
-                // through to the char-boundary-safe advance below (`pos + 1`
-                // could land inside a multi-byte UTF-8 char and panic).
-                if end > pos {
-                    pos = end;
-                    continue;
-                }
-            }
-
-            // Move to next character (char-boundary safe)
-            pos = text[pos..]
-                .char_indices()
-                .nth(1)
-                .map_or(text.len() + 1, |(i, _)| pos + i);
-        }
-
-        matches
+        self.find_up_to(text, n)
     }
 
     /// Find all matches using literal positions as a guide.
     /// Only tries positions that could reach a required literal.
-    fn find_all_with_literal_guide(&self, text: &str, cached: &CachedMatches) -> Vec<MatchResult> {
+    fn find_all_with_literal_guide(
+        &self,
+        text: &str,
+        cached: &CachedMatches,
+        limit: usize,
+    ) -> Vec<MatchResult> {
         let mut matches = Vec::new();
 
         // Collect all literal positions sorted by start
@@ -1284,7 +1257,7 @@ impl<'a> Matcher<'a> {
         let mut pos = 0;
         let mut lit_idx = 0;
 
-        while pos < text.len() && lit_idx < literal_positions.len() {
+        while pos < text.len() && lit_idx < literal_positions.len() && matches.len() < limit {
             let next_lit_pos = literal_positions[lit_idx];
 
             // Skip to position within MAX_LOOKBACK of the next literal
