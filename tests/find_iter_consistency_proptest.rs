@@ -115,3 +115,55 @@ proptest! {
         );
     }
 }
+
+/// Char classes used by the fuzzy-class-plus fast path (`find_dispatch`'s
+/// `(?:CLASS+){e<=k}` branch, backed by `Nfa::fuzzy_char_class_plus`).
+const FUZZY_CLASSES: &[&str] = &[r"\w", r"[a-z]", r"\d", r"[a-c]", r"\s", r"[^0-9]"];
+/// Repetition + fuzzy-limit suffixes that produce a single fuzzy class-plus.
+const FUZZY_QUANTS: &[&str] = &["+", "*"];
+const FUZZY_LIMITS: &[&str] = &[
+    "{e<=1}",
+    "{e<=2}",
+    "{i<=1}",
+    "{d<=1}",
+    "{s<=1}",
+    "{i<=1,d<=1,s<=1}",
+    "{i<=2}",
+    "{s<=2}",
+];
+
+fn fuzzy_class_plus_strategy() -> impl Strategy<Value = String> {
+    (
+        prop::sample::select(FUZZY_CLASSES),
+        prop::sample::select(FUZZY_QUANTS),
+        prop::sample::select(FUZZY_LIMITS),
+    )
+        .prop_map(|(class, quant, limit)| format!("(?:{class}{quant}){limit}"))
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(20000))]
+
+    /// The `find()` 0-edit fast path for `(?:CLASS+){fuzzy}` must return exactly
+    /// what the general `find_iter()` NFA path returns — same span AND same edit
+    /// counts (the fast path claims 0 edits, so a divergence in the (s,i,d) tuple
+    /// is as much a bug as a wrong span).
+    #[test]
+    fn fuzzy_class_plus_fast_path_matches_general(
+        pattern in fuzzy_class_plus_strategy(),
+        text in input_strategy(),
+    ) {
+        let Ok(re) = FuzzyRegex::new(&pattern) else { return Ok(()); };
+
+        let find_m = re.find(&text).map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+        let iter_m = re.find_iter(&text).next().map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+
+        prop_assert_eq!(
+            find_m,
+            iter_m,
+            "fuzzy-class-plus fast path disagrees with find_iter().next() for [{}] on {:?}",
+            pattern,
+            text
+        );
+    }
+}

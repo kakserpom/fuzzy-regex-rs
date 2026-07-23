@@ -101,6 +101,10 @@ pub struct FuzzyRegex {
     #[allow(dead_code)]
     is_char_class_plus: bool,
     is_char_class_plus_or_lazy: bool,
+    /// Whole pattern is a single fuzzy char-class repetition `(?:CLASS+){e<=k}`
+    /// with a genuine edit budget. Holds the class for `find()`'s 0-edit fast
+    /// path (see `Nfa::fuzzy_char_class_plus`).
+    fuzzy_class_plus: Option<crate::ir::hir::HirClass>,
     is_class_plus_with_literal: bool,
     is_digit_sequence_with_separator: bool,
     /// Pattern repeats a multi-atom group (e.g. `(?:,\d{3})*`); disqualifies the
@@ -373,6 +377,7 @@ impl FuzzyRegex {
         let is_word_bounded_class = nfa.is_word_bounded_class();
         let is_char_class_plus = nfa.is_char_class_plus();
         let is_char_class_plus_or_lazy = nfa.is_char_class_plus_or_lazy();
+        let fuzzy_class_plus = nfa.fuzzy_char_class_plus();
         let is_class_plus_with_literal = nfa.is_class_plus_with_literal();
         let is_digit_sequence_with_separator = nfa.is_digit_sequence_with_separator();
         let has_repeated_group = hir_has_repeated_group(&hir);
@@ -533,6 +538,7 @@ impl FuzzyRegex {
             is_word_bounded_class,
             is_char_class_plus,
             is_char_class_plus_or_lazy,
+            fuzzy_class_plus,
             is_class_plus_with_literal,
             is_digit_sequence_with_separator,
             has_repeated_group,
@@ -846,6 +852,40 @@ impl FuzzyRegex {
         // Use backtracking engine for recursive patterns
         if self.has_recursion {
             return self.find_with_backtrack(text);
+        }
+
+        // Fast path: whole pattern is a single fuzzy char-class repetition
+        // `(?:CLASS+){e<=k}` (unanchored, budget >= 1, no other structure — see
+        // `Nfa::fuzzy_char_class_plus`). Such a pattern always matches at
+        // position 0, and when text[0] is in CLASS the min-edit leftmost match
+        // is exactly the greedy 0-edit class run: min edits beats any longer
+        // fuzzy span (e.g. `ab.cd` -> `ab`, not `ab.cd`), so this equals a plain
+        // `CLASS+`. The leading-non-class case (where the budget is actually
+        // spent, e.g. `.ab`) is left to the general NFA, so results are
+        // unchanged. Gated off under case-folding / unicode where
+        // `HirClass::matches` (ASCII, case-sensitive) would diverge from the NFA.
+        // Verified == find_iter().next() by the consistency proptest.
+        if let Some(class) = &self.fuzzy_class_plus
+            && !self.config.case_insensitive
+            && !self.config.match_flags.unicode
+            && let Some(ch0) = text.chars().next()
+            && class.matches(ch0)
+        {
+            let mut end = ch0.len_utf8();
+            for ch in text[end..].chars() {
+                if class.matches(ch) {
+                    end += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            return Some(Match::new(
+                text,
+                0,
+                end,
+                1.0,
+                crate::engine::EditCounts::default(),
+            ));
         }
 
         // Ultra-fast path for simple exact literals: use memchr directly

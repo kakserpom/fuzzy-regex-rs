@@ -703,6 +703,104 @@ impl Nfa {
         false
     }
 
+    /// If the whole NFA is a single fuzzy character-class repetition with a
+    /// genuine edit budget and no other structure — `(?:CLASS+){e<=k}`,
+    /// `(?:CLASS*){i<=k}`, `(?:CLASS+){s<=k}`, … — return the character class.
+    ///
+    /// Used by `find()`'s safe 0-edit fast path: for such a pattern (which is
+    /// unanchored, so the leftmost match always starts at position 0 once the
+    /// budget is ≥1), if the first text char is in CLASS then the min-edit
+    /// leftmost match is exactly the greedy 0-edit class run — identical to a
+    /// plain `CLASS+`. Any leading-non-class case (where the budget is actually
+    /// spent) is left to the general NFA, so this never changes results.
+    ///
+    /// Returns `None` for anything with extra structure (anchors, captures,
+    /// lookarounds, literals, backrefs, recursion, handlers, a second class),
+    /// a non-loop quantifier (`(?:\w){e<=1}` has no `+`), a zero budget, or an
+    /// exclusive lower bound (`min_edits`, which the 0-edit run would violate).
+    #[must_use]
+    pub fn fuzzy_char_class_plus(&self) -> Option<HirClass> {
+        if self.states.len() > 50 {
+            return None;
+        }
+
+        let mut fuzzy_char_id: Option<StateId> = None;
+        let mut class: Option<&HirClass> = None;
+        for (id, state) in self.states.iter().enumerate() {
+            match state {
+                State::Accept | State::Epsilon { .. } | State::Split { .. } => {}
+                State::FuzzyChar {
+                    class: c,
+                    limits,
+                    min_edits,
+                    ..
+                } => {
+                    // A single consuming class only.
+                    if fuzzy_char_id.is_some() {
+                        return None;
+                    }
+                    // An exclusive lower bound (`{0<e<=k}`) requires ≥1 edit, so
+                    // the 0-edit greedy run would be an invalid match.
+                    if min_edits.is_some_and(|m| m > 0) {
+                        return None;
+                    }
+                    // Require a genuine edit budget (≥1). A 0-budget or a
+                    // cost-only constraint (limits None) is left to the NFA.
+                    let total = limits.as_ref().map_or(0, |l| {
+                        l.get_edits().unwrap_or_else(|| {
+                            l.get_insertions()
+                                .unwrap_or(0)
+                                .saturating_add(l.get_deletions().unwrap_or(0))
+                                .saturating_add(l.get_substitutions().unwrap_or(0))
+                        })
+                    });
+                    if total == 0 {
+                        return None;
+                    }
+                    fuzzy_char_id = Some(id);
+                    class = Some(c);
+                }
+                // Any other state disqualifies the fast path.
+                _ => return None,
+            }
+        }
+
+        let fc = fuzzy_char_id?;
+        // Require the `+`/`*` loop: the class state must be reachable from its
+        // own successor via epsilon/split transitions. Without a loop the
+        // pattern matches a single char and the greedy run would over-consume.
+        if !self.class_state_loops(fc) {
+            return None;
+        }
+        class.cloned()
+    }
+
+    /// Whether `fc` (a consuming class state) sits on a repetition loop: its
+    /// successor can reach `fc` again through only epsilon/split transitions.
+    fn class_state_loops(&self, fc: StateId) -> bool {
+        let start = match &self.states[fc] {
+            State::FuzzyChar { next, .. } | State::Char { next, .. } => *next,
+            _ => return false,
+        };
+        let mut stack = vec![start];
+        let mut visited = vec![false; self.states.len()];
+        while let Some(id) = stack.pop() {
+            if id == fc {
+                return true;
+            }
+            if visited[id] {
+                continue;
+            }
+            visited[id] = true;
+            match &self.states[id] {
+                State::Epsilon { targets } => stack.extend(targets.iter().copied()),
+                State::Split { branches, .. } => stack.extend(branches.iter().copied()),
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// Check if the NFA has a Split state that creates a loop (for + quantifier)
     /// This is used to distinguish \d+ from \d{3}
     fn has_char_class_loop(&self) -> bool {
