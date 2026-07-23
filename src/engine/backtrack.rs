@@ -48,6 +48,28 @@ struct BacktrackFrame {
     match_start: usize,
     /// Recursion depth at this point.
     recursion_depth: usize,
+    /// Subroutine call stack at this point (for `(?R)`/`(?0)`/`(?1)`/`(?&name)`).
+    call_stack: Vec<CallFrame>,
+}
+
+/// An in-progress recursive subroutine call (`(?R)`, `(?0)`, `(?1)`, `(?&name)`).
+///
+/// When a recursion state is reached, the matcher jumps to the referenced
+/// subpattern's start and pushes one of these; when it reaches the subpattern's
+/// `end_state` it pops and resumes at `return_state`. This keeps recursion part
+/// of the single backtracking search, so choices made inside a subroutine can be
+/// revisited when a later part of the match fails (unlike a nested call).
+#[derive(Clone, Debug)]
+struct CallFrame {
+    /// State that signals the subroutine has finished (accept for `(?R)`/`(?0)`,
+    /// the group's capture-end for `(?1)`/`(?&name)`).
+    end_state: StateId,
+    /// State to resume at after the subroutine returns.
+    return_state: StateId,
+    /// Text position where the call was made — used to detect left recursion
+    /// (a call to the same subpattern at the same position that makes no
+    /// progress), which is failed rather than looped forever.
+    start_pos: usize,
 }
 
 /// Backtracking regex matcher.
@@ -107,23 +129,6 @@ impl<'a> BacktrackMatcher<'a> {
         }
     }
 
-    /// Internal method to try matching from a position with explicit text parameter.
-    /// This is used for recursive patterns.
-    fn try_match_recursive(
-        &self,
-        text: &str,
-        text_bytes: &[u8],
-        pos: usize,
-        match_start: usize,
-        depth: usize,
-    ) -> Option<MatchResult> {
-        // Check recursion depth limit
-        if depth >= self.max_recursion {
-            return None;
-        }
-        self.try_match(text, text_bytes, pos, match_start, depth)
-    }
-
     /// Try to match from a specific position.
     fn try_match(
         &self,
@@ -140,12 +145,27 @@ impl<'a> BacktrackMatcher<'a> {
 
         // Backtracking stack
         let mut backtrack_stack: Vec<BacktrackFrame> = Vec::new();
+        // Subroutine call stack for recursion (`(?R)`/`(?0)`/`(?1)`/`(?&name)`).
+        let mut call_stack: Vec<CallFrame> = Vec::new();
 
         // Current state
         let mut state = self.nfa.start;
 
         loop {
-            // Check for end of input
+            // Subroutine return: if we are inside a recursive call and have
+            // reached that call's end state (the accept state for `(?R)`/`(?0)`,
+            // or the group's capture-end for `(?1)`/`(?&name)`), pop the call and
+            // resume at the return state instead of accepting/continuing.
+            if let Some(frame) = call_stack.last()
+                && state == frame.end_state
+            {
+                let return_state = frame.return_state;
+                call_stack.pop();
+                state = return_state;
+                continue;
+            }
+
+            // Check for end of input (only a real match when not inside a call).
             if state == 0 {
                 // Accept state - found a match
                 return Some(MatchResult {
@@ -189,6 +209,7 @@ impl<'a> BacktrackMatcher<'a> {
                                 edits: edits.clone(),
                                 match_start,
                                 recursion_depth: depth,
+                                call_stack: call_stack.clone(),
                             });
                         }
                     } else {
@@ -203,6 +224,7 @@ impl<'a> BacktrackMatcher<'a> {
                             edits = frame.edits;
                             match_start = frame.match_start;
                             depth = frame.recursion_depth;
+                            call_stack = frame.call_stack;
                         }
                     }
                 }
@@ -224,6 +246,7 @@ impl<'a> BacktrackMatcher<'a> {
                                 edits = frame.edits;
                                 match_start = frame.match_start;
                                 depth = frame.recursion_depth;
+                                call_stack = frame.call_stack;
                             }
                         }
                     } else {
@@ -237,6 +260,7 @@ impl<'a> BacktrackMatcher<'a> {
                             edits = frame.edits;
                             match_start = frame.match_start;
                             depth = frame.recursion_depth;
+                            call_stack = frame.call_stack;
                         }
                     }
                 }
@@ -263,6 +287,7 @@ impl<'a> BacktrackMatcher<'a> {
                             similarity = frame.similarity;
                             edits = frame.edits;
                             match_start = frame.match_start;
+                            call_stack = frame.call_stack;
                         }
                     } else {
                         let frame = backtrack_stack.pop()?;
@@ -272,6 +297,7 @@ impl<'a> BacktrackMatcher<'a> {
                         similarity = frame.similarity;
                         edits = frame.edits;
                         match_start = frame.match_start;
+                        call_stack = frame.call_stack;
                     }
                 }
 
@@ -299,6 +325,7 @@ impl<'a> BacktrackMatcher<'a> {
                                     similarity = frame.similarity;
                                     edits = frame.edits;
                                     match_start = frame.match_start;
+                                    call_stack = frame.call_stack;
                                 }
                             }
                         } else {
@@ -341,6 +368,7 @@ impl<'a> BacktrackMatcher<'a> {
                         similarity = frame.similarity;
                         edits = frame.edits;
                         match_start = frame.match_start;
+                        call_stack = frame.call_stack;
                     }
                 }
 
@@ -412,6 +440,7 @@ impl<'a> BacktrackMatcher<'a> {
                             similarity = frame.similarity;
                             edits = frame.edits;
                             match_start = frame.match_start;
+                            call_stack = frame.call_stack;
                         }
                     } else {
                         state = *next;
@@ -432,6 +461,7 @@ impl<'a> BacktrackMatcher<'a> {
                                 edits: edits.clone(),
                                 match_start,
                                 recursion_depth: depth,
+                                call_stack: call_stack.clone(),
                             });
                         }
                     } else {
@@ -446,6 +476,7 @@ impl<'a> BacktrackMatcher<'a> {
                                 edits: edits.clone(),
                                 match_start,
                                 recursion_depth: depth,
+                                call_stack: call_stack.clone(),
                             });
                         }
                     }
@@ -468,76 +499,82 @@ impl<'a> BacktrackMatcher<'a> {
                 }
 
                 State::RecursivePattern { next } => {
-                    // (?R) - recursively match entire pattern
-                    // The recursion is typically wrapped in a Split for optional behavior (?R)?
-                    // Save state for backtracking
-                    backtrack_stack.push(BacktrackFrame {
-                        state: *next,
-                        pos,
-                        captures: captures.clone(),
-                        similarity,
-                        edits: edits.clone(),
-                        match_start,
-                        recursion_depth: depth + 1,
-                    });
-
-                    // Try recursion: match entire pattern from current position
-                    // This is a recursive call that starts fresh
-                    if let Some(result) =
-                        self.try_match_recursive(text, text_bytes, pos, pos, depth + 1)
+                    // (?R) - call the whole pattern: start at the NFA start, and
+                    // return when the accept state (0) is reached.
+                    let target = Some((self.nfa.start, 0usize));
+                    if let Some((start_state, end_state)) =
+                        self.recursion_target(target, pos, &call_stack)
                     {
-                        pos = result.end;
-                        similarity *= result.similarity;
-                        edits = edits.merge(&result.edits);
-                        state = *next;
+                        call_stack.push(CallFrame {
+                            end_state,
+                            return_state: *next,
+                            start_pos: pos,
+                        });
+                        state = start_state;
                     } else {
-                        // Recursion failed - pop our frame and backtrack
-                        backtrack_stack.pop();
-                        {
-                            let frame = backtrack_stack.pop()?;
-                            state = frame.state;
-                            pos = frame.pos;
-                            captures = frame.captures;
-                            similarity = frame.similarity;
-                            edits = frame.edits;
-                            match_start = frame.match_start;
-                        }
+                        let frame = backtrack_stack.pop()?;
+                        state = frame.state;
+                        pos = frame.pos;
+                        captures = frame.captures;
+                        similarity = frame.similarity;
+                        edits = frame.edits;
+                        match_start = frame.match_start;
+                        depth = frame.recursion_depth;
+                        call_stack = frame.call_stack;
                     }
                 }
 
                 State::RecursiveGroup { group, next } => {
-                    // (?1), (?2), etc. - recursively match a group
-                    let group_idx = *group;
-                    if group_idx > 0 && group_idx <= self.nfa.group_states.len() {
-                        // Get the group's start/end states
-                        let (_cap_start, _cap_end) = self.nfa.group_states[group_idx - 1];
-
-                        // Save for backtracking
-                        backtrack_stack.push(BacktrackFrame {
-                            state: *next,
-                            pos,
-                            captures: captures.clone(),
-                            similarity,
-                            edits: edits.clone(),
-                            match_start,
-                            recursion_depth: depth + 1,
-                        });
-
-                        // Try to match from the group's start state
-                        // This is simplified - we'd need to build a proper sub-NFA
-                        state = *next;
+                    // (?0) = whole pattern; (?1), (?2), … = a numbered group.
+                    let target = if *group == 0 {
+                        Some((self.nfa.start, 0usize))
                     } else {
-                        state = *next;
+                        self.nfa.group_states.get(*group - 1).copied()
+                    };
+                    if let Some((start_state, end_state)) =
+                        self.recursion_target(target, pos, &call_stack)
+                    {
+                        call_stack.push(CallFrame {
+                            end_state,
+                            return_state: *next,
+                            start_pos: pos,
+                        });
+                        state = start_state;
+                    } else {
+                        let frame = backtrack_stack.pop()?;
+                        state = frame.state;
+                        pos = frame.pos;
+                        captures = frame.captures;
+                        similarity = frame.similarity;
+                        edits = frame.edits;
+                        match_start = frame.match_start;
+                        depth = frame.recursion_depth;
+                        call_stack = frame.call_stack;
                     }
                 }
 
                 State::RecursiveNamedGroup { name, next } => {
-                    // (?&name) - recursively match a named group
-                    if let Some((_cap_start, _cap_end)) = self.nfa.named_group_states.get(name) {
-                        // Simplified - just continue
-                        state = *next;
+                    // (?&name) / (?P>name) - call a named group.
+                    let target = self.nfa.named_group_states.get(name).copied();
+                    if let Some((start_state, end_state)) =
+                        self.recursion_target(target, pos, &call_stack)
+                    {
+                        call_stack.push(CallFrame {
+                            end_state,
+                            return_state: *next,
+                            start_pos: pos,
+                        });
+                        state = start_state;
                     } else {
-                        state = *next;
+                        let frame = backtrack_stack.pop()?;
+                        state = frame.state;
+                        pos = frame.pos;
+                        captures = frame.captures;
+                        similarity = frame.similarity;
+                        edits = frame.edits;
+                        match_start = frame.match_start;
+                        depth = frame.recursion_depth;
+                        call_stack = frame.call_stack;
                     }
                 }
 
@@ -548,6 +585,30 @@ impl<'a> BacktrackMatcher<'a> {
                 }
             }
         }
+    }
+
+    /// Resolve and guard a recursive subroutine call. Returns the
+    /// `(start_state, end_state)` to enter, or `None` if the call is invalid
+    /// (unknown group), exceeds the depth limit, or is left recursion — a call
+    /// to the same subpattern at the same text position with no progress, which
+    /// would otherwise loop forever.
+    fn recursion_target(
+        &self,
+        target: Option<(StateId, StateId)>,
+        pos: usize,
+        call_stack: &[CallFrame],
+    ) -> Option<(StateId, StateId)> {
+        let (start_state, end_state) = target?;
+        if call_stack.len() >= self.max_recursion {
+            return None;
+        }
+        if call_stack
+            .iter()
+            .any(|f| f.end_state == end_state && f.start_pos == pos)
+        {
+            return None;
+        }
+        Some((start_state, end_state))
     }
 
     /// Check if position is at a word boundary.

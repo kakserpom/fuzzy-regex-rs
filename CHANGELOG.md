@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Recursive patterns: `(?R)`/`(?0)` (whole pattern), `(?1)`/`(?2)`/… (numbered
+  group), and `(?&name)`/`(?P>name)` (named group). Recursion is executed by the
+  backtracking engine as a subroutine call stack integrated into the single
+  backtracking search — so choices made inside a recursive call are revisited
+  when a later part of the match fails, and patterns like balanced delimiters
+  (`\((?:[^()]|(?R))*\)`) match correctly, including deep nesting. Left
+  recursion (a call that makes no progress) is detected and fails rather than
+  looping. Previously recursion parsed but was compiled to a dead branch that
+  never matched. Unblocks mrab corpus L3801.
+
 - `(?f)` full case folding (only effective with `(?i)`): matches Unicode
   characters with multi-character case foldings against their expansions,
   bidirectionally — `(?fi)\N{LATIN SMALL LETTER SHARP S}` matches "ss"/"SS"/"ß",

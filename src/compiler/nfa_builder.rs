@@ -328,34 +328,27 @@ impl NfaBuilder {
             }
 
             Hir::RecursivePattern => {
-                // (?R) - recursively match the entire pattern
-                // This requires a self-referential NFA which is complex to implement
-                // For now, we create a placeholder that requires impossible matching
-                // Use a split to nowhere - this branch will simply not produce matches
-                let dead = self.nfa.add_state(State::Accept); // Dead end - won't match
-                let state = self.nfa.add_state(State::Epsilon {
-                    targets: vec![dead],
+                // (?R) - recursively match the entire pattern. Emit a real
+                // recursion state; the backtracker performs the subroutine call
+                // (`next` is patched to the continuation by the caller).
+                let state = self.nfa.add_state(State::RecursivePattern { next: 0 });
+                NfaFragment::single(state, state)
+            }
+
+            Hir::RecursiveGroup { group } => {
+                // (?0) = whole pattern, (?1), (?2), … = a numbered capture group.
+                let state = self.nfa.add_state(State::RecursiveGroup {
+                    group: *group,
+                    next: 0,
                 });
                 NfaFragment::single(state, state)
             }
 
-            Hir::RecursiveGroup { group: _ } => {
-                // (?1), (?2), etc. - recursively match a capture group
-                // This requires storing the group's sub-NFA and calling it
-                // For now, add a placeholder
-                let dead = self.nfa.add_state(State::Accept);
-                let state = self.nfa.add_state(State::Epsilon {
-                    targets: vec![dead],
-                });
-                NfaFragment::single(state, state)
-            }
-
-            Hir::RecursiveNamedGroup { name: _ } => {
-                // (?&name) or (?P>name) - recursively match a named capture group
-                // For now, add a placeholder
-                let dead = self.nfa.add_state(State::Accept);
-                let state = self.nfa.add_state(State::Epsilon {
-                    targets: vec![dead],
+            Hir::RecursiveNamedGroup { name } => {
+                // (?&name) / (?P>name) - recursively match a named capture group.
+                let state = self.nfa.add_state(State::RecursiveNamedGroup {
+                    name: name.clone(),
+                    next: 0,
                 });
                 NfaFragment::single(state, state)
             }

@@ -82,6 +82,17 @@ Complete reference for all pattern syntax.
 | `(?<!...)` | Negative lookbehind |
 | `(?>...)` | Atomic group |
 
+## Recursion
+
+| Syntax | Description |
+|--------|-------------|
+| `(?R)`, `(?0)` | Recursively match the whole pattern |
+| `(?1)`, `(?2)`, … | Recursively match a numbered group |
+| `(?&name)`, `(?P>name)` | Recursively match a named group |
+
+Recursion enables patterns like balanced delimiters, e.g. `\((?:[^()]|(?R))*\)`.
+Recursive patterns are matched by the backtracking engine.
+
 ## Backreferences
 
 | Syntax | Description |

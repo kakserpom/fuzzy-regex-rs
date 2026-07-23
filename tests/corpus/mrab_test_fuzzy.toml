@@ -596,16 +596,15 @@ expect_error = true
 
 # Hg issue 199/200: compile-only recursion inside fuzzy (unsupported)
 [[test]]
-name = "L3801 issue199 ((?0))e - recursion (?0) unsupported"
+name = "L3801 issue199 ((?0))e"
 pattern = "((?0)){e}"
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (recursion (?0) unsupported)
 
 [[test]]
-name = "L3804 issue200 \\x00?(?0)e - recursion (?0) unsupported"
+name = "L3804 issue200 \\x00?(?0)e - fuzzy {e} on a recursion reference unsupported"
 pattern = '\x00?(?0){e}'
 compiles = true
-ignore = true   # GAP: mrab compiles, ours errors (recursion (?0) unsupported)
+ignore = true   # GAP: mrab compiles, ours errors (a fuzzy quantifier directly on a recursion reference `(?0){e}` is not supported)
 
 # Hg issue 201: ENHANCEMATCH findall (first match; groups converted)
 [[test]]
