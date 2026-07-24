@@ -20,7 +20,7 @@
 //! Paired with `examples/diff_fuzz.py`, which uses Python's mrab `regex`
 //! module as the oracle.
 
-use fuzzy_regex::{FuzzyRegex, Match};
+use fuzzy_regex::{FuzzyRegexBuilder, Match, MatchEndPolicy};
 use std::io::{self, BufRead, Write};
 
 fn percent_decode(s: &str) -> String {
@@ -60,6 +60,10 @@ fn main() {
         eprintln!("PANIC: {info}");
     }));
 
+    // MATCH_END_POLICY=minedit switches to MinEdit (tightest span) instead of the
+    // default LongestWithinBudget, for measuring mrab-alignment of each policy.
+    let min_edit = std::env::var("MATCH_END_POLICY").as_deref() == Ok("minedit");
+
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());
@@ -76,13 +80,19 @@ fn main() {
         let pat = percent_decode(parts.next().unwrap_or(""));
         let text = percent_decode(parts.next().unwrap_or(""));
 
-        let result = std::panic::catch_unwind(|| match FuzzyRegex::new(&pat) {
-            Ok(re) => {
-                let find = encode(re.find(&text));
-                let iter = encode(re.find_iter(&text).next());
-                format!("{find}|{iter}")
+        let result = std::panic::catch_unwind(|| {
+            let mut builder = FuzzyRegexBuilder::new(&pat);
+            if min_edit {
+                builder = builder.match_end_policy(MatchEndPolicy::MinEdit);
             }
-            Err(_) => "E".to_string(),
+            match builder.build() {
+                Ok(re) => {
+                    let find = encode(re.find(&text));
+                    let iter = encode(re.find_iter(&text).next());
+                    format!("{find}|{iter}")
+                }
+                Err(_) => "E".to_string(),
+            }
         })
         .unwrap_or_else(|_| "P".to_string());
 

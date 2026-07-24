@@ -282,6 +282,30 @@ def main():
     print(f"    find_iter() span == mrab:      {pctf(iter_eq_mrab, both_matched)}")
     print(f"    find()      span != mrab:      {len(span_div)}")
 
+    # Classify span divergences by likely (documented) policy cause.
+    zw_shift = lead_ins = we_start_later = length_only = other = 0
+    for _pat, _text, mspan, fspan, _ispan in span_div:
+        if fspan is None:
+            other += 1
+            continue
+        ms, me = mspan
+        fs, fe = fspan
+        if ms == me:  # mrab zero-width (whole-pattern deletion); we take a real span
+            zw_shift += 1
+        elif ms > fs:  # we start earlier -> leading insertion we allow, mrab doesn't
+            lead_ins += 1
+        elif ms < fs:  # mrab starts earlier than us
+            we_start_later += 1
+        else:  # same start, different end -> longest-within-budget vs min-edit
+            length_only += 1
+    if span_div:
+        print("    span-divergence breakdown (documented policy vs bug):")
+        print(f"      mrab zero-width, we take span: {zw_shift}")
+        print(f"      we start earlier (leading ins): {lead_ins}")
+        print(f"      mrab starts earlier:            {we_start_later}")
+        print(f"      same start, diff end (longest): {length_only}")
+        print(f"      other:                          {other}")
+
     def show(title, rows, fmt, limit=30):
         if not rows:
             return
