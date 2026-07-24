@@ -1131,8 +1131,15 @@ impl<'a> Matcher<'a> {
                 })
             };
 
-            // Try positions from end (positions are already in reverse order)
-            for &idx in &positions {
+            // `positions` is ordered end->start; iterate it in REVERSE so we try
+            // the earliest (leftmost) candidate start first. An end-anchored
+            // pattern's matches all end at text.len() and therefore overlap, so
+            // find_iter reports exactly one — and leftmost semantics require it
+            // to be the smallest start, not the one nearest the end. Scanning
+            // rightmost-first (the old order) returned a shorter, higher-edit
+            // suffix that disagreed with find() and mrab, e.g. `(?:baab){e<3}$`
+            // on "baab" gave (2,4) instead of the full (0,4).
+            for &idx in positions.iter().rev() {
                 if let Some(ref fcc) = self.first_char_class {
                     let ch = text[idx..].chars().next().unwrap();
                     if !fcc.matches(ch) {
