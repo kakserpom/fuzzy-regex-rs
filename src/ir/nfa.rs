@@ -1656,10 +1656,17 @@ impl Nfa {
                 for &branch in &branches[1..] {
                     let branch_class = self.first_char_class_from(branch, visited)?;
                     // For simplicity, only use if all branches have exactly the same class
-                    // (could be more sophisticated but this handles common cases)
+                    // (could be more sophisticated but this handles common cases).
+                    // `named` MUST be compared too: without it, a nullable named class
+                    // like `\d*` (named=[Digit], empty chars/ranges) whose skip-branch
+                    // leads to `.` (named=[AnyExceptNewline], also empty chars/ranges)
+                    // was wrongly deemed equal, so `first_char_class` returned `\d` and
+                    // the matcher quick-rejected every non-digit start — dropping valid
+                    // matches like `(?:\d*){i<=1}.` on "," (\d* empty, `.` matches ",").
                     if branch_class.chars != first.chars
                         || branch_class.ranges != first.ranges
                         || branch_class.negated != first.negated
+                        || branch_class.named != first.named
                     {
                         return None;
                     }
