@@ -39,7 +39,7 @@ regex = "1"
 arbitrary = { version = "1", features = ["derive"] }
 proptest = "1.10"
 fuzzy-aho-corasick = "0.4"
-toml = "0.8"
+toml = "1.1"
 serde = { version = "1.0.229", features = ["derive"] }
 
 [[bench]]
