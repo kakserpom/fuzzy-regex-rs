@@ -1095,6 +1095,24 @@ impl<'a> Matcher<'a> {
 
         let mut matches = Vec::new();
 
+        // Start-anchored (`^`, non-multiline): a match can only begin at position
+        // 0, so match just there. This must precede the end-anchored window scan
+        // below: for a pattern that is ALSO `$`-anchored that scan only visits
+        // positions near the end and can exclude position 0, missing the
+        // required-at-0 match (e.g. `^(?:[bcd]){e<=1}$` on "bc" -> (0,2)).
+        if !self.config.unanchored && !self.config.multi_line {
+            let cached = if is_all_exact {
+                None
+            } else {
+                self.fuzzy_bridge
+                    .map(|b| b.search_all(text, self.config.threshold))
+            };
+            if let Some(m) = self.find_at_with_cache(text, 0, cached.as_ref()) {
+                matches.push(m);
+            }
+            return matches;
+        }
+
         // Optimization for end-anchored patterns: only check positions near the end
         // (disabled in multiline mode where $ can match at any line boundary)
         if self.ends_with_end_anchor

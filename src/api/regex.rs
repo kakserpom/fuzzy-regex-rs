@@ -1977,10 +1977,21 @@ impl FuzzyRegex {
             );
         }
 
-        // Fast path for start-anchored patterns: can only match at position 0
-        // Use find_single_matcher to avoid infinite recursion (find -> find_iter -> find)
+        // Start-anchored patterns can only match at position 0. Route through the
+        // matcher's general scan (`find_all` -> `find_up_to`), which has the
+        // start-anchored pos-0 fast path — the SAME engine `find()` uses for
+        // these, so the two agree. (Previously this used `find_single_matcher`
+        // whose anchored fast path missed some fuzzy matches `find_up_to` finds,
+        // e.g. `^(?:.aa){s<=2}` / `^(?:c+){s<=3}`.) Calling the matcher directly
+        // (not self.find) keeps it recursion-free.
         if self.anchored && !self.config.multi_line {
-            return Matches::new(self.find_single_matcher(text).into_iter().collect());
+            return Matches::new(
+                self.create_matcher(self.is_unanchored())
+                    .find_all(text)
+                    .into_iter()
+                    .map(|m| self.convert_match(text, m))
+                    .collect(),
+            );
         }
 
         // For simple fuzzy patterns, use optimized batch collection
