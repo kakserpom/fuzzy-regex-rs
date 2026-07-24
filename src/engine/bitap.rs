@@ -565,7 +565,16 @@ impl BitapMatcher {
             // Check for matches (bit pattern_len-1 is 0)
             let end_byte = text_chars.get(char_idx + 1).map_or(text.len(), |(b, _)| *b);
 
-            for d in 0..=max_edits {
+            // Cap the match-checking loop at pattern_len: matches with more
+            // edits than the pattern has characters have near-zero similarity
+            // and are never useful as prefilters or for word-boundary filtering.
+            // The state vectors are still updated for all max_edits levels
+            // (above), so accuracy is preserved — we just skip the expensive
+            // compute_exact_edit_breakdown DP calls for high-error matches.
+            // This turns O(n·max_edits²) into O(n·pattern_len²) for unbounded
+            // `{e}` (max_edits=255).
+            let check_max = max_edits.min(self.pattern_len);
+            for d in 0..=check_max {
                 if (r[d] & self.accept_mask) == 0 {
                     // Found a match with d edits
                     // Estimate start position (approximate)
@@ -630,7 +639,8 @@ impl BitapMatcher {
                 }
 
                 // Check for matches after propagation
-                for d in 0..=max_edits {
+                let check_max = max_edits.min(self.pattern_len);
+                for d in 0..=check_max {
                     if (r[d] & self.accept_mask) == 0 {
                         let end_byte = text.len();
                         let min_start_char = text_chars

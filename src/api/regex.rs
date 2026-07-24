@@ -1272,6 +1272,53 @@ impl FuzzyRegex {
             return Self::find_word_bounded_exact(text, &literal.text);
         }
 
+        // Fast path for fuzzy word-bounded literals: \b(?:literal){e}\b, etc.
+        // Uses the fuzzy bridge's Bitap matcher to find candidates quickly,
+        // then filters by word boundaries.  Without this, the general NFA
+        // simulation tries every text position with a large edit budget,
+        // causing O(n²) or worse for unbounded `{e}`.
+        //
+        // Uses `search_all` and mirrors `find_all_word_bounded_literal_fast`
+        // so that `find` == `find_iter().next()`.
+        if self.has_literal_word_boundary
+            && self.literals.len() == 1
+            && let Some(literal) = self.literals.first()
+            && literal.limits.is_some()
+            && let Some(ref bridge) = self.fuzzy_bridge
+        {
+            let threshold = self.config.similarity_threshold;
+            let cached = bridge.search_all(text, threshold);
+            // Collect and sort by start to match
+            // the ordering used by find_all_word_bounded_literal_fast.
+            let mut candidates: Vec<(usize, usize, crate::engine::EditCounts, f32)> = Vec::new();
+            for ((pattern_idx, start), results) in cached.iter() {
+                if pattern_idx != 0 {
+                    continue;
+                }
+                for result in results {
+                    candidates.push((
+                        start,
+                        result.end,
+                        crate::engine::EditCounts::from_fuzzy_result(result),
+                        result.similarity,
+                    ));
+                }
+            }
+            // Sort by start only, matching find_all_word_bounded_literal_fast
+            // ordering so find == find_iter().next().
+            candidates.sort_by_key(|(start, _, _, _)| *start);
+            // Return the leftmost candidate that satisfies word boundaries.
+            // No need to track prev_end — we return on the first match.
+            for (start, end, edits, similarity) in candidates {
+                if Self::is_word_boundary_at(text, start)
+                    && Self::is_word_boundary_at(text, end)
+                {
+                    return Some(self.make_match(text, start, end, similarity, edits));
+                }
+            }
+            return None;
+        }
+
         // Fast path for word-bounded character class: \b\w+\b only
         // Note: This only handles \w (word chars), not \d or other classes
         if self.is_word_bounded_class && self.literals.is_empty() {
