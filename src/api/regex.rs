@@ -49,6 +49,19 @@ use crate::parser::{Anchor, Ast, parse_with_flags};
 /// assert!(re.is_match("helo"));  // Matches with 1 edit
 /// assert!(re.is_match("hello")); // Exact match
 /// ```
+/// Exact (0-edit) shadow of a fuzzy pattern. When `find()` sees a fuzzy pattern
+/// whose leftmost match starts at position 0 with zero edits (e.g.
+/// `(?:\w+){e<=1} (?:\w+){e<=1}` on `"Lorem ipsum"`), the answer is exactly the
+/// exact pattern's match at position 0 — min edits beats any longer fuzzy span,
+/// and position 0 is the leftmost possible start. Trying this exact match first
+/// skips the (much slower) fuzzy NFA exploration when it would find nothing
+/// better. See `strip_fuzzy_to_exact` and the `find_dispatch` fast path.
+struct ExactShadow {
+    nfa: Nfa,
+    fuzzy_bridge: Option<FuzzyBridge>,
+    capture_count: usize,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub struct FuzzyRegex {
     /// Original pattern string.
@@ -60,6 +73,9 @@ pub struct FuzzyRegex {
     nfa: Nfa,
     /// Fuzzy bridge for literal matching.
     fuzzy_bridge: Option<FuzzyBridge>,
+    /// Exact (0-edit) shadow for `find()`'s exact-first fast path (default mode
+    /// only). `None` when the pattern is already exact or cannot be shadowed.
+    exact_shadow: Option<ExactShadow>,
     /// Literal patterns extracted from the compiled regex.
     literals: Vec<LiteralPattern>,
     /// Number of capture groups.
@@ -285,6 +301,38 @@ impl FuzzyRegex {
 
         // Create prefilter from leading literal (if pattern starts with a literal)
         let prefilter = Arc::new(create_prefilter_from_hir(&hir, config.case_insensitive));
+
+        // Build the exact (0-edit) shadow for find()'s exact-first fast path.
+        // Only in default (leftmost) mode — BESTMATCH/ENHANCEMATCH/POSIX/reverse
+        // prefer a non-minimal or right-to-left match, so a 0-edit match is not
+        // necessarily their answer — and only when the pattern actually has
+        // fuzzy parts (an exact pattern gains nothing) and can be safely
+        // stripped (see `strip_fuzzy_to_exact`).
+        let flags = &config.match_flags;
+        let exact_shadow = if flags.best_match
+            || flags.enhance_match
+            || flags.posix
+            || flags.reverse
+            || !hir_has_fuzzy(&hir)
+            || hir_has_nullable_fuzzy(&hir)
+        {
+            None
+        } else {
+            strip_fuzzy_to_exact(&hir).map(|exact_hir| {
+                let (exact_nfa, exact_literals) = build_nfa(&exact_hir);
+                let exact_bridge = FuzzyBridge::new(
+                    &exact_literals,
+                    config.default_limits.clone(),
+                    config.penalties.clone(),
+                    config.case_insensitive,
+                );
+                ExactShadow {
+                    nfa: exact_nfa,
+                    fuzzy_bridge: exact_bridge,
+                    capture_count,
+                }
+            })
+        };
 
         // Collect \L<name> references so unresolved ones short-circuit matching.
         let mut named_list_names = Vec::new();
@@ -517,6 +565,7 @@ impl FuzzyRegex {
             base_ast,
             nfa,
             fuzzy_bridge,
+            exact_shadow,
             literals,
             capture_count,
             named_groups,
@@ -886,6 +935,22 @@ impl FuzzyRegex {
                 1.0,
                 crate::engine::EditCounts::default(),
             ));
+        }
+
+        // Exact-first fast path: if the pattern's exact (0-edit) shadow matches
+        // at position 0, that IS the fuzzy pattern's leftmost result — 0 edits
+        // is minimal and position 0 is the leftmost possible start — so we skip
+        // the fuzzy NFA exploration entirely. This is the general form of the
+        // single-class path above and handles multi-part patterns like
+        // `(?:\w+){e<=1} (?:\w+){e<=1}` (exact `\w+ \w+` at 0). When there is no
+        // exact match at 0, `try_exact_shadow` returns None and we fall through
+        // to the fuzzy engine unchanged. Built only in default mode (see
+        // `exact_shadow` construction), so this never affects
+        // BESTMATCH/ENHANCEMATCH/POSIX/reverse.
+        if self.exact_shadow.is_some()
+            && let Some(m) = self.try_exact_shadow(text)
+        {
+            return Some(m);
         }
 
         // Ultra-fast path for simple exact literals: use memchr directly
@@ -3436,6 +3501,46 @@ impl FuzzyRegex {
     }
 
     /// Convert internal match result to public Match type.
+    /// Test-only accessor: the raw result of the exact-shadow fast path (`Some`
+    /// exactly when the shadow fires). Lets the consistency proptest check the
+    /// shadow in isolation, since `find()`'s general path has latent
+    /// find-vs-find_iter divergences on some shapes that predate this path.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn debug_exact_shadow<'t>(&self, text: &'t str) -> Option<Match<'t>> {
+        self.try_exact_shadow(text)
+    }
+
+    /// `find()`'s exact-first fast path (see the `exact_shadow` field and the
+    /// `find_dispatch` call site). Runs the exact-shadow NFA anchored at
+    /// position 0; a match there is the fuzzy pattern's leftmost, minimal-edit
+    /// result. Returns None when there is no shadow or no exact match at 0.
+    fn try_exact_shadow<'t>(&self, text: &'t str) -> Option<Match<'t>> {
+        let shadow = self.exact_shadow.as_ref()?;
+        let matcher = Matcher::new(
+            &shadow.nfa,
+            shadow.fuzzy_bridge.as_ref(),
+            shadow.capture_count,
+            MatcherConfig {
+                threshold: self.config.similarity_threshold,
+                max_threads: self.config.max_threads,
+                unanchored: false,
+                best_match: false,
+                enhance_match: false,
+                posix: false,
+                global: false,
+                multi_line: self.config.multi_line,
+                prefer_shortest: self.has_lazy,
+                unicode: self.config.match_flags.unicode,
+                greedy_first: self.config.greedy_first,
+            },
+            &self.handlers,
+        );
+        matcher
+            .find_at(text, 0)
+            .map(|m| self.convert_match(text, m))
+    }
+
     fn convert_match<'a>(&self, text: &'a str, result: MatchResult) -> Match<'a> {
         let is_partial = self.config.partial && result.end == text.len();
         Match::new_full(
@@ -3824,6 +3929,127 @@ fn collect_captures_recursive(
 /// For patterns like `hello world`, we can use `hello` as a prefilter.
 /// For patterns like `\w+@example`, we cannot use a prefilter because
 /// the pattern starts with a character class, not a literal.
+/// Whether the HIR contains any fuzzy construct (a limit, a fuzzy class, or a
+/// fuzzy backreference). Used to decide whether building an exact shadow is
+/// worthwhile — an already-exact pattern gets nothing from it.
+fn hir_has_fuzzy(hir: &Hir) -> bool {
+    match hir {
+        Hir::Literal { limits, .. } | Hir::Backreference { limits, .. } => limits.is_some(),
+        Hir::FuzzyClass { .. } => true,
+        Hir::Concat(v) | Hir::Alt(v) => v.iter().any(hir_has_fuzzy),
+        Hir::Repeat { expr, .. }
+        | Hir::Capture { expr, .. }
+        | Hir::Lookahead { expr, .. }
+        | Hir::Lookbehind { expr, .. }
+        | Hir::AtomicGroup { expr } => hir_has_fuzzy(expr),
+        _ => false,
+    }
+}
+
+/// Whether the HIR contains a nullable (min == 0) repetition wrapping a fuzzy
+/// construct — e.g. `(?:\w*){i<=1}`. The general fuzzy engine has latent bugs
+/// on these (it can miss the 0-edit match the exact form finds), so the exact
+/// shadow must NOT fire for such patterns; otherwise `find()` (correct via the
+/// shadow) would diverge from `find_iter()` (buggy), breaking the leftmost
+/// consistency invariant. All observed shadow/`find_iter` divergences were of
+/// this nullable-fuzzy shape; `+`-repeated (min >= 1) fuzzy is unaffected.
+fn hir_has_nullable_fuzzy(hir: &Hir) -> bool {
+    match hir {
+        Hir::Repeat { expr, min: 0, .. } => hir_has_fuzzy(expr) || hir_has_nullable_fuzzy(expr),
+        Hir::Repeat { expr, .. }
+        | Hir::Capture { expr, .. }
+        | Hir::Lookahead { expr, .. }
+        | Hir::Lookbehind { expr, .. }
+        | Hir::AtomicGroup { expr } => hir_has_nullable_fuzzy(expr),
+        Hir::Concat(v) | Hir::Alt(v) => v.iter().any(hir_has_nullable_fuzzy),
+        _ => false,
+    }
+}
+
+/// Build the exact (0-edit) shadow of a fuzzy HIR: every fuzzy construct becomes
+/// its exact counterpart (`FuzzyClass` -> `Class`, literal limits dropped).
+///
+/// Returns `None` when the pattern cannot be safely or usefully exact-shadowed:
+/// a required minimum edit count (the 0-edit match would be invalid), a cost
+/// constraint (a 0-edit match may violate it), or a backtracking-only /
+/// semantics-carrying construct (lookaround, backref, recursion, handler, named
+/// list, atomic group, `\K`) where the exact shadow would be neither simple nor
+/// clearly a speedup.
+fn strip_fuzzy_to_exact(hir: &Hir) -> Option<Hir> {
+    Some(match hir {
+        Hir::Empty => Hir::Empty,
+        Hir::Char(c) => Hir::Char(*c),
+        Hir::Class(c) => Hir::Class(c.clone()),
+        Hir::Anchor(a) => Hir::Anchor(*a),
+        Hir::Literal {
+            text,
+            min_edits,
+            cost_info,
+            ..
+        } => {
+            if min_edits.is_some_and(|m| m > 0) || cost_info.is_some() {
+                return None;
+            }
+            Hir::Literal {
+                text: text.clone(),
+                limits: None,
+                min_edits: None,
+                cost_info: None,
+                edit_chars: None,
+                fuzzy_group_id: None,
+            }
+        }
+        Hir::FuzzyClass {
+            class,
+            min_edits,
+            cost_info,
+            ..
+        } => {
+            if min_edits.is_some_and(|m| m > 0) || cost_info.is_some() {
+                return None;
+            }
+            Hir::Class(class.clone())
+        }
+        Hir::Concat(v) => Hir::Concat(
+            v.iter()
+                .map(strip_fuzzy_to_exact)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        // Alternations are unsafe: the exact-shadow matcher's `find_at` is
+        // leftmost-FIRST (it returns the first accepting branch), while `find()`
+        // is leftmost-LONGEST. For prefix-overlapping branches like `cat|cats`
+        // these differ (`cat` vs `cats`), so no exact shadow.
+        Hir::Alt(_) => return None,
+        Hir::Repeat {
+            expr,
+            min,
+            max,
+            greedy,
+        } => Hir::Repeat {
+            expr: Box::new(strip_fuzzy_to_exact(expr)?),
+            min: *min,
+            max: *max,
+            greedy: *greedy,
+        },
+        Hir::Capture { index, name, expr } => Hir::Capture {
+            index: *index,
+            name: name.clone(),
+            expr: Box::new(strip_fuzzy_to_exact(expr)?),
+        },
+        // Backtracking-only or semantics-changing constructs: no exact shadow.
+        Hir::Lookahead { .. }
+        | Hir::Lookbehind { .. }
+        | Hir::Backreference { .. }
+        | Hir::NamedList { .. }
+        | Hir::ResetMatchStart
+        | Hir::AtomicGroup { .. }
+        | Hir::RecursivePattern { .. }
+        | Hir::RecursiveGroup { .. }
+        | Hir::RecursiveNamedGroup { .. }
+        | Hir::Handler { .. } => return None,
+    })
+}
+
 fn create_prefilter_from_hir(hir: &Hir, case_insensitive: bool) -> Prefilter {
     // Extract the leading literal from the HIR
     let leading = extract_leading_literal(hir);

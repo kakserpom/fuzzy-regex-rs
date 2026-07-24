@@ -141,6 +141,55 @@ fn fuzzy_class_plus_strategy() -> impl Strategy<Value = String> {
         .prop_map(|(class, quant, limit)| format!("(?:{class}{quant}){limit}"))
 }
 
+/// Multi-piece fuzzy patterns (2-3 fuzzy/literal pieces) that exercise `find()`'s
+/// exact-shadow fast path (`try_exact_shadow` / `strip_fuzzy_to_exact`), which
+/// the single-class strategy above never reaches.
+///
+/// Each pattern is produced together with its EXACT twin (the same pieces with
+/// all fuzzy limits removed) so the test can use the exact pattern's own
+/// leftmost-longest `find()` — a fully-trusted, bug-free oracle — instead of the
+/// fuzzy `find_iter`, which has latent non-minimal divergences on these shapes.
+fn multi_fuzzy_pair_strategy() -> impl Strategy<Value = (String, String)> {
+    // Each piece is (fuzzy form, exact form).
+    let piece = prop_oneof![
+        (
+            prop::sample::select(FUZZY_CLASSES),
+            prop::sample::select(FUZZY_QUANTS),
+            prop::sample::select(FUZZY_LIMITS),
+        )
+            .prop_map(|(c, q, l)| (format!("(?:{c}{q}){l}"), format!("{c}{q}"))),
+        prop::sample::select(vec![" ", "-", ",", "@", "a", r"\d", "ab", "."])
+            .prop_map(|s| (s.to_string(), s.to_string())),
+        prop::sample::select(vec![
+            ("(?:foo){e<=1}", "foo"),
+            ("(?:ab){e<=2}", "ab"),
+            (r"(?:\d+){e<=1}", r"\d+"),
+        ])
+        .prop_map(|(f, e)| (f.to_string(), e.to_string())),
+    ];
+    (
+        any::<bool>(),
+        prop::collection::vec(piece, 2..=3),
+        any::<bool>(),
+    )
+        .prop_map(|(anchor_start, pieces, anchor_end)| {
+            let (mut fuzzy, mut exact) = (String::new(), String::new());
+            if anchor_start {
+                fuzzy.push('^');
+                exact.push('^');
+            }
+            for (f, e) in &pieces {
+                fuzzy.push_str(f);
+                exact.push_str(e);
+            }
+            if anchor_end {
+                fuzzy.push('$');
+                exact.push('$');
+            }
+            (fuzzy, exact)
+        })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(20000))]
 
@@ -163,6 +212,58 @@ proptest! {
             iter_m,
             "fuzzy-class-plus fast path disagrees with find_iter().next() for [{}] on {:?}",
             pattern,
+            text
+        );
+    }
+
+    /// The exact-shadow fast path must be correct WHENEVER IT FIRES (the only
+    /// code path it changes). When the shadow fires it claims a 0-edit match at
+    /// position 0, which — position 0 being the leftmost possible start and 0
+    /// being the minimal edit count — is exactly the fuzzy pattern's leftmost
+    /// result. We validate that against the EXACT twin's own leftmost-longest
+    /// `find()`: the shadow's span must equal the exact pattern's match, and
+    /// that match must start at 0. The exact twin has no fuzzy parts, so its
+    /// `find()` is the trusted oracle (unlike the fuzzy `find_iter`, which is
+    /// non-minimal on some of these shapes — a separate, pre-existing issue).
+    #[test]
+    fn exact_shadow_correct_when_it_fires(
+        (fuzzy, exact) in multi_fuzzy_pair_strategy(),
+        text in input_strategy(),
+    ) {
+        let Ok(fre) = FuzzyRegex::new(&fuzzy) else { return Ok(()); };
+        let Ok(ere) = FuzzyRegex::new(&exact) else { return Ok(()); };
+
+        let Some(shadow) = fre.debug_exact_shadow(&text) else { return Ok(()); };
+
+        // The shadow only ever reports a genuine 0-edit match.
+        prop_assert_eq!(
+            shadow.fuzzy_counts(),
+            (0, 0, 0),
+            "shadow reported non-zero edits for [{}] on {:?}",
+            fuzzy,
+            text
+        );
+
+        // The exact twin's leftmost-longest match is the trusted oracle: the
+        // shadow fired, so an exact match exists at 0, so the twin's leftmost
+        // match must be at 0 with the same span the shadow reports.
+        let exact_span = ere.find(&text).map(|m| (m.start(), m.end()));
+        prop_assert_eq!(
+            Some((shadow.start(), shadow.end())),
+            exact_span,
+            "shadow [{}] on {:?} disagrees with exact twin [{}]",
+            fuzzy,
+            text,
+            exact
+        );
+
+        // find() must return exactly the shadow's result (it is tried first).
+        let find_span = fre.find(&text).map(|m| (m.start(), m.end()));
+        prop_assert_eq!(
+            find_span,
+            Some((shadow.start(), shadow.end())),
+            "find() did not use the shadow result for [{}] on {:?}",
+            fuzzy,
             text
         );
     }
