@@ -5,16 +5,22 @@
 //! where `pattern` and `text` are percent-encoded (only %XX escapes are decoded,
 //! so the wire format never contains a raw TAB or NEWLINE).
 //!
-//! For each case it prints one line to stdout:
-//!     1  -> fuzzy-regex reports a match (find() is Some)
-//!     0  -> no match
-//!     E  -> pattern failed to compile
-//!     P  -> panic while matching (printed via catch_unwind)
+//! For each case it prints one line to stdout. The line is one of:
+//!     E                       -> pattern failed to compile
+//!     P                       -> panic while matching (via catch_unwind)
+//!     <find>|<iter>           -> results of find() and find_iter().next()
+//! where each of <find>/<iter> is either:
+//!     N                       -> no match
+//!     <start>,<end>,<su>,<in>,<de>   -> match byte span + fuzzy_counts (subs,ins,dels)
+//!
+//! Both find() and find_iter() are reported because they can legitimately (and,
+//! per open bug, buggily) disagree; the Python side compares each against the
+//! mrab oracle span so divergences can be attributed to the right entry point.
 //!
 //! Paired with `examples/diff_fuzz.py`, which uses Python's mrab `regex`
 //! module as the oracle.
 
-use fuzzy_regex::FuzzyRegex;
+use fuzzy_regex::{FuzzyRegex, Match};
 use std::io::{self, BufRead, Write};
 
 fn percent_decode(s: &str) -> String {
@@ -35,6 +41,17 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Encode a match as `start,end,subs,ins,dels` (byte span), or `N` if absent.
+fn encode(m: Option<Match<'_>>) -> String {
+    match m {
+        None => "N".to_string(),
+        Some(m) => {
+            let (su, in_, de) = m.fuzzy_counts();
+            format!("{},{},{},{},{}", m.start(), m.end(), su, in_, de)
+        }
+    }
 }
 
 fn main() {
@@ -61,17 +78,16 @@ fn main() {
 
         let result = std::panic::catch_unwind(|| match FuzzyRegex::new(&pat) {
             Ok(re) => {
-                if re.find(&text).is_some() {
-                    b'1'
-                } else {
-                    b'0'
-                }
+                let find = encode(re.find(&text));
+                let iter = encode(re.find_iter(&text).next());
+                format!("{find}|{iter}")
             }
-            Err(_) => b'E',
+            Err(_) => "E".to_string(),
         })
-        .unwrap_or(b'P');
+        .unwrap_or_else(|_| "P".to_string());
 
-        out.write_all(&[result, b'\n']).unwrap();
+        out.write_all(result.as_bytes()).unwrap();
+        out.write_all(b"\n").unwrap();
         out.flush().unwrap();
     }
 }

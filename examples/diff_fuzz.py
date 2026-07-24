@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """Differential fuzzer: fuzzy-regex (Rust) vs mrab-regex (Python `regex`) oracle.
 
-Generates random fuzzy patterns + texts, computes the existence-of-match answer
-with mrab-regex, then feeds the same cases to the Rust `diff_harness` example and
-flags any case where the two disagree.
+Generates random fuzzy patterns + texts, runs each through mrab-regex and the
+Rust `diff_harness` example, and compares BOTH existence-of-match and the match
+SPAN (byte offsets). The harness reports find() AND find_iter().next() per case.
 
 Usage:
     cargo build --release --example diff_harness
-    python3 examples/diff_fuzz.py [N_CASES] [SEED]
+    python3 examples/diff_fuzz.py [N_CASES] [SEED] [--spans]
 
-Only `is_match` (does any fuzzy match exist) is compared -- that existence
-question is semantically unambiguous across engines, unlike match spans.
+Categories reported:
+  * is_match divergences  -- mrab matched but rust didn't (or vice versa).
+    mrab ZERO-WIDTH whole-pattern deletions are counted separately (fuzzy-regex
+    deliberately declines those -- known policy, not a bug).
+  * find != find_iter     -- INTERNAL inconsistency: the two Rust entry points
+    return different spans for the same case. This is a real bug (they must
+    agree); see memory `latent-fuzzy-find-bugs`.
+  * find/iter vs mrab span -- engine-vs-mrab span differences. Many are the
+    documented min-edit-vs-leftmost alignment divergence (informational); use
+    --spans to list them and see which entry point tracks mrab.
 
-Divergences where mrab returns a ZERO-WIDTH match (it deletes the whole pattern
-within the deletion budget) are reported separately: fuzzy-regex deliberately
-declines zero-width fuzzy matches, so those are a known semantic difference, not
-a bug. Everything else is a real divergence worth investigating.
+Spans are compared in BYTES: mrab returns code-point indices, converted here via
+the UTF-8 length of the text prefix so they line up with Rust byte offsets.
 """
 import os
 import random
@@ -150,7 +156,14 @@ def rand_text(rng: random.Random, pat_literal: str) -> str:
 
 
 def mrab_search(pat: str, text: str):
-    """Return (matched: bool, zero_width: bool) or None if mrab can't compile."""
+    """mrab oracle result, or None if mrab can't compile/run.
+
+    Returns a dict:
+        matched: bool
+        zero_width: bool               (whole-pattern deletion)
+        span: (bstart, bend) | None    byte offsets, comparable to Rust
+        counts: (subs, ins, dels) | None
+    """
     try:
         re = regex.compile(pat)
     except Exception:
@@ -160,20 +173,39 @@ def mrab_search(pat: str, text: str):
     except Exception:
         return None
     if m is None:
-        return (False, False)
-    return (True, m.end() == m.start())
+        return {"matched": False, "zero_width": False, "span": None, "counts": None}
+    cs, ce = m.start(), m.end()
+    # mrab indices are code points; convert to bytes for Rust comparison.
+    bstart = len(text[:cs].encode("utf-8"))
+    bend = len(text[:ce].encode("utf-8"))
+    return {
+        "matched": True,
+        "zero_width": ce == cs,
+        "span": (bstart, bend),
+        "counts": tuple(m.fuzzy_counts),  # (subs, ins, dels)
+    }
+
+
+def parse_rust(tok: str):
+    """Parse one Rust result half (`N` or `s,e,su,i,d`) into None | (span, counts)."""
+    if tok == "N":
+        return None
+    s, e, su, i, d = (int(x) for x in tok.split(","))
+    return ((s, e), (su, i, d))
 
 
 def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 20000
-    seed = int(sys.argv[2]) if len(sys.argv) > 2 else 12345
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    show_spans = "--spans" in sys.argv[1:]
+    n = int(args[0]) if len(args) > 0 else 20000
+    seed = int(args[1]) if len(args) > 1 else 12345
     rng = random.Random(seed)
 
     if not os.path.exists(HARNESS):
         sys.exit(f"harness not built: {HARNESS}\n  cargo build --release --example diff_harness")
 
     cases = []          # (pat, text)
-    oracle = []         # (matched, zero_width)
+    oracle = []         # mrab dict
     for _ in range(n):
         pat = rand_pattern(rng)
         lit = "".join(ch for ch in pat if ch in ALPHABET)
@@ -190,43 +222,89 @@ def main():
     if len(rust_lines) != len(cases):
         print(f"WARN: harness returned {len(rust_lines)} lines for {len(cases)} cases")
 
-    real = []         # genuine divergences
+    exist_div = []    # is_match existence divergences (real)
     zerowidth = 0     # mrab zero-width match, rust declines (known policy)
     panics = []
     compile_errs = []
-    for (pat, text), (exp, zw), got in zip(cases, oracle, rust_lines):
+    find_ne_iter = []       # find() != find_iter().next() -- internal bug
+    both_matched = 0        # mrab matched AND rust find() matched
+    find_eq_mrab = 0        # find() span == mrab span
+    iter_eq_mrab = 0        # find_iter() span == mrab span
+    span_div = []           # find span != mrab span (informational)
+
+    for (pat, text), m, got in zip(cases, oracle, rust_lines):
         if got == "P":
             panics.append((pat, text))
-        elif got == "E":
+            continue
+        if got == "E":
             compile_errs.append((pat, text))
-        else:
-            rust = got == "1"
-            if rust != exp:
-                if exp and not rust and zw:
-                    zerowidth += 1
-                else:
-                    real.append((pat, text, exp, rust))
+            continue
+        find_tok, iter_tok = got.split("|", 1)
+        find = parse_rust(find_tok)
+        it = parse_rust(iter_tok)
+        find_span = find[0] if find else None
+        iter_span = it[0] if it else None
+
+        # Internal consistency: find() must equal find_iter().next() (span+counts).
+        if find != it:
+            find_ne_iter.append((pat, text, find, it))
+
+        # Existence vs mrab.
+        rust_matched = find is not None
+        if rust_matched != m["matched"]:
+            if m["matched"] and not rust_matched and m["zero_width"]:
+                zerowidth += 1
+            else:
+                exist_div.append((pat, text, m["matched"], rust_matched))
+            continue
+
+        # Both agree on existence; if both matched, compare spans to mrab.
+        if m["matched"] and rust_matched:
+            both_matched += 1
+            if find_span == m["span"]:
+                find_eq_mrab += 1
+            if iter_span == m["span"]:
+                iter_eq_mrab += 1
+            if find_span != m["span"]:
+                span_div.append((pat, text, m["span"], find_span, iter_span))
+
+    def pctf(x, tot):
+        return f"{x} ({100.0 * x / tot:.1f}%)" if tot else str(x)
 
     print(f"cases compared: {len(cases)}  (seed={seed})")
-    print(f"  REAL divergences:  {len(real)}")
-    print(f"  zero-width policy: {zerowidth}  (mrab deletes whole pattern; expected)")
-    print(f"  rust panics:       {len(panics)}")
-    print(f"  rust compile-errs (mrab accepted): {len(compile_errs)}")
+    print(f"  rust panics:                    {len(panics)}")
+    print(f"  is_match divergences (real):    {len(exist_div)}")
+    print(f"  zero-width policy (expected):   {zerowidth}")
+    print(f"  compile divergences:            {len(compile_errs)}")
+    print(f"  find() != find_iter() (BUG):    {len(find_ne_iter)}")
+    print(f"  both matched (span comparable):  {both_matched}")
+    print(f"    find()      span == mrab:      {pctf(find_eq_mrab, both_matched)}")
+    print(f"    find_iter() span == mrab:      {pctf(iter_eq_mrab, both_matched)}")
+    print(f"    find()      span != mrab:      {len(span_div)}")
 
-    def show(title, rows, fmt):
+    def show(title, rows, fmt, limit=30):
         if not rows:
             return
-        print(f"\n=== {title} (showing up to 30) ===")
-        for row in rows[:30]:
+        print(f"\n=== {title} (showing up to {limit}) ===")
+        for row in rows[:limit]:
             print(fmt(row))
 
     show("PANICS", panics, lambda r: f"  pat={r[0]!r:34} text={r[1]!r}")
-    show("REAL DIVERGENCES", real,
+    show("is_match DIVERGENCES", exist_div,
          lambda r: f"  pat={r[0]!r:34} text={r[1]!r:22} mrab={r[2]} rust={r[3]}")
+    show("find() != find_iter() [BUG]", find_ne_iter,
+         lambda r: f"  pat={r[0]!r:32} text={r[1]!r:20} find={r[2]} iter={r[3]}")
     show("COMPILE DIVERGENCES", compile_errs,
          lambda r: f"  pat={r[0]!r:34} text={r[1]!r}")
+    if show_spans:
+        show("SPAN vs mrab (find != mrab)", span_div,
+             lambda r: f"  pat={r[0]!r:30} text={r[1]!r:18} mrab={r[2]} find={r[3]} iter={r[4]}",
+             limit=60)
 
-    sys.exit(1 if (panics or real) else 0)
+    # Panics and existence divergences are hard bugs. find!=iter is also a bug but
+    # is currently known/open, so it is reported without failing the run (flip to
+    # include `find_ne_iter` once fixed).
+    sys.exit(1 if (panics or exist_div) else 0)
 
 
 if __name__ == "__main__":
