@@ -375,12 +375,13 @@ impl FuzzyRegex {
         let has_lookahead = nfa.has_lookahead();
         let mut dfa =
             if !has_lazy && !has_reset_match_start && !has_lookahead && !nfa.has_word_boundary() {
-                Dfa::from_nfa(
+                Dfa::from_nfa_with_literals(
                     &nfa,
                     fuzzy_bridge.as_ref(),
                     config.case_insensitive,
                     config.multi_line,
                     config.similarity_threshold,
+                    &literals,
                 )
             } else {
                 None
@@ -1310,9 +1311,7 @@ impl FuzzyRegex {
             // Return the leftmost candidate that satisfies word boundaries.
             // No need to track prev_end — we return on the first match.
             for (start, end, edits, similarity) in candidates {
-                if Self::is_word_boundary_at(text, start)
-                    && Self::is_word_boundary_at(text, end)
-                {
+                if Self::is_word_boundary_at(text, start) && Self::is_word_boundary_at(text, end) {
                     return Some(self.make_match(text, start, end, similarity, edits));
                 }
             }

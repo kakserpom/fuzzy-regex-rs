@@ -206,6 +206,12 @@ pub struct Dfa {
     /// Fast path: literal for simple literal matching
     #[allow(dead_code)]
     fast_path_literal: Option<String>,
+    /// A required literal substring that must appear in every match.
+    /// Used for quick rejection: if this literal doesn't appear in the text,
+    /// no match is possible (O(n) memmem check instead of O(n²) scan).
+    /// Extracted from the pattern's literal segments (e.g. "b" in `a*b`,
+    /// "xyz" in `[a-z]+xyz`).
+    required_literal: Option<String>,
 }
 
 /// Result of a DFA match.
@@ -233,6 +239,28 @@ impl Dfa {
         case_insensitive: bool,
         multi_line: bool,
         _similarity_threshold: f32,
+    ) -> Option<Self> {
+        Self::from_nfa_with_literals(
+            nfa,
+            bridge,
+            case_insensitive,
+            multi_line,
+            _similarity_threshold,
+            &[],
+        )
+    }
+
+    /// Like `from_nfa` but also accepts the extracted `LiteralPattern` texts
+    /// from the compiler. The first non-empty, non-fuzzy literal is stored as
+    /// `required_literal` for quick rejection (O(n) memmem instead of O(n²)
+    /// when the literal is absent from the text).
+    pub fn from_nfa_with_literals(
+        nfa: &Nfa,
+        bridge: Option<&FuzzyBridge>,
+        case_insensitive: bool,
+        multi_line: bool,
+        _similarity_threshold: f32,
+        pattern_literals: &[crate::ir::LiteralPattern],
     ) -> Option<Self> {
         // Check if NFA is DFA-compatible
         if !Self::is_dfa_compatible(nfa, bridge) {
@@ -297,6 +325,33 @@ impl Dfa {
                 None
             };
 
+        // Extract the required literal: a single non-empty, exact (no fuzzy
+        // limits) literal that every match must contain.  This is only valid
+        // when there is exactly one such literal — alternations like
+        // `cat|dog|bird` produce three literals, none of which is universally
+        // required, so we must skip the optimisation to avoid false negatives.
+        let exact_literals: Vec<&crate::ir::LiteralPattern> = pattern_literals
+            .iter()
+            .filter(|l| !l.text.is_empty() && l.limits.is_none() && l.min_edits.is_none())
+            .collect();
+        let req_lit_idx = if exact_literals.len() == 1 {
+            pattern_literals
+                .iter()
+                .position(|l| !l.text.is_empty() && l.limits.is_none() && l.min_edits.is_none())
+        } else {
+            None
+        };
+        let required_literal = if let Some(idx) = req_lit_idx {
+            let l = &pattern_literals[idx];
+            Some(if case_insensitive {
+                l.text.to_lowercase()
+            } else {
+                l.text.clone()
+            })
+        } else {
+            None
+        };
+
         let mut dfa = Dfa {
             nfa: nfa.clone(),
             literal_texts,
@@ -313,11 +368,26 @@ impl Dfa {
             fast_path_char_class_plus,
             fast_path_char_class_type,
             fast_path_literal,
+            required_literal,
         };
 
         // Compute epsilon closure of start state
         let mut start_set = NfaStateSet::new();
         dfa.epsilon_closure(nfa.start, &mut start_set);
+
+        // If the required literal is set, verify it is truly required by
+        // checking whether there is a path from start to accept in the NFA
+        // that avoids the FuzzyLiteral state(s) with the literal's
+        // pattern_index.  If such a path exists, the literal is optional
+        // (e.g. inside `?` or `*`) and the quick-rejection would cause false
+        // negatives, so we disable it.
+        if dfa.required_literal.is_some() {
+            if let Some(idx) = req_lit_idx {
+                if !Self::is_literal_required(nfa, idx) {
+                    dfa.required_literal = None;
+                }
+            }
+        }
 
         // Check for start anchor
         dfa.anchored_start = start_set.iter().any(|s| {
@@ -346,6 +416,80 @@ impl Dfa {
         dfa.start = start_id;
 
         Some(dfa)
+    }
+
+    /// Check whether the literal at `pattern_index` is truly required for a
+    /// match: i.e., every path from start to `Accept` in the NFA goes through
+    /// at least one `FuzzyLiteral` state with that `pattern_index`.
+    ///
+    /// If a path exists that avoids those states, the literal is optional
+    /// (e.g. it lives inside a `?` or `*` quantifier) and the quick-reject
+    /// optimisation must be disabled to avoid false negatives.
+    fn is_literal_required(nfa: &Nfa, pattern_index: usize) -> bool {
+        use std::collections::HashSet;
+
+        // Collect all FuzzyLiteral state IDs with the target pattern_index.
+        let blocked: HashSet<usize> = nfa
+            .states
+            .iter()
+            .enumerate()
+            .filter_map(|(id, state)| {
+                if let State::FuzzyLiteral {
+                    pattern_index: pi, ..
+                } = state
+                {
+                    (*pi == pattern_index).then_some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // BFS from start to Accept, avoiding blocked states.
+        let mut visited: HashSet<usize> = HashSet::new();
+        let mut queue: Vec<usize> = vec![nfa.start];
+        visited.insert(nfa.start);
+
+        while let Some(sid) = queue.pop() {
+            if matches!(nfa.states[sid], State::Accept) {
+                return false; // Found a path to Accept without the literal.
+            }
+
+            // Collect outgoing transition targets from this state.
+            let targets: Vec<usize> = match &nfa.states[sid] {
+                State::Accept => vec![],
+                State::Epsilon { targets } => targets.iter().copied().collect(),
+                State::Split { branches, .. } => branches.iter().copied().collect(),
+                State::Char { next, .. }
+                | State::FuzzyChar { next, .. }
+                | State::FuzzyLiteral { next, .. }
+                | State::CaptureStart { next, .. }
+                | State::CaptureEnd { next, .. }
+                | State::Anchor { next, .. }
+                | State::Lookahead { next, .. }
+                | State::LookaheadLiteral { next, .. }
+                | State::Lookbehind { next, .. }
+                | State::LookbehindLiteral { next, .. }
+                | State::Backreference { next, .. }
+                | State::ResetMatchStart { next, .. }
+                | State::AtomicGroup { next, .. }
+                | State::RecursivePattern { next, .. }
+                | State::RecursiveGroup { next, .. }
+                | State::RecursiveNamedGroup { next, .. }
+                | State::Handler { next, .. } => vec![*next],
+            };
+
+            for target in targets {
+                if blocked.contains(&target) {
+                    continue; // Skip the blocked FuzzyLiteral state.
+                }
+                if visited.insert(target) {
+                    queue.push(target);
+                }
+            }
+        }
+
+        true // No path to Accept without the literal → it is required.
     }
 
     /// Extract a literal prefix from the NFA for prefiltering.
@@ -1300,6 +1444,19 @@ impl Dfa {
 
     /// Find the first match in the text.
     pub fn find(&mut self, text: &str) -> Option<DfaMatch> {
+        // Quick rejection: if the pattern has a required literal that must
+        // appear in every match, check via O(n) memmem. If it's absent, no
+        // match is possible — avoids O(n²) scanning in the no-match case
+        // (e.g. `a*b` on 50k 'a's, `[a-z]+xyz` on 50k 'a's).
+        if let Some(ref lit) = self.required_literal {
+            // For case-insensitive patterns, memmem is case-sensitive so
+            // we can't use it for quick rejection (would cause false negatives
+            // on mixed-case text).  Fall through to the DFA instead.
+            if !self.case_insensitive && memmem::find(text.as_bytes(), lit.as_bytes()).is_none() {
+                return None;
+            }
+        }
+
         // Fast path: character class plus patterns (\d+, \w+, \s+, [a-z]+)
         // Only use when similarity_threshold >= 1.0 (exact matching)
         if self.fast_path_char_class_plus {
@@ -1925,6 +2082,13 @@ impl Dfa {
 
     /// Find all non-overlapping matches.
     pub fn find_all(&mut self, text: &str) -> Vec<DfaMatch> {
+        // Quick rejection: if the required literal is absent, no matches.
+        if let Some(ref lit) = self.required_literal {
+            if !self.case_insensitive && memmem::find(text.as_bytes(), lit.as_bytes()).is_none() {
+                return Vec::new();
+            }
+        }
+
         let mut matches = Vec::new();
         let mut pos = 0;
 
