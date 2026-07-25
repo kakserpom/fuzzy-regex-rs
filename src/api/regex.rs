@@ -1279,8 +1279,15 @@ impl FuzzyRegex {
         // simulation tries every text position with a large edit budget,
         // causing O(n²) or worse for unbounded `{e}`.
         //
-        // Uses `search_all` and mirrors `find_all_word_bounded_literal_fast`
-        // so that `find` == `find_iter().next()`.
+        // For short patterns (≤ 32 chars), use `search_all` which finds all
+        // overlapping matches and correctly filters by word boundaries.
+        // For longer patterns, use `search_non_overlapping` with a sliding
+        // window to avoid the O(n·m²) DP cost of `find_all` when the edit
+        // budget is large (e.g. unbounded `{e}` on a 100-char pattern).
+        // The non-overlapping search's pending-match mechanism with
+        // `should_reset` + `commit_threshold` does O(1) DP calls per match.
+        // The sliding window advances to the next word boundary when a match
+        // is rejected, keeping the total cost O(n) even for degenerate text.
         if self.has_literal_word_boundary
             && self.literals.len() == 1
             && let Some(literal) = self.literals.first()
@@ -1288,31 +1295,71 @@ impl FuzzyRegex {
             && let Some(ref bridge) = self.fuzzy_bridge
         {
             let threshold = self.config.similarity_threshold;
-            let cached = bridge.search_all(text, threshold);
-            // Collect and sort by start to match
-            // the ordering used by find_all_word_bounded_literal_fast.
-            let mut candidates: Vec<(usize, usize, crate::engine::EditCounts, f32)> = Vec::new();
-            for ((pattern_idx, start), results) in cached.iter() {
-                if pattern_idx != 0 {
-                    continue;
+            let pattern_len = literal.text.chars().count();
+
+            if pattern_len <= 32 {
+                // Short pattern: search_all is fast and correct
+                let cached = bridge.search_all(text, threshold);
+                let mut candidates: Vec<(usize, usize, crate::engine::EditCounts, f32)> =
+                    Vec::new();
+                for ((pattern_idx, start), results) in cached.iter() {
+                    if pattern_idx != 0 {
+                        continue;
+                    }
+                    for result in results {
+                        candidates.push((
+                            start,
+                            result.end,
+                            crate::engine::EditCounts::from_fuzzy_result(result),
+                            result.similarity,
+                        ));
+                    }
                 }
-                for result in results {
-                    candidates.push((
-                        start,
-                        result.end,
-                        crate::engine::EditCounts::from_fuzzy_result(result),
-                        result.similarity,
-                    ));
+                candidates.sort_by_key(|(start, _, _, _)| *start);
+                for (start, end, edits, similarity) in candidates {
+                    if Self::is_word_boundary_at(text, start)
+                        && Self::is_word_boundary_at(text, end)
+                    {
+                        return Some(self.make_match(text, start, end, similarity, edits));
+                    }
                 }
+                return None;
             }
-            // Sort by start only, matching find_all_word_bounded_literal_fast
-            // ordering so find == find_iter().next().
-            candidates.sort_by_key(|(start, _, _, _)| *start);
-            // Return the leftmost candidate that satisfies word boundaries.
-            // No need to track prev_end — we return on the first match.
-            for (start, end, edits, similarity) in candidates {
-                if Self::is_word_boundary_at(text, start) && Self::is_word_boundary_at(text, end) {
-                    return Some(self.make_match(text, start, end, similarity, edits));
+
+            // Long pattern: sliding window with search_non_overlapping
+            let mut offset = 0usize;
+            while offset < text.len() {
+                let search_text = &text[offset..];
+                let matches = bridge.search_non_overlapping_n(
+                    search_text, threshold, 0, false, 1,
+                );
+                if let Some(m) = matches.into_iter().next() {
+                    let abs_start = offset + m.start;
+                    let abs_end = offset + m.end;
+                    if Self::is_word_boundary_at(text, abs_start)
+                        && Self::is_word_boundary_at(text, abs_end)
+                    {
+                        return Some(self.make_match(
+                            text,
+                            abs_start,
+                            abs_end,
+                            m.similarity,
+                            crate::engine::EditCounts {
+                                insertions: m.insertions,
+                                deletions: m.deletions,
+                                substitutions: m.substitutions,
+                                swaps: m.swaps,
+                            },
+                        ));
+                    }
+                    // Not at word boundaries — advance to the next word
+                    // boundary past the match's start, or at least by 1.
+                    let next_wb = (abs_start + 1..=text.len())
+                        .find(|&p| Self::is_word_boundary_at(text, p))
+                        .unwrap_or(text.len() + 1);
+                    offset = next_wb.max(abs_start + 1);
+                } else {
+                    break;
                 }
             }
             return None;
@@ -2269,51 +2316,104 @@ impl FuzzyRegex {
 
         let threshold = self.config.similarity_threshold;
 
-        // Find all literal positions using the bridge
-        let cached = bridge.search_all(text, threshold);
+        // For short patterns (≤ 32 chars), use `search_all` which finds all
+        // overlapping matches and correctly filters by word boundaries.
+        // For longer patterns, use `search_non_overlapping` with a sliding
+        // window to avoid the O(n·m²) DP cost of `find_all`.
+        let pattern_len = self
+            .literals
+            .first()
+            .map(|l| l.text.chars().count())
+            .unwrap_or(0);
 
-        // Collect matches that are at word boundaries
-        let mut matches = Vec::new();
-        let mut prev_end = 0;
-
-        // Get all literal match positions sorted by start, keeping the fuzzy
-        // edit counts and similarity so the returned Match carries correct
-        // metadata (fuzzy_counts / similarity), not defaults.
-        let mut literal_positions: Vec<(usize, usize, crate::engine::EditCounts, f32)> = Vec::new();
-        for ((pattern_idx, start), results) in cached.iter() {
-            if pattern_idx != 0 {
-                continue;
+        if pattern_len <= 32 {
+            // Short pattern: search_all is fast and correct
+            let cached = bridge.search_all(text, threshold);
+            let mut matches = Vec::new();
+            let mut prev_end = 0;
+            let mut literal_positions: Vec<
+                (usize, usize, crate::engine::EditCounts, f32),
+            > = Vec::new();
+            for ((pattern_idx, start), results) in cached.iter() {
+                if pattern_idx != 0 {
+                    continue;
+                }
+                for result in results {
+                    literal_positions.push((
+                        start,
+                        result.end,
+                        crate::engine::EditCounts::from_fuzzy_result(result),
+                        result.similarity,
+                    ));
+                }
             }
-            for result in results {
-                literal_positions.push((
-                    start,
-                    result.end,
-                    crate::engine::EditCounts::from_fuzzy_result(result),
-                    result.similarity,
-                ));
+            literal_positions.sort_by_key(|(start, _, _, _)| *start);
+            for (literal_start, literal_end, edits, similarity) in literal_positions {
+                if literal_start < prev_end {
+                    continue;
+                }
+                if Self::is_word_boundary_at(text, literal_start)
+                    && Self::is_word_boundary_at(text, literal_end)
+                {
+                    matches.push(Match::new(
+                        text,
+                        literal_start,
+                        literal_end,
+                        similarity,
+                        edits,
+                    ));
+                    prev_end = literal_end;
+                }
             }
+            return matches;
         }
-        literal_positions.sort_by_key(|(start, _, _, _)| *start);
 
-        // Filter to word-bounded matches
-        for (literal_start, literal_end, edits, similarity) in literal_positions {
-            // Skip overlapping matches
-            if literal_start < prev_end {
-                continue;
-            }
+        // Long pattern: sliding window with search_non_overlapping
+        let mut matches = Vec::new();
+        let mut offset = 0usize;
 
-            // Check word boundaries
-            if Self::is_word_boundary_at(text, literal_start)
-                && Self::is_word_boundary_at(text, literal_end)
-            {
-                matches.push(Match::new(
-                    text,
-                    literal_start,
-                    literal_end,
-                    similarity,
-                    edits,
-                ));
-                prev_end = literal_end;
+        while offset < text.len() {
+            let search_text = &text[offset..];
+            let found = bridge.search_non_overlapping_n(
+                search_text, threshold, 0, false, 1,
+            );
+
+            if let Some(m) = found.into_iter().next() {
+                let abs_start = offset + m.start;
+                let abs_end = offset + m.end;
+
+                // Skip matches that overlap with a previously accepted match
+                if abs_start < matches.last().map_or(0, |m: &Match| m.end()) {
+                    offset = abs_start + 1;
+                    continue;
+                }
+
+                if Self::is_word_boundary_at(text, abs_start)
+                    && Self::is_word_boundary_at(text, abs_end)
+                {
+                    matches.push(Match::new(
+                        text,
+                        abs_start,
+                        abs_end,
+                        m.similarity,
+                        crate::engine::EditCounts {
+                            insertions: m.insertions,
+                            deletions: m.deletions,
+                            substitutions: m.substitutions,
+                            swaps: m.swaps,
+                        },
+                    ));
+                    offset = abs_end;
+                } else {
+                    // Not at word boundaries — advance to the next word
+                    // boundary past the match's start, or at least by 1.
+                    let next_wb = (abs_start + 1..=text.len())
+                        .find(|&p| Self::is_word_boundary_at(text, p))
+                        .unwrap_or(text.len() + 1);
+                    offset = next_wb.max(abs_start + 1);
+                }
+            } else {
+                break;
             }
         }
 

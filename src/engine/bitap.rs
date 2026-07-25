@@ -70,8 +70,16 @@ fn decode_utf8_char_fast(bytes: &[u8], pos: usize) -> (char, usize) {
     }
 }
 
-/// Maximum pattern length supported by Bitap (using u64 bitmasks).
-pub const MAX_PATTERN_LEN: usize = 64;
+/// Word type for Bitap state vectors and masks.  Using u128 allows patterns
+/// up to 128 characters; for patterns ≤ 64 the upper bits are all 1s (no
+/// match) and the lower 64 bits behave exactly as the previous u64 code.
+type Word = u128;
+
+/// Maximum pattern length supported by Bitap (using 128-bit word bitmasks).
+pub const MAX_PATTERN_LEN: usize = 128;
+/// Maximum pattern length that can use the u64 fast paths (fixed-size
+/// arrays, SIMD).  Patterns longer than this use the generic Vec<Word> path.
+const FAST_PATH_MAX_LEN: usize = 64;
 
 /// Bitap matcher for fuzzy string matching.
 #[derive(Debug)]
@@ -83,21 +91,21 @@ pub struct BitapMatcher {
     case_insensitive: bool,
     /// Character masks: for each character, a bitmask where bit i is 0
     /// if pattern[i] == character.
-    char_masks: FxHashMap<char, u64>,
+    char_masks: FxHashMap<char, Word>,
     /// ASCII byte masks for O(1) lookup (all 1s = no match).
-    byte_masks: [u64; 128],
+    byte_masks: [Word; 128],
     /// Boyer-Moore style skip table: how far to skip when a byte is NOT in pattern.
     /// For bytes in pattern: 0 (can't skip). For bytes not in pattern: `pattern_len` - `max_edits`.
     skip_table: [u8; 256],
     /// Whether the pattern is pure ASCII.
     is_ascii: bool,
     /// Mask with 1 in the position of the last pattern character.
-    accept_mask: u64,
+    accept_mask: Word,
     /// Unicode block masks for O(1) lookup of non-ASCII characters.
     /// If all pattern chars are in the same 256-codepoint block, we use this instead of `HashMap`.
     /// `block_base` is the start codepoint (e.g., 0x0400 for Cyrillic).
     unicode_block_base: u32,
-    unicode_block_masks: Option<Box<[u64; 256]>>,
+    unicode_block_masks: Option<Box<[Word; 256]>>,
     /// When true, a reported match's end is refined to the minimum-edit end
     /// (ties broken by shortest span) instead of the default longest-within-budget
     /// end. Set from `MatchEndPolicy::MinEdit`. Default is false.
@@ -126,31 +134,31 @@ impl BitapMatcher {
         // For each character in the alphabet, create a bitmask where bit i is 0
         // if pattern[i] matches the character, 1 otherwise.
         // We use the "shift-or" variant where 0 means match.
-        let mut char_masks: FxHashMap<char, u64> = FxHashMap::default();
-        let mut byte_masks = [!0u64; 128]; // All 1s = no match
+        let mut char_masks: FxHashMap<char, Word> = FxHashMap::default();
+        let mut byte_masks = [!0u128; 128]; // All 1s = no match
 
         for (i, &ch) in pattern_chars.iter().enumerate() {
             // Set bit i to 0 for this character (start with all 1s, clear bit i)
-            let mask = char_masks.entry(ch).or_insert(!0u64);
-            *mask &= !(1u64 << i);
+            let mask = char_masks.entry(ch).or_insert(!0u128);
+            *mask &= !(1u128 << i);
 
             // Also update byte_masks for ASCII characters
             if ch.is_ascii() {
                 let byte = ch as u8;
-                byte_masks[byte as usize] &= !(1u64 << i);
+                byte_masks[byte as usize] &= !(1u128 << i);
                 // Handle case insensitivity for ASCII
                 if case_insensitive {
                     if byte.is_ascii_lowercase() {
-                        byte_masks[byte.to_ascii_uppercase() as usize] &= !(1u64 << i);
+                        byte_masks[byte.to_ascii_uppercase() as usize] &= !(1u128 << i);
                     } else if byte.is_ascii_uppercase() {
-                        byte_masks[byte.to_ascii_lowercase() as usize] &= !(1u64 << i);
+                        byte_masks[byte.to_ascii_lowercase() as usize] &= !(1u128 << i);
                     }
                 }
             }
         }
 
         // Accept mask: 1 in position (pattern_len - 1)
-        let accept_mask = 1u64 << (pattern_len - 1);
+        let accept_mask = 1u128 << (pattern_len - 1);
 
         // Build Boyer-Moore style skip table
         // If a byte is not in the pattern, we can skip ahead when we see it
@@ -290,8 +298,8 @@ impl BitapMatcher {
     /// Returns (`block_base`, `Some(masks)`) if all non-ASCII chars are in a single 256-codepoint block.
     fn build_unicode_block_masks(
         pattern_chars: &[char],
-        char_masks: &FxHashMap<char, u64>,
-    ) -> (u32, Option<Box<[u64; 256]>>) {
+        char_masks: &FxHashMap<char, Word>,
+    ) -> (u32, Option<Box<[Word; 256]>>) {
         // Find non-ASCII characters
         let non_ascii: Vec<char> = pattern_chars
             .iter()
@@ -317,7 +325,7 @@ impl BitapMatcher {
         }
 
         // Build the lookup table
-        let mut masks = Box::new([!0u64; 256]);
+        let mut masks = Box::new([!0u128; 256]);
         for (&ch, &mask) in char_masks {
             let cp = ch as u32;
             if (cp & !0xFF) == block_base {
@@ -331,7 +339,7 @@ impl BitapMatcher {
 
     /// Get character mask for a character (all 1s if not in pattern).
     #[inline(always)]
-    fn get_mask(&self, ch: char) -> u64 {
+    fn get_mask(&self, ch: char) -> Word {
         let cp = ch as u32;
 
         // Fast path: check Unicode block lookup table
@@ -342,13 +350,13 @@ impl BitapMatcher {
         }
 
         // Fallback to HashMap
-        *self.char_masks.get(&ch).unwrap_or(&!0u64)
+        *self.char_masks.get(&ch).unwrap_or(&!0u128)
     }
 
     /// Get mask directly from 2-byte UTF-8 sequence (avoids char decode).
     /// Returns (mask, 2) if successful, or falls back to `decode_utf8_char_fast`.
     #[inline(always)]
-    fn get_mask_2byte(&self, b0: u8, b1: u8) -> u64 {
+    fn get_mask_2byte(&self, b0: u8, b1: u8) -> Word {
         if let Some(ref masks) = self.unicode_block_masks {
             // Compute codepoint index directly from UTF-8 bytes
             // For 2-byte UTF-8: codepoint = ((b0 & 0x1F) << 6) | (b1 & 0x3F)
@@ -363,7 +371,7 @@ impl BitapMatcher {
         // Fallback: decode to char and lookup
         let codepoint = ((u32::from(b0) & 0x1F) << 6) | (u32::from(b1) & 0x3F);
         let ch = unsafe { char::from_u32_unchecked(codepoint) };
-        *self.char_masks.get(&ch).unwrap_or(&!0u64)
+        *self.char_masks.get(&ch).unwrap_or(&!0u128)
     }
 
     /// Get Boyer-Moore skip distance for a byte.
@@ -425,11 +433,11 @@ impl BitapMatcher {
         // Myers' algorithm using our precomputed masks
         // Note: Our masks have bit=0 for match, which is the inverse of typical Myers
         // We adapt by inverting the eq mask
-        let mut pv = !0u64; // positive vertical delta (all 1s)
-        let mut mv = 0u64; // negative vertical delta (all 0s)
+        let mut pv = !0u128; // positive vertical delta (all 1s)
+        let mut mv = 0u128; // negative vertical delta (all 0s)
         let mut score = m as u8;
 
-        let mask = 1u64 << (m - 1);
+        let mask = 1u128 << (m - 1);
 
         for &text_char in text_chars {
             // Get pattern equality mask (bit i is 1 if pattern[i] matches text_char)
@@ -508,6 +516,10 @@ impl BitapMatcher {
     #[must_use]
     pub fn find_all(&self, text: &str, threshold: f32) -> Vec<DamLevMatch> {
         let max_edits = self.limits.max_edits as usize;
+        // Cap all loops at pattern_len: matches with more edits than the
+        // pattern has characters have ≤ 50% similarity and are never useful.
+        // This turns O(n·max_edits) into O(n·pattern_len) for unbounded `{e}`.
+        let effective_max = max_edits.min(self.pattern_len);
         let text_chars: Vec<(usize, char)> = text.char_indices().collect();
 
         if text_chars.is_empty() {
@@ -519,13 +531,13 @@ impl BitapMatcher {
         // State vectors: R[d] tracks matching state with exactly d errors
         // Bit i is 0 if we've matched pattern[0..=i] with d errors
         // Use two buffers and swap to avoid allocation per character
-        let mut r: Vec<u64> = vec![!0u64; max_edits + 1];
-        let mut old_r: Vec<u64> = vec![!0u64; max_edits + 1];
+        let mut r: Vec<u128> = vec![!0u128; effective_max + 1];
+        let mut old_r: Vec<u128> = vec![!0u128; effective_max + 1];
 
         // Initialize: we can delete up to k characters from the start of pattern
         // R[d] starts with first d bits as 0 (matched d chars via deletion)
         // Left shift advances pattern position (bit i → bit i+1)
-        for d in 1..=max_edits {
+        for d in 1..=effective_max {
             r[d] = r[d - 1] << 1;
         }
 
@@ -545,7 +557,7 @@ impl BitapMatcher {
             r[0] = (old_r[0] << 1) | char_mask;
 
             // Update R[d] for d > 0 (fuzzy matching)
-            for d in 1..=max_edits {
+            for d in 1..=effective_max {
                 // Can insert from R[d-1]: consume text char without advancing pattern
                 let insert = old_r[d - 1];
 
@@ -565,17 +577,15 @@ impl BitapMatcher {
             // Check for matches (bit pattern_len-1 is 0)
             let end_byte = text_chars.get(char_idx + 1).map_or(text.len(), |(b, _)| *b);
 
-            // Cap the match-checking loop at pattern_len: matches with more
-            // edits than the pattern has characters have near-zero similarity
-            // and are never useful as prefilters or for word-boundary filtering.
-            // The state vectors are still updated for all max_edits levels
-            // (above), so accuracy is preserved — we just skip the expensive
-            // compute_exact_edit_breakdown DP calls for high-error matches.
-            // This turns O(n·max_edits²) into O(n·pattern_len²) for unbounded
-            // `{e}` (max_edits=255).
-            let check_max = max_edits.min(self.pattern_len);
-            for d in 0..=check_max {
+            // Match-checking loop is capped at effective_max (= max_edits.min(pattern_len)).
+            for d in 0..=effective_max {
                 if (r[d] & self.accept_mask) == 0 {
+                    // Pre-filter: skip error levels where the best possible
+                    // similarity is below threshold.
+                    let sim_max = 1.0f32 - d as f32 / (self.pattern_len + d) as f32;
+                    if sim_max < threshold {
+                        continue;
+                    }
                     // Found a match with d edits
                     // Estimate start position (approximate)
                     let min_start_char = char_idx.saturating_sub(self.pattern_len + d);
@@ -585,9 +595,18 @@ impl BitapMatcher {
                     for start_char in min_start_char..=max_start_char.min(char_idx) {
                         let start_byte = text_chars.get(start_char).map_or(0, |(b, _)| *b);
 
+                        // Fast early-reject: compute bit-parallel Levenshtein
+                        // distance. If it exceeds d, the full Damerau DP
+                        // (which can only be ≤ Levenshtein) would also exceed
+                        // d, so skip the expensive DP entirely.
+                        let text_slice = &text.as_bytes()[start_byte..end_byte];
+                        if self.quick_reject(text_slice, d) {
+                            continue;
+                        }
+
                         // Compute exact edit breakdown using DP
                         let (insertions, deletions, substitutions, swaps) = self
-                            .compute_exact_edit_breakdown(&text.as_bytes()[start_byte..end_byte]);
+                            .compute_exact_edit_breakdown(text_slice);
 
                         // Use actual edit count from DP, verify it matches Bitap state
                         let total_edits = insertions + deletions + substitutions + swaps;
@@ -625,13 +644,13 @@ impl BitapMatcher {
         // need extra propagation (via deletion) to reach the accept position.
         if text_chars.len() < self.pattern_len {
             let chars_short = self.pattern_len - text_chars.len();
-            for _ in 0..chars_short.min(max_edits) {
+            for _ in 0..chars_short.min(effective_max) {
                 std::mem::swap(&mut r, &mut old_r);
 
                 // Apply deletion propagation: advance pattern position without consuming text.
                 // From d-1 errors at position p, we can delete pattern[p] to reach d errors at p+1.
                 r[0] = old_r[0]; // Can't advance without consuming text or adding error
-                for d in 1..=max_edits {
+                for d in 1..=effective_max {
                     // Deletion: skip pattern char without consuming text
                     let delete = old_r[d - 1] << 1;
                     // Keep existing state if already matched
@@ -639,9 +658,14 @@ impl BitapMatcher {
                 }
 
                 // Check for matches after propagation
-                let check_max = max_edits.min(self.pattern_len);
-                for d in 0..=check_max {
+                for d in 0..=effective_max {
                     if (r[d] & self.accept_mask) == 0 {
+                        // Pre-filter: skip error levels where the best possible
+                        // similarity is below threshold.
+                        let sim_max = 1.0f32 - d as f32 / (self.pattern_len + d) as f32;
+                        if sim_max < threshold {
+                            continue;
+                        }
                         let end_byte = text.len();
                         let min_start_char = text_chars
                             .len()
@@ -651,13 +675,18 @@ impl BitapMatcher {
                         {
                             let start_byte = text_chars.get(start_char).map_or(0, |(b, _)| *b);
 
+                            let text_slice = &text.as_bytes()[start_byte..end_byte];
+
+                            // Fast early-reject via Levenshtein-only Bitap
+                            if self.quick_reject(text_slice, max_edits) {
+                                continue;
+                            }
+
                             let (insertions, deletions, substitutions, swaps) = self
-                                .compute_exact_edit_breakdown(
-                                    &text.as_bytes()[start_byte..end_byte],
-                                );
+                                .compute_exact_edit_breakdown(text_slice);
 
                             let total_edits = insertions + deletions + substitutions + swaps;
-                            if total_edits as usize <= d {
+                            if total_edits as usize <= max_edits {
                                 let sim = self.calc_similarity(total_edits, insertions, deletions);
                                 if sim >= threshold {
                                     let key = (start_byte, end_byte);
@@ -799,7 +828,8 @@ impl BitapMatcher {
     #[must_use]
     pub fn find_first_non_overlapping(&self, text: &str, threshold: f32) -> Option<DamLevMatch> {
         // Try ASCII fast path if both pattern and text are ASCII
-        if self.is_ascii && text.is_ascii() {
+        // (only for patterns that fit in u64; longer patterns use the u128 path)
+        if self.is_ascii && text.is_ascii() && self.pattern_len <= FAST_PATH_MAX_LEN {
             if let Some(m) = self.find_first_ascii_fast(text.as_bytes(), threshold) {
                 return Some(m);
             }
@@ -836,6 +866,11 @@ impl BitapMatcher {
         limit: usize,
     ) -> Vec<DamLevMatch> {
         let max_edits = self.limits.max_edits as usize;
+        // Cap all loops at pattern_len: matches with more edits than the
+        // pattern has characters have near-zero similarity and are never
+        // useful.  This turns O(n·max_edits) into O(n·pattern_len) for
+        // unbounded `{e}` (max_edits=255).
+        let effective_max = max_edits.min(self.pattern_len);
         let text_bytes = text.as_bytes();
         let text_len = text_bytes.len();
 
@@ -871,12 +906,12 @@ impl BitapMatcher {
         let mut last_end = 0usize;
 
         // State vectors (3 buffers for transposition support)
-        let mut r: Vec<u64> = vec![!0u64; max_edits + 1];
-        let mut old_r: Vec<u64> = vec![!0u64; max_edits + 1];
-        let mut old_old_r: Vec<u64> = vec![!0u64; max_edits + 1];
+        let mut r: Vec<u128> = vec![!0u128; effective_max + 1];
+        let mut old_r: Vec<u128> = vec![!0u128; effective_max + 1];
+        let mut old_old_r: Vec<u128> = vec![!0u128; effective_max + 1];
 
         // Initialize deletion states
-        for d in 1..=max_edits {
+        for d in 1..=effective_max {
             r[d] = r[d - 1] << 1;
         }
 
@@ -885,7 +920,7 @@ impl BitapMatcher {
         let mut chars_since_pending = 0usize;
 
         // Track previous character mask for transposition
-        let mut prev_mask: u64 = !0;
+        let mut prev_mask: u128 = !0;
 
         // Circular buffer to track byte positions of recent characters
         // Used to correctly compute start position for matches with multi-byte UTF-8
@@ -894,6 +929,7 @@ impl BitapMatcher {
         let mut history_idx = 0usize;
 
         let mut byte_pos = 0;
+        let mut char_count = 0usize;
 
         while byte_pos < text_len {
             // Decode current character
@@ -918,7 +954,7 @@ impl BitapMatcher {
             r[0] = (old_r[0] << 1) | char_mask;
 
             // Update R[d] for d > 0 (fuzzy matching with transposition)
-            for d in 1..=max_edits {
+            for d in 1..=effective_max {
                 let insert = old_r[d - 1];
                 let delete = r[d - 1] << 1;
                 let substitute = old_r[d - 1] << 1;
@@ -941,21 +977,47 @@ impl BitapMatcher {
             let end_byte = byte_pos + char_len;
 
             // Check for match at each error level (prefer lower error levels)
-            'error_levels: for d in 0..=max_edits {
+            // Optimization: when we already have a pending fuzzy match, only
+            // run the expensive DP verification for error levels that could
+            // improve on the pending match (d < pending_d).  Higher d levels
+            // are skipped (just the cheap bitap AND check), dramatically
+            // reducing per-char cost during the commit wait period.
+            let pending_d = pending_match.as_ref().map(|(d, _)| *d);
+            'error_levels: for d in 0..=effective_max {
                 if (r[d] & self.accept_mask) == 0 {
+                    // Pre-filter: skip error levels where even the best possible
+                    // match (all substitutions, matched_len = pattern_len) has
+                    // similarity below threshold.  This avoids expensive DP
+                    // calls for high-d false positives that are common with
+                    // unbounded `{e}` (max_edits=255).
+                    let sim_max = 1.0f32 - d as f32 / (self.pattern_len + d) as f32;
+                    if sim_max < threshold {
+                        continue;
+                    }
+                    // Skip expensive DP if we already have a pending match
+                    // at a LOWER d level — it's strictly better.  Matches at
+                    // the same d level might have a longer/better span, so
+                    // we still check those.
+                    if pending_d.is_some_and(|pd| pd < d) {
+                        continue;
+                    }
+
                     // Found a potential match with d edits
                     // For fuzzy matches, the match length could vary:
                     // - With deletions: match is shorter than pattern
                     // - With insertions: match is longer than pattern
                     let min_match_len = self.pattern_len.saturating_sub(d);
-                    let max_match_len = self.pattern_len + d;
+                    let max_match_len = (self.pattern_len + d).min(char_count + 1);
 
                     // Track best candidate at this error level
                     let mut best_at_level: Option<DamLevMatch> = None;
 
-                    // Try all possible match lengths to find the best one
-                    // We check all lengths and pick: earliest start, then longest match
-                    for try_len in min_match_len..=max_match_len {
+                    // Try match lengths from longest to shortest.
+                    // The longest valid match = earliest start = leftmost match,
+                    // which is our preference.  Breaking on first valid DP
+                    // reduces O(pattern_len+d) DP calls to O(1) in the common
+                    // case where the longest candidate passes.
+                    for try_len in (min_match_len..=max_match_len).rev() {
                         // Compute start_byte by going back try_len characters (not bytes)
                         // Use the circular buffer to handle multi-byte UTF-8 correctly
                         let start_byte = if try_len <= history_size && try_len > 0 {
@@ -1025,10 +1087,10 @@ impl BitapMatcher {
                                 last_end = end_byte;
 
                                 // Reset state for next non-overlapping match
-                                r.fill(!0u64);
-                                old_r.fill(!0u64);
-                                old_old_r.fill(!0u64);
-                                for dd in 1..=max_edits {
+                                r.fill(!0u128);
+                                old_r.fill(!0u128);
+                                old_old_r.fill(!0u128);
+                                for dd in 1..=effective_max {
                                     r[dd] = r[dd - 1] << 1;
                                 }
                                 prev_mask = !0;
@@ -1037,6 +1099,10 @@ impl BitapMatcher {
                         } else {
                             // For fuzzy match, verify with DP
                             let matched_text = &text_bytes[start_byte..end_byte];
+                            // Fast early-reject via Levenshtein-only Bitap
+                            if self.quick_reject(matched_text, max_edits) {
+                                continue;
+                            }
                             let (insertions, deletions, substitutions, swaps) =
                                 self.compute_exact_edit_breakdown(matched_text);
 
@@ -1054,19 +1120,10 @@ impl BitapMatcher {
                                         similarity: sim,
                                     };
 
-                                    // Check if this candidate is better than best at this level
-                                    // Prefer: earlier start, then longer match
-                                    let dominated = best_at_level.as_ref().is_some_and(|best| {
-                                        let best_len = best.end - best.start;
-                                        let cand_len = candidate.end - candidate.start;
-                                        best.start < candidate.start
-                                            || (best.start == candidate.start
-                                                && best_len >= cand_len)
-                                    });
-
-                                    if !dominated {
-                                        best_at_level = Some(candidate);
-                                    }
+                                    // Since we try longest first, the first
+                                    // valid match IS the earliest start.
+                                    best_at_level = Some(candidate);
+                                    break; // Found best match at this level
                                 }
                             }
                         }
@@ -1084,9 +1141,35 @@ impl BitapMatcher {
                         });
 
                         if !dominated {
-                            // Always reset counter when setting a new pending match
-                            // This ensures the new match gets its full waiting period
-                            chars_since_pending = 0;
+                            // Only skip the counter reset for very long
+                            // patterns at max error level, where
+                            // low-complexity text causes every text length
+                            // to give te == d, growing the pending match
+                            // indefinitely.  For all other cases, always
+                            // reset (original behavior) to avoid premature
+                            // commits that miss better matches at lower d.
+                            let should_reset = if d >= effective_max && self.pattern_len > 32 {
+                                let cand_te = candidate.insertions as usize
+                                    + candidate.deletions as usize
+                                    + candidate.substitutions as usize
+                                    + candidate.swaps as usize;
+                                match &pending_match {
+                                    None => true,
+                                    Some((pd, pm)) if *pd == d && pm.start == candidate.start => {
+                                        let pm_te = pm.insertions as usize
+                                            + pm.deletions as usize
+                                            + pm.substitutions as usize
+                                            + pm.swaps as usize;
+                                        cand_te != pm_te
+                                    }
+                                    Some(_) => true,
+                                }
+                            } else {
+                                true
+                            };
+                            if should_reset {
+                                chars_since_pending = 0;
+                            }
                             pending_match = Some((d, candidate));
                         }
                         break 'error_levels; // Found valid fuzzy match at this level
@@ -1106,10 +1189,24 @@ impl BitapMatcher {
                 //   where the exact match ends one character later
                 let commit_threshold = if d == 0 {
                     1 // Exact match: commit on first check
+                } else if d >= effective_max && self.pattern_len > 32 {
+                    // Very long pattern at max error level: commit quickly.
+                    // Low-complexity text (e.g. all-identical chars) with a
+                    // long pattern triggers an explosion of DP calls because
+                    // every text length gives te == d, growing the pending
+                    // match indefinitely.  The should_reset logic above plus
+                    // this short threshold caps the scan at ~2 chars.
+                    2
                 } else if match_len >= self.pattern_len {
                     2 // Full-length fuzzy match: wait 1 char for potential exact match
                 } else {
-                    max_edits + 1 // Short match: wait longer
+                    // Short match: wait for potential exact/better match to appear.
+                    // Use min(max_edits, 2*pattern_len)+1 to cap the wait for
+                    // unbounded `{e}` (max_edits=255) while preserving the original
+                    // behavior for bounded edits (e.g. `~1` → commit after 2 chars).
+                    // The d_limit optimization makes the per-char wait cost just
+                    // the cheap bitap AND check, so a longer wait is affordable.
+                    max_edits.min(2 * self.pattern_len) + 1
                 };
 
                 if chars_since_pending >= commit_threshold {
@@ -1124,10 +1221,10 @@ impl BitapMatcher {
                     }
 
                     // Reset state
-                    r.fill(!0u64);
-                    old_r.fill(!0u64);
-                    old_old_r.fill(!0u64);
-                    for dd in 1..=max_edits {
+                    r.fill(!0u128);
+                    old_r.fill(!0u128);
+                    old_old_r.fill(!0u128);
+                    for dd in 1..=effective_max {
                         r[dd] = r[dd - 1] << 1;
                     }
                     prev_mask = !0;
@@ -1136,6 +1233,7 @@ impl BitapMatcher {
             }
 
             byte_pos = end_byte;
+            char_count += 1;
         }
 
         // Commit any remaining pending match
@@ -1157,6 +1255,7 @@ impl BitapMatcher {
         debug_assert!(self.is_ascii);
 
         let max_edits = self.limits.max_edits as usize;
+        let effective_max = max_edits.min(self.pattern_len);
         let text_len = text.len();
 
         // Handle empty text
@@ -1186,12 +1285,12 @@ impl BitapMatcher {
         }
 
         // State vectors (3 buffers for transposition support) - stack allocated
-        let mut r: [u64; 5] = [!0u64; 5];
-        let mut old_r: [u64; 5] = [!0u64; 5];
-        let mut old_old_r: [u64; 5] = [!0u64; 5];
+        let mut r: [u128; 5] = [!0u128; 5];
+        let mut old_r: [u128; 5] = [!0u128; 5];
+        let mut old_old_r: [u128; 5] = [!0u128; 5];
 
         // Initialize deletion states
-        for d in 1..=max_edits {
+        for d in 1..=effective_max {
             r[d] = r[d - 1] << 1;
         }
 
@@ -1200,7 +1299,7 @@ impl BitapMatcher {
         let mut chars_since_pending = 0usize;
 
         // Track previous character mask for transposition
-        let mut prev_mask: u64 = !0;
+        let mut prev_mask: u128 = !0;
 
         // Circular buffer for start position tracking (pattern_len + max_edits + 1)
         // Since ASCII: 1 byte = 1 char, we can use byte positions directly
@@ -1229,7 +1328,7 @@ impl BitapMatcher {
             let char_mask = if byte < 128 {
                 self.byte_masks[byte as usize]
             } else {
-                !0u64 // Non-ASCII byte: no match (shouldn't happen in ASCII path)
+                !0u128 // Non-ASCII byte: no match (shouldn't happen in ASCII path)
             };
 
             // Rotate buffers
@@ -1242,7 +1341,7 @@ impl BitapMatcher {
             r[0] = (old_r[0] << 1) | char_mask;
 
             // Update R[d] for d > 0 (fuzzy matching with transposition)
-            for d in 1..=max_edits {
+            for d in 1..=effective_max {
                 let insert = old_r[d - 1];
                 let delete = r[d - 1] << 1;
                 let substitute = old_r[d - 1] << 1;
@@ -1261,7 +1360,7 @@ impl BitapMatcher {
             let end_byte = byte_pos + 1; // ASCII: 1 byte per char
 
             // Check for match at each error level
-            'error_levels: for d in 0..=max_edits {
+            'error_levels: for d in 0..=effective_max {
                 if (r[d] & self.accept_mask) == 0 {
                     let min_match_len = self.pattern_len.saturating_sub(d);
                     let max_match_len = self.pattern_len + d;
@@ -1299,6 +1398,10 @@ impl BitapMatcher {
                         } else {
                             // Fuzzy match - verify with DP
                             let matched_text = &text[start_byte..end_byte];
+                            // Fast early-reject via Levenshtein-only Bitap
+                            if self.quick_reject(matched_text, max_edits) {
+                                continue;
+                            }
                             let (insertions, deletions, substitutions, swaps) =
                                 self.compute_exact_edit_breakdown(matched_text);
 
@@ -1342,7 +1445,35 @@ impl BitapMatcher {
                         });
 
                         if !dominated {
-                            chars_since_pending = 0;
+                            // Only skip the counter reset for very long
+                            // patterns at max error level, where
+                            // low-complexity text causes every text length
+                            // to give te == d, growing the pending match
+                            // indefinitely.  For all other cases, always
+                            // reset (original behavior) to avoid premature
+                            // commits that miss better matches at lower d.
+                            let should_reset = if d >= effective_max && self.pattern_len > 32 {
+                                let cand_te = candidate.insertions as usize
+                                    + candidate.deletions as usize
+                                    + candidate.substitutions as usize
+                                    + candidate.swaps as usize;
+                                match &pending_match {
+                                    None => true,
+                                    Some((pd, pm)) if *pd == d && pm.start == candidate.start => {
+                                        let pm_te = pm.insertions as usize
+                                            + pm.deletions as usize
+                                            + pm.substitutions as usize
+                                            + pm.swaps as usize;
+                                        cand_te != pm_te
+                                    }
+                                    Some(_) => true,
+                                }
+                            } else {
+                                true
+                            };
+                            if should_reset {
+                                chars_since_pending = 0;
+                            }
                             pending_match = Some((d, candidate));
                         }
                         break 'error_levels;
@@ -1357,6 +1488,8 @@ impl BitapMatcher {
 
                 let commit_threshold = if d == 0 {
                     1
+                } else if d >= effective_max && self.pattern_len > 32 {
+                    2
                 } else if match_len >= self.pattern_len {
                     2
                 } else {
@@ -1510,11 +1643,102 @@ impl BitapMatcher {
         Some(prev[n])
     }
 
+    /// Fast early-reject using Damerau-Levenshtein Bitap (with transposition).
+    ///
+    /// Runs the same Bitap state machine as the main algorithm but with only
+    /// `budget + 1` error levels (instead of `effective_max + 1`).
+    /// Uses the existing `byte_masks` for O(1) lookups.
+    ///
+    /// Returns `true` if the edit distance definitely exceeds `budget`
+    /// (pattern cannot match this text slice with ≤ budget errors).
+    /// Returns `false` if a match is possible — the caller should verify
+    /// with the full Damerau-Levenshtein DP.
+    #[inline]
+    fn quick_reject(&self, text: &[u8], budget: usize) -> bool {
+        let m = self.pattern_len;
+        if m == 0 || budget >= m {
+            return false;
+        }
+
+        // Budget 0: exact match check (very fast)
+        // For case-sensitive: direct byte comparison.
+        // For case-insensitive: fall through to Bitap which uses byte_masks
+        // (byte_masks already encode case-insensitive matching).
+        if budget == 0 && !self.case_insensitive {
+            return text != self.pattern.as_bytes();
+        }
+
+        // For large budgets, the Bitap check itself becomes expensive.
+        // Cap at 32 levels; beyond that, fall back to full DP.
+        if budget > 32 {
+            return false;
+        }
+
+        // Non-ASCII: need char-level masks, fall back to DP
+        if !self.is_ascii {
+            return false;
+        }
+
+        let d = budget;
+
+        // Run Damerau-Levenshtein Bitap (with transposition) on the text slice.
+        // R[i] bit j = 0 if pattern[0..j] matches some suffix of text with ≤ i errors.
+        let mut r: [u128; 33] = [!0u128; 33];
+        let mut old_r: [u128; 33] = [!0u128; 33];
+        let mut old_old_r: [u128; 33] = [!0u128; 33];
+        let mut prev_mask: Option<u128> = None;
+
+        // Initialize: R[i] = all 1s shifted left by i
+        for i in 1..=d {
+            r[i] = r[i - 1] << 1;
+        }
+
+        for &byte in text {
+            // Non-ASCII byte in text: can't use byte_masks (only 128 entries)
+            if byte >= 128 {
+                return false;
+            }
+
+            // Save states (shift history back by one step)
+            old_old_r[..=d].copy_from_slice(&old_r[..=d]);
+            old_r[..=d].copy_from_slice(&r[..=d]);
+
+            let char_mask = self.byte_masks[byte as usize];
+
+            // R[0] = exact match level
+            r[0] = (old_r[0] << 1) | char_mask;
+
+            // R[dd] = match with dd errors (Damerau-Levenshtein)
+            for dd in 1..=d {
+                let insert = old_r[dd - 1];
+                let delete = r[dd - 1] << 1;
+                let substitute = old_r[dd - 1] << 1;
+                let match_d = (old_r[dd] << 1) | char_mask;
+                let mut new_r = match_d & insert & delete & substitute;
+
+                // Transposition: swap two adjacent pattern characters
+                if let Some(pm) = prev_mask {
+                    // trans_valid_mask: bit j is 0 if pattern[j]=curr AND pattern[j+1]=prev
+                    let trans_valid_mask = char_mask | (pm >> 1);
+                    // From matched position k, we can reach k+2 via transposition at k+1
+                    let trans = ((old_old_r[dd - 1] << 1) | trans_valid_mask) << 1;
+                    new_r &= trans;
+                }
+
+                r[dd] = new_r;
+            }
+
+            prev_mask = Some(char_mask);
+        }
+
+        // If accept bit (pattern_len - 1) is 1 in R[d], no match with ≤ d errors.
+        (r[d] & self.accept_mask) != 0
+    }
+
     /// Compute exact Damerau-Levenshtein edit breakdown using dynamic programming.
     /// Returns (insertions, deletions, substitutions, swaps).
     ///
     /// Optimized version using:
-    /// - Myers' bit-vector algorithm for fast early positive confirmation
     /// - 3-row rotation instead of full O(m×n) table (for transposition support)
     /// - Stack allocation for small patterns (no heap allocation in common case)
     fn compute_exact_edit_breakdown(&self, matched_text: &[u8]) -> (u8, u8, u8, u8) {
@@ -1676,7 +1900,7 @@ impl BitapMatcher {
 
         // Initialize row 0
         for j in 0..=n {
-            prev_prev[j] = (j as u8, j as u8, 0, 0, 0);
+            prev[j] = (j as u8, j as u8, 0, 0, 0);
         }
 
         let text_chars: Vec<char> = if self.case_insensitive {
@@ -1760,6 +1984,7 @@ impl BitapMatcher {
         candidates: &super::hash::FxHashSet<usize>,
     ) -> Option<DamLevMatch> {
         let max_edits = self.limits.max_edits as usize;
+        let effective_max = max_edits.min(self.pattern_len);
         let text_chars: Vec<(usize, char)> = text.char_indices().collect();
 
         if text_chars.is_empty() || candidates.is_empty() {
@@ -1771,8 +1996,8 @@ impl BitapMatcher {
         sorted_candidates.sort_unstable();
 
         // Pre-allocate state buffers outside the loop (reused across candidates)
-        let mut r: Vec<u64> = vec![!0u64; max_edits + 1];
-        let mut old_r: Vec<u64> = vec![!0u64; max_edits + 1];
+        let mut r: Vec<u128> = vec![!0u128; effective_max + 1];
+        let mut old_r: Vec<u128> = vec![!0u128; effective_max + 1];
 
         for &start_byte in &sorted_candidates {
             // Find the character index for this byte position using binary search (O(log N))
@@ -1781,14 +2006,14 @@ impl BitapMatcher {
                 .unwrap_or(0);
 
             // Reset state for this candidate
-            r.fill(!0u64);
+            r.fill(!0u128);
 
             // Initialize deletion states - left shift advances pattern position
-            for d in 1..=max_edits {
+            for d in 1..=effective_max {
                 r[d] = r[d - 1] << 1;
             }
 
-            let max_window = self.pattern_len + max_edits;
+            let max_window = self.pattern_len + effective_max;
 
             // Track best match within this window
             let mut best_match: Option<(usize, DamLevMatch)> = None;
@@ -1811,7 +2036,7 @@ impl BitapMatcher {
 
                 r[0] = (old_r[0] << 1) | char_mask;
 
-                for d in 1..=max_edits {
+                for d in 1..=effective_max {
                     let insert = old_r[d - 1];
                     let delete = r[d - 1] << 1; // left shift advances pattern position
                     let substitute = old_r[d - 1] << 1;
@@ -1824,11 +2049,22 @@ impl BitapMatcher {
                 let abs_idx = start_char + rel_idx;
                 let end_byte = text_chars.get(abs_idx + 1).map_or(text.len(), |(b, _)| *b);
 
-                for d in 0..=max_edits {
+                for d in 0..=effective_max {
                     if (r[d] & self.accept_mask) == 0 {
+                        // Pre-filter: skip error levels where the best possible
+                        // similarity is below threshold.
+                        let sim_max = 1.0f32 - d as f32 / (self.pattern_len + d) as f32;
+                        if sim_max < threshold {
+                            continue;
+                        }
                         // Compute exact edit breakdown using DP
+                        let text_slice = &text.as_bytes()[start_byte..end_byte];
+                        // Fast early-reject via Levenshtein-only Bitap
+                        if self.quick_reject(text_slice, d) {
+                            continue;
+                        }
                         let (insertions, deletions, substitutions, swaps) = self
-                            .compute_exact_edit_breakdown(&text.as_bytes()[start_byte..end_byte]);
+                            .compute_exact_edit_breakdown(text_slice);
 
                         let sim = self.calc_similarity(d as u8, insertions, deletions);
                         if sim >= threshold {
@@ -1908,7 +2144,7 @@ impl BitapMatcher {
         // SIMD fast path: NEON on aarch64 for ASCII patterns with k <= 1
         #[cfg(all(feature = "simd", target_arch = "aarch64"))]
         {
-            if self.is_ascii && max_edits <= 1 {
+            if self.is_ascii && max_edits <= 1 && self.pattern_len <= FAST_PATH_MAX_LEN {
                 // SAFETY: NEON is mandatory on aarch64
                 return unsafe {
                     self.find_at_byte_position_neon(text, start_pos, threshold, max_edits)
@@ -1919,7 +2155,7 @@ impl BitapMatcher {
         // SIMD fast path: AVX2 on x86_64 for ASCII patterns with k <= 3
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         {
-            if self.is_ascii && max_edits <= 3 && simd_avx2::is_available() {
+            if self.is_ascii && max_edits <= 3 && simd_avx2::is_available() && self.pattern_len <= FAST_PATH_MAX_LEN {
                 // SAFETY: We've verified AVX2 is available via runtime detection
                 return unsafe {
                     self.find_at_byte_position_avx2(text, start_pos, threshold, max_edits)
@@ -1929,12 +2165,12 @@ impl BitapMatcher {
 
         // Use ASCII fast path when pattern is ASCII
         // This avoids UTF-8 decoding and uses direct byte array lookup
-        if self.is_ascii && max_edits <= 4 {
+        if self.is_ascii && max_edits <= 4 && self.pattern_len <= FAST_PATH_MAX_LEN {
             return self.find_at_byte_position_ascii::<5>(text, start_pos, threshold);
         }
 
         // Use stack array for small k (common case), fall back to vec for large k
-        if max_edits <= 4 {
+        if max_edits <= 4 && self.pattern_len <= FAST_PATH_MAX_LEN {
             self.find_at_byte_position_small_k::<5>(text, start_pos, threshold)
         } else {
             self.find_at_byte_position_large_k(text, start_pos, threshold)
@@ -1977,10 +2213,8 @@ impl BitapMatcher {
         // SAFETY: start_pos < text.len() verified by caller, search_len bounds checked above
         let text_ptr = unsafe { text.as_ptr().add(start_pos) };
         let byte_masks_ptr = self.byte_masks.as_ptr();
-        let accept_mask = self.accept_mask;
-
+        let accept_mask = self.accept_mask as u64;
         let mut prev_mask: u64 = !0u64;
-        // old_old_r is 2 iterations ago - on first iteration, it equals old_r's initial state
         let mut old_old_r = old_r;
 
         for i in 0..search_len {
@@ -1988,8 +2222,7 @@ impl BitapMatcher {
             let byte = unsafe { *text_ptr.add(i) };
             let mask_idx = (byte & 0x7F) as usize;
             // SAFETY: mask_idx is always < 128 due to & 0x7F, and byte_masks has 128 elements
-            let char_mask = unsafe { *byte_masks_ptr.add(mask_idx) };
-
+            let char_mask: u64 = unsafe { *byte_masks_ptr.add(mask_idx) as u64 };
             // Rotate state history before update
             std::mem::swap(&mut old_old_r, &mut old_r);
             old_r = r;
@@ -2110,7 +2343,7 @@ impl BitapMatcher {
         // SAFETY: start_pos < text.len() verified by caller, search_len bounds checked above
         let text_ptr = unsafe { text.as_ptr().add(start_pos) };
         let byte_masks_ptr = self.byte_masks.as_ptr();
-        let accept_mask = self.accept_mask;
+        let accept_mask = self.accept_mask as u64;
 
         let mut prev_mask: u64 = !0u64;
 
@@ -2121,8 +2354,8 @@ impl BitapMatcher {
             // Direct array lookup for ASCII
             let mask_idx = (byte & 0x7F) as usize;
             // SAFETY: mask_idx is always < 128 due to & 0x7F, and byte_masks has 128 elements
-            let char_mask = unsafe { *byte_masks_ptr.add(mask_idx) };
-
+            // SAFETY: mask_idx is always < 128 due to & 0x7F, and byte_masks has 128 elements
+            let char_mask: u64 = unsafe { *byte_masks_ptr.add(mask_idx) as u64 };
             // Save old states
             old_old_r = old_r;
             old_r = r;
@@ -2347,7 +2580,7 @@ impl BitapMatcher {
         use std::arch::aarch64::*;
 
         let max_window = self.pattern_len;
-        let accept_mask = self.accept_mask;
+        let accept_mask = self.accept_mask as u64;
         let byte_masks = &self.byte_masks;
 
         // Calculate search lengths for each position
@@ -2368,16 +2601,16 @@ impl BitapMatcher {
 
         for i in 0..max_len {
             // Get char masks for both positions (scalar loads, then combine)
-            let mask0 = if i < len0 {
+            let mask0: u64 = if i < len0 {
                 let byte = text[positions[0] + i];
-                byte_masks[(byte & 0x7F) as usize]
+                byte_masks[(byte & 0x7F) as usize] as u64
             } else {
                 !0u64 // No match possible
             };
 
-            let mask1 = if i < len1 {
+            let mask1: u64 = if i < len1 {
                 let byte = text[positions[1] + i];
-                byte_masks[(byte & 0x7F) as usize]
+                byte_masks[(byte & 0x7F) as usize] as u64
             } else {
                 !0u64
             };
@@ -2458,7 +2691,7 @@ impl BitapMatcher {
         use std::arch::x86_64::*;
 
         let max_window = self.pattern_len;
-        let accept_mask = self.accept_mask;
+        let accept_mask = self.accept_mask as u64;
         let byte_masks = &self.byte_masks;
 
         // Calculate search lengths for each position
@@ -2488,22 +2721,22 @@ impl BitapMatcher {
             // Get char masks for all 4 positions
             let masks: [u64; 4] = [
                 if i < lens[0] {
-                    byte_masks[(text[positions[0] + i] & 0x7F) as usize]
+                    byte_masks[(text[positions[0] + i] & 0x7F) as usize] as u64
                 } else {
                     !0u64
                 },
                 if i < lens[1] {
-                    byte_masks[(text[positions[1] + i] & 0x7F) as usize]
+                    byte_masks[(text[positions[1] + i] & 0x7F) as usize] as u64
                 } else {
                     !0u64
                 },
                 if i < lens[2] {
-                    byte_masks[(text[positions[2] + i] & 0x7F) as usize]
+                    byte_masks[(text[positions[2] + i] & 0x7F) as usize] as u64
                 } else {
                     !0u64
                 },
                 if i < lens[3] {
-                    byte_masks[(text[positions[3] + i] & 0x7F) as usize]
+                    byte_masks[(text[positions[3] + i] & 0x7F) as usize] as u64
                 } else {
                     !0u64
                 },
@@ -2584,7 +2817,7 @@ impl BitapMatcher {
 
         // SAFETY: We've bounds-checked above, and byte_masks has 128 elements
         // which covers all ASCII bytes (0-127). Non-ASCII bytes are handled
-        // by returning !0u64 (no match).
+        // by returning !0u128 (no match).
         unsafe {
             self.find_at_byte_position_ascii_unchecked::<K>(
                 text, start_pos, search_len, threshold, max_edits,
@@ -2605,9 +2838,9 @@ impl BitapMatcher {
         // SAFETY: caller guarantees all bounds are valid
         unsafe {
             // Stack-allocated state vectors
-            let mut r = [!0u64; K];
-            let mut old_r = [!0u64; K];
-            let mut old_old_r = [!0u64; K]; // State from 2 iterations ago for transposition
+            let mut r = [!0u128; K];
+            let mut old_r = [!0u128; K];
+            let mut old_old_r = [!0u128; K]; // State from 2 iterations ago for transposition
 
             // Initialize deletion states - left shift advances pattern position
             for d in 1..=max_edits {
@@ -2624,7 +2857,7 @@ impl BitapMatcher {
             for i in 0..search_len {
                 let byte = *text_ptr.add(i);
 
-                // Direct array lookup - mask non-ASCII to 0 index (which has !0u64)
+                // Direct array lookup - mask non-ASCII to 0 index (which has !0u128)
                 let mask_idx = (byte & 0x7F) as usize;
                 let char_mask = *byte_masks_ptr.add(mask_idx);
 
@@ -2752,9 +2985,9 @@ impl BitapMatcher {
         debug_assert!(max_edits < K);
 
         // Stack-allocated state vectors
-        let mut r = [!0u64; K];
-        let mut old_r = [!0u64; K];
-        let mut old_old_r = [!0u64; K]; // State from 2 iterations ago for transposition
+        let mut r = [!0u128; K];
+        let mut old_r = [!0u128; K];
+        let mut old_old_r = [!0u128; K]; // State from 2 iterations ago for transposition
 
         // Initialize deletion states - left shift advances pattern position
         for d in 1..=max_edits {
@@ -2772,7 +3005,7 @@ impl BitapMatcher {
         let end_limit = (start_pos + max_window_bytes).min(text.len());
 
         // Cache previous mask to avoid redundant lookups in transposition check
-        let mut prev_mask: Option<u64> = None;
+        let mut prev_mask: Option<u128> = None;
         let case_insensitive = self.case_insensitive;
 
         // Iterate bytes, handling UTF-8
@@ -2923,19 +3156,20 @@ impl BitapMatcher {
         threshold: f32,
     ) -> Option<DamLevMatch> {
         let max_edits = self.limits.max_edits as usize;
+        let effective_max = max_edits.min(self.pattern_len);
 
-        let mut r = vec![!0u64; max_edits + 1];
-        let mut old_r = vec![!0u64; max_edits + 1];
-        let mut old_old_r = vec![!0u64; max_edits + 1]; // State from 2 iterations ago for transposition
+        let mut r = vec![!0u128; effective_max + 1];
+        let mut old_r = vec![!0u128; effective_max + 1];
+        let mut old_old_r = vec![!0u128; effective_max + 1]; // State from 2 iterations ago for transposition
 
         // Initialize deletion states - left shift advances pattern position
-        for d in 1..=max_edits {
+        for d in 1..=effective_max {
             r[d] = r[d - 1] << 1;
         }
 
         // max_window is in characters, but we iterate bytes.
         // For UTF-8, multiply by max char size (4) to ensure we process enough bytes.
-        let max_window_chars = self.pattern_len + max_edits;
+        let max_window_chars = self.pattern_len + effective_max;
         let max_window_bytes = if self.is_ascii {
             max_window_chars + 1
         } else {
@@ -2944,7 +3178,7 @@ impl BitapMatcher {
         let end_limit = (start_pos + max_window_bytes).min(text.len());
 
         let mut pos = start_pos;
-        let mut prev_mask: Option<u64> = None;
+        let mut prev_mask: Option<u128> = None;
         let case_insensitive = self.case_insensitive;
         let mut char_count = 0usize;
 
@@ -2985,7 +3219,7 @@ impl BitapMatcher {
 
             r[0] = (r[0] << 1) | char_mask;
 
-            for d in 1..=max_edits {
+            for d in 1..=effective_max {
                 let insert = old_r[d - 1];
                 let delete = r[d - 1] << 1; // left shift advances pattern position
                 let substitute = old_r[d - 1] << 1;
@@ -3005,8 +3239,14 @@ impl BitapMatcher {
 
             let end_byte = pos + char_len;
 
-            for d in 0..=max_edits {
+            for d in 0..=effective_max {
                 if (r[d] & self.accept_mask) == 0 {
+                    // Pre-filter: skip error levels where the best possible
+                    // similarity is below threshold.
+                    let sim_max = 1.0f32 - d as f32 / (self.pattern_len + d) as f32;
+                    if sim_max < threshold {
+                        continue;
+                    }
                     // Compute exact edit breakdown using DP
                     let (insertions, deletions, substitutions, swaps) =
                         self.compute_exact_edit_breakdown(&text[start_pos..end_byte]);
@@ -3036,18 +3276,18 @@ impl BitapMatcher {
         let end_byte = pos;
         if let Some(last_mask) = prev_mask {
             let chars_short = self.pattern_len.saturating_sub(char_count);
-            for _ in 0..chars_short.min(max_edits) {
+            for _ in 0..chars_short.min(effective_max) {
                 old_r.copy_from_slice(&r);
 
                 // Apply match propagation: from position p with d errors,
                 // if pattern[p+1] matches last_char, reach position p+1 with d errors
-                for d in 1..=max_edits {
+                for d in 1..=effective_max {
                     let match_d = (old_r[d] << 1) | last_mask;
                     r[d] &= match_d;
                 }
 
                 // Check for accept after each propagation
-                for d in 0..=max_edits {
+                for d in 0..=effective_max {
                     if (r[d] & self.accept_mask) == 0 {
                         let (insertions, deletions, substitutions, swaps) =
                             self.compute_exact_edit_breakdown(&text[start_pos..end_byte]);
@@ -3084,6 +3324,11 @@ impl BitapMatcher {
         let max_edits = self.limits.max_edits as usize;
 
         // Use const generics for common cases - already highly optimized
+        // (only for patterns that fit in u64; longer patterns use the u128 path)
+        if self.pattern_len > FAST_PATH_MAX_LEN {
+            return self.find_first_streaming_large_k(text, threshold);
+        }
+
         match max_edits {
             0 => self.find_first_streaming_k::<1>(text, threshold, 0),
             1 => self.find_first_streaming_k::<2>(text, threshold, 1),
@@ -3125,9 +3370,9 @@ impl BitapMatcher {
         }
 
         // Use three state arrays for rotation (need old_old for transposition)
-        let mut r0 = [!0u64; K];
-        let mut r1 = [!0u64; K];
-        let mut r2 = [!0u64; K];
+        let mut r0 = [!0u128; K];
+        let mut r1 = [!0u128; K];
+        let mut r2 = [!0u128; K];
 
         // Initialize: can delete up to max_edits chars from pattern start
         for d in 1..=max_edits {
@@ -3143,7 +3388,7 @@ impl BitapMatcher {
 
         let mut pos = 0usize;
         let mut rotation = 0usize; // 0, 1, 2 rotation for three buffers
-        let mut prev_mask: u64 = !0u64; // Previous character mask for transposition
+        let mut prev_mask: u128 = !0u128; // Previous character mask for transposition
 
         // Track best match found so far (prefer fewer edits)
         // After finding a fuzzy match, continue for max_edits more chars to find better matches
@@ -3195,7 +3440,7 @@ impl BitapMatcher {
             new_r[0] = (old_r[0] << 1) | char_mask;
 
             // Update start position for d=0 if no partial match
-            if new_r[0] == !0u64 {
+            if new_r[0] == !0u128 {
                 start_bytes[0] = pos + char_len;
             }
 
@@ -3218,7 +3463,7 @@ impl BitapMatcher {
                 new_r[d] = new_val;
 
                 // Update start position if no partial match
-                if new_r[d] == !0u64 {
+                if new_r[d] == !0u128 {
                     start_bytes[d] = pos + char_len;
                 }
             }
@@ -3389,6 +3634,7 @@ impl BitapMatcher {
     /// Supports transposition detection. Continues processing after fuzzy matches to prefer exact matches.
     fn find_first_streaming_large_k(&self, text: &[u8], threshold: f32) -> Option<DamLevMatch> {
         let max_edits = self.limits.max_edits as usize;
+        let effective_max = max_edits.min(self.pattern_len);
 
         // Handle empty text: pattern can still match via pure deletions
         if text.is_empty() && self.pattern_len <= max_edits {
@@ -3409,13 +3655,13 @@ impl BitapMatcher {
         }
 
         // Use three buffers for rotation (need old_old for transposition)
-        let mut r0 = vec![!0u64; max_edits + 1];
-        let mut r1 = vec![!0u64; max_edits + 1];
-        let mut r2 = vec![!0u64; max_edits + 1];
-        let mut start_bytes = vec![0usize; max_edits + 1];
+        let mut r0 = vec![!0u128; effective_max + 1];
+        let mut r1 = vec![!0u128; effective_max + 1];
+        let mut r2 = vec![!0u128; effective_max + 1];
+        let mut start_bytes = vec![0usize; effective_max + 1];
 
-        // Initialize: can delete up to max_edits chars from pattern start
-        for d in 1..=max_edits {
+        // Initialize: can delete up to effective_max chars from pattern start
+        for d in 1..=effective_max {
             r0[d] = r0[d - 1] << 1; // left shift advances pattern position
         }
 
@@ -3425,10 +3671,10 @@ impl BitapMatcher {
 
         let mut pos = 0usize;
         let mut rotation = 0usize; // 0, 1, 2 rotation for three buffers
-        let mut prev_mask: u64 = !0u64; // Previous character mask for transposition
+        let mut prev_mask: u128 = !0u128; // Previous character mask for transposition
 
         // Track best match found so far (prefer fewer edits)
-        // After finding a fuzzy match, continue for max_edits more chars to find better matches
+        // After finding a fuzzy match, continue for effective_max more chars to find better matches
         let mut best_match: Option<(usize, DamLevMatch)> = None; // (edit_level, match)
         let mut chars_since_first_match = 0usize;
 
@@ -3473,12 +3719,12 @@ impl BitapMatcher {
 
             // Update R[0] (exact matching)
             new_r[0] = (old_r[0] << 1) | char_mask;
-            if new_r[0] == !0u64 {
+            if new_r[0] == !0u128 {
                 start_bytes[0] = pos + char_len;
             }
 
             // Update R[d] for d > 0 (fuzzy matching)
-            for d in 1..=max_edits {
+            for d in 1..=effective_max {
                 let insert = old_r[d - 1]; // consume text char without advancing pattern
                 let delete = new_r[d - 1] << 1; // left shift advances pattern position
                 let substitute = old_r[d - 1] << 1; // replace pattern char
@@ -3495,15 +3741,21 @@ impl BitapMatcher {
 
                 new_r[d] = new_val;
 
-                if new_r[d] == !0u64 {
+                if new_r[d] == !0u128 {
                     start_bytes[d] = pos + char_len;
                 }
             }
 
             let end_byte = pos + char_len;
 
-            for d in 0..=max_edits {
+            for d in 0..=effective_max {
                 if (new_r[d] & accept_mask) == 0 {
+                    // Pre-filter: skip error levels where the best possible
+                    // similarity is below threshold.
+                    let sim_max = 1.0f32 - d as f32 / (self.pattern_len + d) as f32;
+                    if sim_max < threshold {
+                        continue;
+                    }
                     // Streaming found a potential match ending here.
                     // For exact match (d=0), return immediately
                     if d == 0 {
@@ -3597,7 +3849,7 @@ impl BitapMatcher {
                 }
                 // Short match - might be early accept, continue for a few more chars
                 chars_since_first_match += 1;
-                if chars_since_first_match > max_edits {
+                if chars_since_first_match > effective_max {
                     return best_match.map(|(_, m)| m);
                 }
             }
@@ -3934,7 +4186,7 @@ mod tests {
 
     #[test]
     fn test_pattern_too_long() {
-        let long_pattern = "a".repeat(65);
+        let long_pattern = "a".repeat(129);
         let result = BitapMatcher::new(&long_pattern, EditLimits::new(1), false);
         assert!(result.is_none());
     }
@@ -4066,15 +4318,15 @@ impl MultiBitapMatcher {
             .unwrap_or(0);
 
         // State vectors for each pattern: r[pattern][edit_level]
-        let mut r: Vec<Vec<u64>> = self
+        let mut r: Vec<Vec<u128>> = self
             .matchers
             .iter()
-            .map(|_| vec![!0u64; max_edits + 1])
+            .map(|_| vec![!0u128; max_edits + 1])
             .collect();
-        let mut old_r: Vec<Vec<u64>> = self
+        let mut old_r: Vec<Vec<u128>> = self
             .matchers
             .iter()
-            .map(|_| vec![!0u64; max_edits + 1])
+            .map(|_| vec![!0u128; max_edits + 1])
             .collect();
 
         // Initialize deletion states for each pattern
