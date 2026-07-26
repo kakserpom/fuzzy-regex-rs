@@ -238,14 +238,14 @@ impl Dfa {
         bridge: Option<&FuzzyBridge>,
         case_insensitive: bool,
         multi_line: bool,
-        _similarity_threshold: f32,
+        similarity_threshold: f32,
     ) -> Option<Self> {
         Self::from_nfa_with_literals(
             nfa,
             bridge,
             case_insensitive,
             multi_line,
-            _similarity_threshold,
+            similarity_threshold,
             &[],
         )
     }
@@ -254,6 +254,7 @@ impl Dfa {
     /// from the compiler. The first non-empty, non-fuzzy literal is stored as
     /// `required_literal` for quick rejection (O(n) memmem instead of O(n²)
     /// when the literal is absent from the text).
+    #[must_use]
     pub fn from_nfa_with_literals(
         nfa: &Nfa,
         bridge: Option<&FuzzyBridge>,
@@ -381,12 +382,11 @@ impl Dfa {
         // pattern_index.  If such a path exists, the literal is optional
         // (e.g. inside `?` or `*`) and the quick-rejection would cause false
         // negatives, so we disable it.
-        if dfa.required_literal.is_some() {
-            if let Some(idx) = req_lit_idx {
-                if !Self::is_literal_required(nfa, idx) {
-                    dfa.required_literal = None;
-                }
-            }
+        if dfa.required_literal.is_some()
+            && let Some(idx) = req_lit_idx
+            && !Self::is_literal_required(nfa, idx)
+        {
+            dfa.required_literal = None;
         }
 
         // Check for start anchor
@@ -458,8 +458,8 @@ impl Dfa {
             // Collect outgoing transition targets from this state.
             let targets: Vec<usize> = match &nfa.states[sid] {
                 State::Accept => vec![],
-                State::Epsilon { targets } => targets.iter().copied().collect(),
-                State::Split { branches, .. } => branches.iter().copied().collect(),
+                State::Epsilon { targets } => targets.clone(),
+                State::Split { branches, .. } => branches.clone(),
                 State::Char { next, .. }
                 | State::FuzzyChar { next, .. }
                 | State::FuzzyLiteral { next, .. }
@@ -2083,10 +2083,11 @@ impl Dfa {
     /// Find all non-overlapping matches.
     pub fn find_all(&mut self, text: &str) -> Vec<DfaMatch> {
         // Quick rejection: if the required literal is absent, no matches.
-        if let Some(ref lit) = self.required_literal {
-            if !self.case_insensitive && memmem::find(text.as_bytes(), lit.as_bytes()).is_none() {
-                return Vec::new();
-            }
+        if let Some(ref lit) = self.required_literal
+            && !self.case_insensitive
+            && memmem::find(text.as_bytes(), lit.as_bytes()).is_none()
+        {
+            return Vec::new();
         }
 
         let mut matches = Vec::new();

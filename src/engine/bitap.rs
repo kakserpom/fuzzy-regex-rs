@@ -605,8 +605,8 @@ impl BitapMatcher {
                         }
 
                         // Compute exact edit breakdown using DP
-                        let (insertions, deletions, substitutions, swaps) = self
-                            .compute_exact_edit_breakdown(text_slice);
+                        let (insertions, deletions, substitutions, swaps) =
+                            self.compute_exact_edit_breakdown(text_slice);
 
                         // Use actual edit count from DP, verify it matches Bitap state
                         let total_edits = insertions + deletions + substitutions + swaps;
@@ -682,8 +682,8 @@ impl BitapMatcher {
                                 continue;
                             }
 
-                            let (insertions, deletions, substitutions, swaps) = self
-                                .compute_exact_edit_breakdown(text_slice);
+                            let (insertions, deletions, substitutions, swaps) =
+                                self.compute_exact_edit_breakdown(text_slice);
 
                             let total_edits = insertions + deletions + substitutions + swaps;
                             if total_edits as usize <= max_edits {
@@ -1154,7 +1154,6 @@ impl BitapMatcher {
                                     + candidate.substitutions as usize
                                     + candidate.swaps as usize;
                                 match &pending_match {
-                                    None => true,
                                     Some((pd, pm)) if *pd == d && pm.start == candidate.start => {
                                         let pm_te = pm.insertions as usize
                                             + pm.deletions as usize
@@ -1162,7 +1161,7 @@ impl BitapMatcher {
                                             + pm.swaps as usize;
                                         cand_te != pm_te
                                     }
-                                    Some(_) => true,
+                                    None | Some(_) => true,
                                 }
                             } else {
                                 true
@@ -1189,16 +1188,13 @@ impl BitapMatcher {
                 //   where the exact match ends one character later
                 let commit_threshold = if d == 0 {
                     1 // Exact match: commit on first check
-                } else if d >= effective_max && self.pattern_len > 32 {
-                    // Very long pattern at max error level: commit quickly.
-                    // Low-complexity text (e.g. all-identical chars) with a
-                    // long pattern triggers an explosion of DP calls because
-                    // every text length gives te == d, growing the pending
-                    // match indefinitely.  The should_reset logic above plus
-                    // this short threshold caps the scan at ~2 chars.
+                } else if (d >= effective_max && self.pattern_len > 32)
+                    || match_len >= self.pattern_len
+                {
+                    // Very long pattern at max error level: commit quickly to
+                    // avoid DP explosion on low-complexity text.  Full-length
+                    // fuzzy match: wait 1 char for potential exact match.
                     2
-                } else if match_len >= self.pattern_len {
-                    2 // Full-length fuzzy match: wait 1 char for potential exact match
                 } else {
                     // Short match: wait for potential exact/better match to appear.
                     // Use min(max_edits, 2*pattern_len)+1 to cap the wait for
@@ -1458,7 +1454,6 @@ impl BitapMatcher {
                                     + candidate.substitutions as usize
                                     + candidate.swaps as usize;
                                 match &pending_match {
-                                    None => true,
                                     Some((pd, pm)) if *pd == d && pm.start == candidate.start => {
                                         let pm_te = pm.insertions as usize
                                             + pm.deletions as usize
@@ -1466,7 +1461,7 @@ impl BitapMatcher {
                                             + pm.swaps as usize;
                                         cand_te != pm_te
                                     }
-                                    Some(_) => true,
+                                    None | Some(_) => true,
                                 }
                             } else {
                                 true
@@ -1488,9 +1483,9 @@ impl BitapMatcher {
 
                 let commit_threshold = if d == 0 {
                     1
-                } else if d >= effective_max && self.pattern_len > 32 {
-                    2
-                } else if match_len >= self.pattern_len {
+                } else if (d >= effective_max && self.pattern_len > 32)
+                    || match_len >= self.pattern_len
+                {
                     2
                 } else {
                     max_edits + 1
@@ -2063,8 +2058,8 @@ impl BitapMatcher {
                         if self.quick_reject(text_slice, d) {
                             continue;
                         }
-                        let (insertions, deletions, substitutions, swaps) = self
-                            .compute_exact_edit_breakdown(text_slice);
+                        let (insertions, deletions, substitutions, swaps) =
+                            self.compute_exact_edit_breakdown(text_slice);
 
                         let sim = self.calc_similarity(d as u8, insertions, deletions);
                         if sim >= threshold {
@@ -2155,7 +2150,11 @@ impl BitapMatcher {
         // SIMD fast path: AVX2 on x86_64 for ASCII patterns with k <= 3
         #[cfg(all(feature = "simd", target_arch = "x86_64"))]
         {
-            if self.is_ascii && max_edits <= 3 && simd_avx2::is_available() && self.pattern_len <= FAST_PATH_MAX_LEN {
+            if self.is_ascii
+                && max_edits <= 3
+                && simd_avx2::is_available()
+                && self.pattern_len <= FAST_PATH_MAX_LEN
+            {
                 // SAFETY: We've verified AVX2 is available via runtime detection
                 return unsafe {
                     self.find_at_byte_position_avx2(text, start_pos, threshold, max_edits)

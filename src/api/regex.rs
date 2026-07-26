@@ -1330,9 +1330,7 @@ impl FuzzyRegex {
             let mut offset = 0usize;
             while offset < text.len() {
                 let search_text = &text[offset..];
-                let matches = bridge.search_non_overlapping_n(
-                    search_text, threshold, 0, false, 1,
-                );
+                let matches = bridge.search_non_overlapping_n(search_text, threshold, 0, false, 1);
                 if let Some(m) = matches.into_iter().next() {
                     let abs_start = offset + m.start;
                     let abs_end = offset + m.end;
@@ -2320,20 +2318,15 @@ impl FuzzyRegex {
         // overlapping matches and correctly filters by word boundaries.
         // For longer patterns, use `search_non_overlapping` with a sliding
         // window to avoid the O(n·m²) DP cost of `find_all`.
-        let pattern_len = self
-            .literals
-            .first()
-            .map(|l| l.text.chars().count())
-            .unwrap_or(0);
+        let pattern_len = self.literals.first().map_or(0, |l| l.text.chars().count());
 
         if pattern_len <= 32 {
             // Short pattern: search_all is fast and correct
             let cached = bridge.search_all(text, threshold);
             let mut matches = Vec::new();
             let mut prev_end = 0;
-            let mut literal_positions: Vec<
-                (usize, usize, crate::engine::EditCounts, f32),
-            > = Vec::new();
+            let mut literal_positions: Vec<(usize, usize, crate::engine::EditCounts, f32)> =
+                Vec::new();
             for ((pattern_idx, start), results) in cached.iter() {
                 if pattern_idx != 0 {
                     continue;
@@ -2374,9 +2367,7 @@ impl FuzzyRegex {
 
         while offset < text.len() {
             let search_text = &text[offset..];
-            let found = bridge.search_non_overlapping_n(
-                search_text, threshold, 0, false, 1,
-            );
+            let found = bridge.search_non_overlapping_n(search_text, threshold, 0, false, 1);
 
             if let Some(m) = found.into_iter().next() {
                 let abs_start = offset + m.start;
