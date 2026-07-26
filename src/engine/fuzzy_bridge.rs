@@ -676,8 +676,9 @@ impl FuzzyBridge {
             return bitap.find_first_non_overlapping(text, pattern_threshold);
         }
 
-        // Fallback to NFA
-        self.automata[pattern_idx].find_first(text, pattern_threshold)
+        // Fallback to NFA with pre-allocated buffers
+        let mut buffers = self.search_buffers.borrow_mut();
+        self.automata[pattern_idx].find_first_buffered(text, pattern_threshold, &mut buffers)
     }
 
     /// Find best non-overlapping matches, preferring highest similarity.
