@@ -2048,12 +2048,14 @@ impl FuzzyRegex {
         }
 
         // DFA fast path: use DFA for patterns that are DFA-compatible
-        // This provides O(1) per character matching vs O(states) for NFA
+        // This provides O(1) per character matching vs O(states) for NFA.
+        // Uses find_all_hardened (single-pass) instead of find_all (O(n²) sliding window)
+        // for simple patterns; anchors/multiline delegate to find_all automatically.
         if let Some(ref dfa_cell) = self.dfa {
             return Matches::new(
                 dfa_cell
                     .borrow_mut()
-                    .find_all(text)
+                    .find_all_hardened(text)
                     .into_iter()
                     .map(|m| {
                         Match::new(

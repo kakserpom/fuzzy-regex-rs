@@ -2186,7 +2186,7 @@ impl Dfa {
         match prefilter {
             DfaPrefilter::None => {
                 // No prefilter - fall back to scanning all positions
-                self.find_all(text).into_iter().last()
+                self.find_all_hardened(text).into_iter().last()
             }
             DfaPrefilter::SingleByte(needle) => {
                 // Scan from right using memrchr
@@ -2517,6 +2517,14 @@ impl Dfa {
     /// Anchored / multi-line / empty-accepting patterns are delegated to
     /// `find_all` (already linear for them, and needing `find_at`'s anchor logic).
     pub fn find_all_hardened(&mut self, text: &str) -> Vec<DfaMatch> {
+        // Quick rejection: if the required literal is absent, no matches.
+        if let Some(ref lit) = self.required_literal
+            && !self.case_insensitive
+            && memmem::find(text.as_bytes(), lit.as_bytes()).is_none()
+        {
+            return Vec::new();
+        }
+
         let simple = !self.multi_line
             && !self.anchored_start
             && !self.anchored_end
