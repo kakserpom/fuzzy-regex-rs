@@ -684,6 +684,271 @@ impl DamLevNfa {
         matches.into_values().collect()
     }
 
+    /// Find all matches using pre-allocated buffers (streaming, no text_chars Vec).
+    ///
+    /// Like `find_all` but avoids the per-call allocation of `text_chars` and uses
+    /// the caller-supplied `SearchBuffers` for all internal state. This is the
+    /// preferred method when calling `find_all` repeatedly (e.g. in the fuzzy
+    /// bridge's `search_all`).
+    #[must_use]
+    pub fn find_all_buffered(
+        &self,
+        text: &str,
+        threshold: f32,
+        buffers: &mut SearchBuffers,
+    ) -> Vec<DamLevMatch> {
+        // Clear buffers for reuse
+        buffers.clear();
+
+        if self.pattern_chars.is_empty() {
+            return vec![DamLevMatch {
+                start: 0,
+                end: 0,
+                insertions: 0,
+                deletions: 0,
+                substitutions: 0,
+                swaps: 0,
+                similarity: 1.0,
+            }];
+        }
+
+        // Stream through chars without collecting - use peekable for lookahead
+        let mut char_iter = text.char_indices().peekable();
+
+        let mut char_idx = 0usize;
+        while let Some((byte_pos, raw_char)) = char_iter.next() {
+            let text_char = if self.case_insensitive {
+                raw_char.to_lowercase().next().unwrap_or(raw_char)
+            } else {
+                raw_char
+            };
+
+            // Peek next char for transposition detection and end_byte calculation
+            let next_info = char_iter.peek().map(|&(next_byte, next_char)| {
+                let c = if self.case_insensitive {
+                    next_char.to_lowercase().next().unwrap_or(next_char)
+                } else {
+                    next_char
+                };
+                (next_byte, c)
+            });
+            let next_text_char = next_info.map(|(_, c)| c);
+            let end_byte = next_info.map_or(text.len(), |(b, _)| b);
+
+            // Start a new potential match at every position
+            let initial = ActiveState {
+                state: State::new(0),
+                start_byte: byte_pos,
+                start_char: char_idx,
+            };
+            buffers.active.push(initial);
+
+            // Add epsilon closure for new state - run directly on active
+            {
+                let start_idx = buffers.active.len() - 1;
+                buffers.seen_set.clear();
+                for a in &buffers.active {
+                    buffers.seen_set.insert((a.state, a.start_byte));
+                }
+                self.epsilon_closure_from(
+                    &mut buffers.active,
+                    start_idx,
+                    &mut buffers.seen_set,
+                );
+            }
+
+            // Process active states - reuse next_active buffer
+            buffers.next_active.clear();
+
+            for active_state in &buffers.active {
+                let state = active_state.state;
+
+                // If this state is marked skip_next (from a transposition), just clear the flag
+                if state.skip_next {
+                    let mut continued = state;
+                    continued.skip_next = false;
+                    buffers.next_active.push(ActiveState {
+                        state: continued,
+                        start_byte: active_state.start_byte,
+                        start_char: active_state.start_char,
+                    });
+                    continue;
+                }
+
+                if state.pos < self.pattern_chars.len() {
+                    let pattern_char = self.pattern_chars[state.pos];
+
+                    if text_char == pattern_char {
+                        buffers.next_active.push(ActiveState {
+                            state: state.advance_match(),
+                            start_byte: active_state.start_byte,
+                            start_char: active_state.start_char,
+                        });
+                    }
+
+                    if text_char != pattern_char && self.can_substitute(&state) {
+                        buffers.next_active.push(ActiveState {
+                            state: state.advance_substitution(),
+                            start_byte: active_state.start_byte,
+                            start_char: active_state.start_char,
+                        });
+                    }
+
+                    // Transposition transition
+                    if let Some(next_char) = next_text_char
+                        && state.pos + 1 < self.pattern_chars.len()
+                        && self.can_swap(&state)
+                    {
+                        let next_pattern_char = self.pattern_chars[state.pos + 1];
+                        if pattern_char == next_char
+                            && next_pattern_char == text_char
+                            && pattern_char != next_pattern_char
+                        {
+                            buffers.next_active.push(ActiveState {
+                                state: state.advance_swap(),
+                                start_byte: active_state.start_byte,
+                                start_char: active_state.start_char,
+                            });
+                        }
+                    }
+                }
+
+                if self.can_insert(&state) {
+                    buffers.next_active.push(ActiveState {
+                        state: state.advance_insertion(),
+                        start_byte: active_state.start_byte,
+                        start_char: active_state.start_char,
+                    });
+                }
+            }
+
+            buffers.seen_set.clear();
+            self.epsilon_closure(&mut buffers.next_active, &mut buffers.seen_set);
+
+            // Deduplicate with early pruning
+            buffers.deduped.clear();
+            for active_state in buffers.next_active.drain(..) {
+                // Early pruning: skip states that can't reach threshold
+                if self.max_possible_similarity(&active_state.state) < threshold {
+                    continue;
+                }
+
+                let key = (
+                    active_state.state.pos,
+                    active_state.start_byte,
+                    active_state.state.skip_next,
+                );
+                buffers
+                    .deduped
+                    .entry(key)
+                    .and_modify(|existing| {
+                        if active_state.state.total_edits() < existing.state.total_edits() {
+                            *existing = active_state.clone();
+                        }
+                    })
+                    .or_insert(active_state);
+            }
+
+            buffers.active.clear();
+            buffers.active.extend(buffers.deduped.values().cloned());
+
+            // Beam pruning: limit state explosion
+            self.beam_prune(&mut buffers.active);
+
+            // Check for accepting states (end_byte already computed above from peek)
+            for active_state in &buffers.active {
+                if active_state.state.pos == self.pattern_chars.len()
+                    && !active_state.state.skip_next
+                {
+                    let sim = self.calc_similarity(&active_state.state);
+                    if sim >= threshold {
+                        let key = (active_state.start_byte, end_byte);
+                        let m = DamLevMatch {
+                            start: active_state.start_byte,
+                            end: end_byte,
+                            insertions: active_state.state.insertions,
+                            deletions: active_state.state.deletions,
+                            substitutions: active_state.state.substitutions,
+                            swaps: active_state.state.swaps,
+                            similarity: sim,
+                        };
+
+                        buffers
+                            .matches
+                            .entry(key)
+                            .and_modify(|existing| {
+                                if m.similarity > existing.similarity {
+                                    *existing = m.clone();
+                                }
+                            })
+                            .or_insert(m);
+                    }
+                }
+            }
+
+            // Prune states
+            let max_window = self.pattern_chars.len() + self.limits.max_edits as usize;
+            buffers.active.retain(|a| {
+                (a.state.pos < self.pattern_chars.len() || a.state.skip_next)
+                    && (char_idx + 1 - a.start_char) <= max_window
+            });
+
+            char_idx += 1;
+        }
+
+        // Handle remaining states at end of text
+        for active_state in &buffers.active {
+            let state = active_state.state;
+            if state.skip_next {
+                continue;
+            }
+            let remaining = self.pattern_chars.len() - state.pos;
+
+            if remaining as u8 <= self.limits.max_edits - state.total_edits() {
+                let dels_needed = remaining as u8;
+                let total_dels = state.deletions + dels_needed;
+
+                if self
+                    .limits
+                    .max_deletions
+                    .is_none_or(|max| total_dels <= max)
+                {
+                    let final_state = State {
+                        pos: self.pattern_chars.len(),
+                        deletions: total_dels,
+                        ..state
+                    };
+
+                    let sim = self.calc_similarity(&final_state);
+                    if sim >= threshold {
+                        let key = (active_state.start_byte, text.len());
+                        let m = DamLevMatch {
+                            start: active_state.start_byte,
+                            end: text.len(),
+                            insertions: final_state.insertions,
+                            deletions: final_state.deletions,
+                            substitutions: final_state.substitutions,
+                            swaps: final_state.swaps,
+                            similarity: sim,
+                        };
+
+                        buffers
+                            .matches
+                            .entry(key)
+                            .and_modify(|existing| {
+                                if m.similarity > existing.similarity {
+                                    *existing = m.clone();
+                                }
+                            })
+                            .or_insert(m);
+                    }
+                }
+            }
+        }
+
+        buffers.matches.drain().map(|(_, v)| v).collect()
+    }
+
     /// Find up to `n` non-overlapping matches.
     ///
     /// Note: This is a simple implementation that finds all matches and takes the first `n`.

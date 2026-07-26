@@ -351,10 +351,12 @@ impl FuzzyBridge {
             let pattern_threshold = self.calculate_effective_threshold(pattern_idx, threshold);
 
             // Use Bitap when available (faster for short patterns), fall back to NFA
+            // with pre-allocated buffers (avoids per-call text_chars Vec allocation).
             let matches = if let Some(ref bitap) = self.bitap_matchers[pattern_idx] {
                 bitap.find_all(text, pattern_threshold)
             } else {
-                nfa.find_all(text, pattern_threshold)
+                let mut buffers = self.search_buffers.borrow_mut();
+                nfa.find_all_buffered(text, pattern_threshold, &mut buffers)
             };
 
             for m in matches {
@@ -422,10 +424,12 @@ impl FuzzyBridge {
             let pattern_threshold = self.calculate_effective_threshold(pattern_idx, threshold);
 
             // Use Bitap when available (faster for short patterns), fall back to NFA
+            // with pre-allocated buffers.
             let matches = if let Some(ref bitap) = self.bitap_matchers[pattern_idx] {
                 bitap.find_all(substring, pattern_threshold)
             } else {
-                nfa.find_all(substring, pattern_threshold)
+                let mut buffers = self.search_buffers.borrow_mut();
+                nfa.find_all_buffered(substring, pattern_threshold, &mut buffers)
             };
 
             // Only keep matches starting at position 0 of the substring (which is `pos` in original text)
@@ -529,7 +533,10 @@ impl FuzzyBridge {
         // non-overlapping matches. Sort by (start, fewest edits, shortest end)
         // — so the first element equals `search_first`/`find_first` and `find`
         // agrees with `find_iter().next()` — then greedily drop overlaps.
-        let mut all = self.automata[pattern_idx].find_all(text, pattern_threshold);
+        let mut all = {
+            let mut buffers = self.search_buffers.borrow_mut();
+            self.automata[pattern_idx].find_all_buffered(text, pattern_threshold, &mut buffers)
+        };
         all.sort_by(|a, b| {
             a.start
                 .cmp(&b.start)
@@ -722,7 +729,10 @@ impl FuzzyBridge {
         }
 
         // Fallback: get all matches from NFA and select best non-overlapping
-        let mut all_matches = self.automata[pattern_idx].find_all(text, pattern_threshold);
+        let mut all_matches = {
+            let mut buffers = self.search_buffers.borrow_mut();
+            self.automata[pattern_idx].find_all_buffered(text, pattern_threshold, &mut buffers)
+        };
 
         // Filter: require first character to match pattern's first char
         // Respects case_insensitive setting
@@ -1709,7 +1719,8 @@ impl FuzzyBridge {
                 let nfa = &self.automata[pattern_idx];
                 if let Ok(text_str) = std::str::from_utf8(text) {
                     // Find all matches and take the earliest one
-                    let matches = nfa.find_all(text_str, pattern_threshold);
+                    let mut buffers = self.search_buffers.borrow_mut();
+                    let matches = nfa.find_all_buffered(text_str, pattern_threshold, &mut buffers);
                     if let Some(m) = matches.into_iter().min_by_key(|m| m.start) {
                         // Check edit char restrictions
                         if let Some(restriction) = self
@@ -1807,7 +1818,8 @@ impl FuzzyBridge {
             {
                 bitap.find_all(text, pattern_threshold)
             } else {
-                self.automata[pattern_idx].find_all(text, pattern_threshold)
+                let mut buffers = self.search_buffers.borrow_mut();
+                self.automata[pattern_idx].find_all_buffered(text, pattern_threshold, &mut buffers)
             };
 
             for m in matches {
@@ -1962,7 +1974,8 @@ impl FuzzyBridge {
         // Fuzzy matching path - need to search
         let nfa = self.automata.get(pattern_index)?;
         let effective_threshold = self.calculate_effective_threshold(pattern_index, threshold);
-        let matches = nfa.find_all(substring, effective_threshold);
+        let mut buffers = self.search_buffers.borrow_mut();
+        let matches = nfa.find_all_buffered(substring, effective_threshold, &mut buffers);
 
         // Find match that starts at position 0 of the substring
         for m in matches {
