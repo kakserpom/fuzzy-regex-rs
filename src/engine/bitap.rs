@@ -515,33 +515,42 @@ impl BitapMatcher {
     /// Find all matches in text using Bitap algorithm with k errors.
     #[must_use]
     pub fn find_all(&self, text: &str, threshold: f32) -> Vec<DamLevMatch> {
-        let max_edits = self.limits.max_edits as usize;
-        // Cap all loops at pattern_len: matches with more edits than the
-        // pattern has characters have ≤ 50% similarity and are never useful.
-        // This turns O(n·max_edits) into O(n·pattern_len) for unbounded `{e}`.
-        let effective_max = max_edits.min(self.pattern_len);
-        let text_chars: Vec<(usize, char)> = text.char_indices().collect();
+        let mut buf = Vec::new();
+        self.find_all_buffered(text, threshold, &mut buf)
+    }
 
-        if text_chars.is_empty() {
+    /// Find all matches with a pre-allocated text_chars buffer to avoid per-call allocation.
+    ///
+    /// Same as `find_all`, but reuses the `buf` for `text_chars` storage.
+    /// The buffer is cleared and filled on each call.
+    #[must_use]
+    pub fn find_all_buffered(
+        &self,
+        text: &str,
+        threshold: f32,
+        buf: &mut Vec<(usize, char)>,
+    ) -> Vec<DamLevMatch> {
+        buf.clear();
+        buf.extend(text.char_indices());
+
+        let max_edits = self.limits.max_edits as usize;
+        let effective_max = max_edits.min(self.pattern_len);
+
+        if buf.is_empty() {
             return vec![];
         }
 
         let mut matches: FxHashMap<(usize, usize), DamLevMatch> = FxHashMap::default();
 
         // State vectors: R[d] tracks matching state with exactly d errors
-        // Bit i is 0 if we've matched pattern[0..=i] with d errors
-        // Use two buffers and swap to avoid allocation per character
         let mut r: Vec<u128> = vec![!0u128; effective_max + 1];
         let mut old_r: Vec<u128> = vec![!0u128; effective_max + 1];
 
-        // Initialize: we can delete up to k characters from the start of pattern
-        // R[d] starts with first d bits as 0 (matched d chars via deletion)
-        // Left shift advances pattern position (bit i → bit i+1)
         for d in 1..=effective_max {
             r[d] = r[d - 1] << 1;
         }
 
-        for (char_idx, &(_, text_char)) in text_chars.iter().enumerate() {
+        for (char_idx, &(_, text_char)) in buf.iter().enumerate() {
             let text_char = if self.case_insensitive {
                 text_char.to_lowercase().next().unwrap_or(text_char)
             } else {
@@ -550,68 +559,44 @@ impl BitapMatcher {
 
             let char_mask = self.get_mask(text_char);
 
-            // Swap buffers: old_r gets previous r, r will be updated (no allocation!)
             std::mem::swap(&mut r, &mut old_r);
 
-            // Update R[0] (exact matching) - use old_r since we swapped
             r[0] = (old_r[0] << 1) | char_mask;
 
-            // Update R[d] for d > 0 (fuzzy matching)
             for d in 1..=effective_max {
-                // Can insert from R[d-1]: consume text char without advancing pattern
                 let insert = old_r[d - 1];
-
-                // Can delete from R[d-1]: advance pattern without consuming text
-                // Uses r[d-1] (already updated) with << 1 to advance pattern position
                 let delete = r[d - 1] << 1;
-
-                // Can substitute from R[d-1]: consume both and treat as match
                 let substitute = old_r[d - 1] << 1;
-
-                // Regular match with d errors
                 let match_d = (old_r[d] << 1) | char_mask;
-
                 r[d] = match_d & insert & delete & substitute;
             }
 
-            // Check for matches (bit pattern_len-1 is 0)
-            let end_byte = text_chars.get(char_idx + 1).map_or(text.len(), |(b, _)| *b);
+            let end_byte = buf.get(char_idx + 1).map_or(text.len(), |(b, _)| *b);
 
-            // Match-checking loop is capped at effective_max (= max_edits.min(pattern_len)).
             for d in 0..=effective_max {
                 if (r[d] & self.accept_mask) == 0 {
-                    // Pre-filter: skip error levels where the best possible
-                    // similarity is below threshold.
                     let sim_max = 1.0f32 - d as f32 / (self.pattern_len + d) as f32;
                     if sim_max < threshold {
                         continue;
                     }
-                    // Found a match with d edits
-                    // Estimate start position (approximate)
                     let min_start_char = char_idx.saturating_sub(self.pattern_len + d);
                     let max_start_char =
                         char_idx.saturating_sub(self.pattern_len.saturating_sub(d + 1));
 
                     for start_char in min_start_char..=max_start_char.min(char_idx) {
-                        let start_byte = text_chars.get(start_char).map_or(0, |(b, _)| *b);
+                        let start_byte = buf.get(start_char).map_or(0, |(b, _)| *b);
 
-                        // Fast early-reject: compute bit-parallel Levenshtein
-                        // distance. If it exceeds d, the full Damerau DP
-                        // (which can only be ≤ Levenshtein) would also exceed
-                        // d, so skip the expensive DP entirely.
                         let text_slice = &text.as_bytes()[start_byte..end_byte];
                         if self.quick_reject(text_slice, d) {
                             continue;
                         }
 
-                        // Compute exact edit breakdown using DP
                         let (insertions, deletions, substitutions, swaps) =
                             self.compute_exact_edit_breakdown(text_slice);
 
-                        // Use actual edit count from DP, verify it matches Bitap state
                         let total_edits = insertions + deletions + substitutions + swaps;
                         if total_edits as usize > d {
-                            continue; // More edits than this state allows
+                            continue;
                         }
                         let sim = self.calc_similarity(total_edits, insertions, deletions);
                         if sim >= threshold {
@@ -640,44 +625,34 @@ impl BitapMatcher {
             }
         }
 
-        // Handle text shorter than pattern: positions reached during the last iteration
-        // need extra propagation (via deletion) to reach the accept position.
-        if text_chars.len() < self.pattern_len {
-            let chars_short = self.pattern_len - text_chars.len();
+        // Handle text shorter than pattern
+        if buf.len() < self.pattern_len {
+            let chars_short = self.pattern_len - buf.len();
             for _ in 0..chars_short.min(effective_max) {
                 std::mem::swap(&mut r, &mut old_r);
 
-                // Apply deletion propagation: advance pattern position without consuming text.
-                // From d-1 errors at position p, we can delete pattern[p] to reach d errors at p+1.
-                r[0] = old_r[0]; // Can't advance without consuming text or adding error
+                r[0] = old_r[0];
                 for d in 1..=effective_max {
-                    // Deletion: skip pattern char without consuming text
                     let delete = old_r[d - 1] << 1;
-                    // Keep existing state if already matched
                     r[d] = old_r[d] & delete;
                 }
 
-                // Check for matches after propagation
                 for d in 0..=effective_max {
                     if (r[d] & self.accept_mask) == 0 {
-                        // Pre-filter: skip error levels where the best possible
-                        // similarity is below threshold.
                         let sim_max = 1.0f32 - d as f32 / (self.pattern_len + d) as f32;
                         if sim_max < threshold {
                             continue;
                         }
                         let end_byte = text.len();
-                        let min_start_char = text_chars
+                        let min_start_char = buf
                             .len()
                             .saturating_sub(self.pattern_len.saturating_sub(d + 1));
 
-                        for start_char in 0..=min_start_char.min(text_chars.len().saturating_sub(1))
-                        {
-                            let start_byte = text_chars.get(start_char).map_or(0, |(b, _)| *b);
+                        for start_char in 0..=min_start_char.min(buf.len().saturating_sub(1)) {
+                            let start_byte = buf.get(start_char).map_or(0, |(b, _)| *b);
 
                             let text_slice = &text.as_bytes()[start_byte..end_byte];
 
-                            // Fast early-reject via Levenshtein-only Bitap
                             if self.quick_reject(text_slice, max_edits) {
                                 continue;
                             }

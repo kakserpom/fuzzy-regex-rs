@@ -106,6 +106,8 @@ pub struct FuzzyBridge {
     case_insensitive: bool,
     /// Reusable search buffers to avoid per-call allocations.
     search_buffers: RefCell<SearchBuffers>,
+    /// Reusable text_chars buffer for Bitap to avoid Vec<char> allocation per call.
+    text_chars_buf: RefCell<Vec<(usize, char)>>,
     /// Word list patterns (from \L<name>) added at runtime.
     word_list_patterns: Vec<String>,
     /// Word list edit limits.
@@ -215,6 +217,7 @@ impl FuzzyBridge {
             has_char_restrictions,
             case_insensitive,
             search_buffers: RefCell::new(SearchBuffers::new()),
+            text_chars_buf: RefCell::new(Vec::new()),
             word_list_patterns: Vec::new(),
             word_list_limits: Vec::new(),
         })
@@ -353,7 +356,8 @@ impl FuzzyBridge {
             // Use Bitap when available (faster for short patterns), fall back to NFA
             // with pre-allocated buffers (avoids per-call text_chars Vec allocation).
             let matches = if let Some(ref bitap) = self.bitap_matchers[pattern_idx] {
-                bitap.find_all(text, pattern_threshold)
+                let mut buf = self.text_chars_buf.borrow_mut();
+                bitap.find_all_buffered(text, pattern_threshold, &mut buf)
             } else {
                 let mut buffers = self.search_buffers.borrow_mut();
                 nfa.find_all_buffered(text, pattern_threshold, &mut buffers)
@@ -426,7 +430,8 @@ impl FuzzyBridge {
             // Use Bitap when available (faster for short patterns), fall back to NFA
             // with pre-allocated buffers.
             let matches = if let Some(ref bitap) = self.bitap_matchers[pattern_idx] {
-                bitap.find_all(substring, pattern_threshold)
+                let mut buf = self.text_chars_buf.borrow_mut();
+                bitap.find_all_buffered(substring, pattern_threshold, &mut buf)
             } else {
                 let mut buffers = self.search_buffers.borrow_mut();
                 nfa.find_all_buffered(substring, pattern_threshold, &mut buffers)
@@ -1817,7 +1822,8 @@ impl FuzzyBridge {
                 .get(pattern_idx)
                 .and_then(|b| b.as_ref())
             {
-                bitap.find_all(text, pattern_threshold)
+                let mut buf = self.text_chars_buf.borrow_mut();
+                bitap.find_all_buffered(text, pattern_threshold, &mut buf)
             } else {
                 let mut buffers = self.search_buffers.borrow_mut();
                 self.automata[pattern_idx].find_all_buffered(text, pattern_threshold, &mut buffers)
