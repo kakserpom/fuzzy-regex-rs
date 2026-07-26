@@ -766,11 +766,7 @@ impl DamLevNfa {
                 for a in &buffers.active {
                     buffers.seen_set.insert((a.state, a.start_byte));
                 }
-                self.epsilon_closure_from(
-                    &mut buffers.active,
-                    start_idx,
-                    &mut buffers.seen_set,
-                );
+                self.epsilon_closure_from(&mut buffers.active, start_idx, &mut buffers.seen_set);
             }
 
             // Process active states - reuse next_active buffer
