@@ -389,8 +389,13 @@ impl DamLevNfa {
     #[inline]
     fn beam_prune(&self, states: &mut Vec<ActiveState>) {
         if states.len() > self.beam_width * 2 {
-            // Sort by total_edits (ascending) - states with fewer edits are better
-            states.sort_by_key(|s| s.state.total_edits());
+            // Use select_nth_unstable to partition: states with <= beam_width edits
+            // go to the front, the rest go to the back. This is O(n) instead of
+            // O(n log n) full sort.
+            let (kept, _, _) =
+                states.select_nth_unstable_by_key(self.beam_width, |s| s.state.total_edits());
+            // Sort only the kept portion (beam_width elements) for stable ordering
+            kept.sort_by_key(|s| s.state.total_edits());
             states.truncate(self.beam_width);
         }
     }
