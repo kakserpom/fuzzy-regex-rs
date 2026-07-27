@@ -1275,17 +1275,21 @@ impl DamLevNfa {
         buffers.matches.drain().map(|(_, v)| v).collect()
     }
 
-    /// Find the first match, stopping as soon as one is found.
+    /// Find the first match using pre-allocated buffers, only starting at candidate positions.
     ///
-    /// This is much faster than `find_all` when we only need the first match,
-    /// especially when the match is found early in the text.
-    #[must_use]
-    pub fn find_first_with_candidates(
+    /// Returns the earliest match found, or None if no match exists.
+    /// Picks the best match (highest similarity) at the leftmost position where a match is found.
+    /// This is much faster than `find_all_with_candidates` when we only need the first match.
+    pub fn find_first_with_candidates_buffered(
         &self,
         text: &str,
         threshold: f32,
         candidates: &FxHashSet<usize>,
+        buffers: &mut SearchBuffers,
     ) -> Option<DamLevMatch> {
+        // Clear buffers for reuse
+        buffers.clear();
+
         if self.pattern_chars.is_empty() {
             return Some(DamLevMatch {
                 start: 0,
@@ -1298,30 +1302,28 @@ impl DamLevNfa {
             });
         }
 
-        let text_chars: Vec<(usize, char)> = text.char_indices().collect();
-        let mut active: Vec<ActiveState> = Vec::new();
+        // Stream through chars without collecting - use peekable for lookahead
+        let mut char_iter = text.char_indices().peekable();
 
-        // Reusable FxHashSet to avoid allocation per character
-        let mut seen_set: FxHashSet<(State, usize)> = FxHashSet::default();
-
-        // Reusable FxHashMap for deduplication
-        let mut deduped: FxHashMap<(usize, usize, bool), ActiveState> = FxHashMap::default();
-
-        for (char_idx, &(byte_pos, text_char)) in text_chars.iter().enumerate() {
+        let mut char_idx = 0usize;
+        while let Some((byte_pos, raw_char)) = char_iter.next() {
             let text_char = if self.case_insensitive {
-                text_char.to_lowercase().next().unwrap_or(text_char)
+                raw_char.to_lowercase().next().unwrap_or(raw_char)
             } else {
-                text_char
+                raw_char
             };
 
-            // Get next text char for transposition detection
-            let next_text_char = text_chars.get(char_idx + 1).map(|&(_, c)| {
-                if self.case_insensitive {
-                    c.to_lowercase().next().unwrap_or(c)
+            // Peek next char for transposition detection and end_byte calculation
+            let next_info = char_iter.peek().map(|&(next_byte, next_char)| {
+                let c = if self.case_insensitive {
+                    next_char.to_lowercase().next().unwrap_or(next_char)
                 } else {
-                    c
-                }
+                    next_char
+                };
+                (next_byte, c)
             });
+            let next_text_char = next_info.map(|(_, c)| c);
+            let end_byte = next_info.map_or(text.len(), |(b, _)| b);
 
             // Only start a new potential match if this is a candidate position
             if candidates.contains(&byte_pos) {
@@ -1330,33 +1332,40 @@ impl DamLevNfa {
                     start_byte: byte_pos,
                     start_char: char_idx,
                 };
-                active.push(initial);
+                buffers.active.push(initial);
 
-                // Add epsilon closure for new state - in-place from last element
-                let start_idx = active.len() - 1;
-                seen_set.clear();
-                for a in &active {
-                    seen_set.insert((a.state, a.start_byte));
+                // Add epsilon closure for new state - run directly on active
+                {
+                    let start_idx = buffers.active.len() - 1;
+                    buffers.seen_set.clear();
+                    for a in &buffers.active {
+                        buffers.seen_set.insert((a.state, a.start_byte));
+                    }
+                    self.epsilon_closure_from(
+                        &mut buffers.active,
+                        start_idx,
+                        &mut buffers.seen_set,
+                    );
                 }
-                self.epsilon_closure_from(&mut active, start_idx, &mut seen_set);
             }
 
             // If no active states, continue to next char
-            if active.is_empty() {
+            if buffers.active.is_empty() {
+                char_idx += 1;
                 continue;
             }
 
-            // Process active states
-            let mut next_active: Vec<ActiveState> = Vec::new();
+            // Process active states - reuse next_active buffer
+            buffers.next_active.clear();
 
-            for active_state in &active {
+            for active_state in &buffers.active {
                 let state = active_state.state;
 
                 // If this state is marked skip_next (from a transposition), just clear the flag
                 if state.skip_next {
                     let mut continued = state;
                     continued.skip_next = false;
-                    next_active.push(ActiveState {
+                    buffers.next_active.push(ActiveState {
                         state: continued,
                         start_byte: active_state.start_byte,
                         start_char: active_state.start_char,
@@ -1368,7 +1377,7 @@ impl DamLevNfa {
                     let pattern_char = self.pattern_chars[state.pos];
 
                     if text_char == pattern_char {
-                        next_active.push(ActiveState {
+                        buffers.next_active.push(ActiveState {
                             state: state.advance_match(),
                             start_byte: active_state.start_byte,
                             start_char: active_state.start_char,
@@ -1376,7 +1385,7 @@ impl DamLevNfa {
                     }
 
                     if text_char != pattern_char && self.can_substitute(&state) {
-                        next_active.push(ActiveState {
+                        buffers.next_active.push(ActiveState {
                             state: state.advance_substitution(),
                             start_byte: active_state.start_byte,
                             start_char: active_state.start_char,
@@ -1393,7 +1402,7 @@ impl DamLevNfa {
                             && next_pattern_char == text_char
                             && pattern_char != next_pattern_char
                         {
-                            next_active.push(ActiveState {
+                            buffers.next_active.push(ActiveState {
                                 state: state.advance_swap(),
                                 start_byte: active_state.start_byte,
                                 start_char: active_state.start_char,
@@ -1403,7 +1412,7 @@ impl DamLevNfa {
                 }
 
                 if self.can_insert(&state) {
-                    next_active.push(ActiveState {
+                    buffers.next_active.push(ActiveState {
                         state: state.advance_insertion(),
                         start_byte: active_state.start_byte,
                         start_char: active_state.start_char,
@@ -1411,12 +1420,12 @@ impl DamLevNfa {
                 }
             }
 
-            seen_set.clear();
-            self.epsilon_closure(&mut next_active, &mut seen_set);
+            buffers.seen_set.clear();
+            self.epsilon_closure(&mut buffers.next_active, &mut buffers.seen_set);
 
-            // Deduplicate (keep best state) with early pruning
-            deduped.clear();
-            for active_state in next_active {
+            // Deduplicate with early pruning
+            buffers.deduped.clear();
+            for active_state in buffers.next_active.drain(..) {
                 // Early pruning: skip states that can't reach threshold
                 if self.max_possible_similarity(&active_state.state) < threshold {
                     continue;
@@ -1427,7 +1436,8 @@ impl DamLevNfa {
                     active_state.start_byte,
                     active_state.state.skip_next,
                 );
-                deduped
+                buffers
+                    .deduped
                     .entry(key)
                     .and_modify(|existing| {
                         if active_state.state.total_edits() < existing.state.total_edits() {
@@ -1437,18 +1447,15 @@ impl DamLevNfa {
                     .or_insert(active_state);
             }
 
-            active.clear();
-            active.extend(deduped.values().cloned());
+            buffers.active.clear();
+            buffers.active.extend(buffers.deduped.values().cloned());
 
             // Beam pruning: limit state explosion
-            self.beam_prune(&mut active);
+            self.beam_prune(&mut buffers.active);
 
             // Check for accepting states - return best match at this position
-            let end_byte = text_chars.get(char_idx + 1).map_or(text.len(), |(b, _)| *b);
-
-            // Find the best accepting state (highest similarity = lowest edits)
             let mut best_match: Option<DamLevMatch> = None;
-            for active_state in &active {
+            for active_state in &buffers.active {
                 if active_state.state.pos == self.pattern_chars.len()
                     && !active_state.state.skip_next
                 {
@@ -1475,14 +1482,16 @@ impl DamLevNfa {
 
             // Prune states
             let max_window = self.pattern_chars.len() + self.limits.max_edits as usize;
-            active.retain(|a| {
+            buffers.active.retain(|a| {
                 (a.state.pos < self.pattern_chars.len() || a.state.skip_next)
                     && (char_idx + 1 - a.start_char) <= max_window
             });
+
+            char_idx += 1;
         }
 
         // Check remaining states at end of text
-        for active_state in &active {
+        for active_state in &buffers.active {
             let state = active_state.state;
             if state.skip_next {
                 continue;
@@ -1521,6 +1530,21 @@ impl DamLevNfa {
         }
 
         None
+    }
+
+    /// Find the first match, stopping as soon as one is found.
+    ///
+    /// This is much faster than `find_all` when we only need the first match,
+    /// especially when the match is found early in the text.
+    #[must_use]
+    pub fn find_first_with_candidates(
+        &self,
+        text: &str,
+        threshold: f32,
+        candidates: &FxHashSet<usize>,
+    ) -> Option<DamLevMatch> {
+        let mut buffers = SearchBuffers::new();
+        self.find_first_with_candidates_buffered(text, threshold, candidates, &mut buffers)
     }
 }
 

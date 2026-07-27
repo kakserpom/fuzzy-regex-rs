@@ -939,9 +939,15 @@ impl FuzzyBridge {
             // Fall through to NFA if validation failed
         }
 
-        // Fall back to Levenshtein NFA
+        // Fall back to Levenshtein NFA with pre-allocated buffers
         let nfa = &self.automata[0];
-        if let Some(m) = nfa.find_first_with_candidates(text, pattern_threshold, &candidates) {
+        let mut buffers = self.search_buffers.borrow_mut();
+        if let Some(m) = nfa.find_first_with_candidates_buffered(
+            text,
+            pattern_threshold,
+            &candidates,
+            &mut buffers,
+        ) {
             // Validate character class restrictions if present
             if let Some(restriction) = self.edit_char_restrictions.first().and_then(|r| r.as_ref())
             {
@@ -1608,9 +1614,13 @@ impl FuzzyBridge {
                     {
                         let nfa = &self.automata[pattern_idx];
                         let candidates: FxHashSet<usize> = std::iter::once(pos).collect();
-                        if let Some(m) =
-                            nfa.find_first_with_candidates(text_str, pattern_threshold, &candidates)
-                            && m.start == pos
+                        let mut buffers = self.search_buffers.borrow_mut();
+                        if let Some(m) = nfa.find_first_with_candidates_buffered(
+                            text_str,
+                            pattern_threshold,
+                            &candidates,
+                            &mut buffers,
+                        ) && m.start == pos
                         {
                             // Check edit char restrictions
                             if let Some(restriction) = self
