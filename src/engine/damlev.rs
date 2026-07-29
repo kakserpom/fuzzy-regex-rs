@@ -99,7 +99,7 @@ impl EditLimits {
 }
 
 /// A match found by the `DamLev` automaton.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct DamLevMatch {
     /// Start position of the match (byte offset, inclusive).
     pub start: usize,
@@ -133,6 +133,8 @@ impl DamLevMatch {
 struct State {
     /// Position in pattern (`0..=pattern_len`).
     pos: usize,
+    /// Cached total edit count (sum of insertions + deletions + substitutions + swaps).
+    total_edits: u8,
     /// Number of insertions used.
     insertions: u8,
     /// Number of deletions used.
@@ -149,6 +151,7 @@ impl State {
     fn new(pos: usize) -> Self {
         State {
             pos,
+            total_edits: 0,
             insertions: 0,
             deletions: 0,
             substitutions: 0,
@@ -157,17 +160,11 @@ impl State {
         }
     }
 
-    fn total_edits(&self) -> u8 {
-        self.insertions
-            .saturating_add(self.deletions)
-            .saturating_add(self.substitutions)
-            .saturating_add(self.swaps)
-    }
-
     fn advance_match(&self) -> Self {
         State {
             pos: self.pos + 1,
             skip_next: false,
+            total_edits: self.total_edits,
             ..*self
         }
     }
@@ -176,6 +173,7 @@ impl State {
         State {
             pos: self.pos + 1,
             substitutions: self.substitutions + 1,
+            total_edits: self.total_edits + 1,
             skip_next: false,
             ..*self
         }
@@ -185,6 +183,7 @@ impl State {
         State {
             pos: self.pos + 1,
             deletions: self.deletions + 1,
+            total_edits: self.total_edits + 1,
             skip_next: false,
             ..*self
         }
@@ -193,6 +192,7 @@ impl State {
     fn advance_insertion(&self) -> Self {
         State {
             insertions: self.insertions + 1,
+            total_edits: self.total_edits + 1,
             skip_next: false,
             ..*self
         }
@@ -204,6 +204,7 @@ impl State {
         State {
             pos: self.pos + 2,
             swaps: self.swaps + 1,
+            total_edits: self.total_edits + 1,
             skip_next: true, // Skip next text char since transposition consumes 2
             ..*self
         }
@@ -211,7 +212,7 @@ impl State {
 }
 
 /// Active state tracking match start position.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct ActiveState {
     state: State,
     start_byte: usize,
@@ -262,7 +263,7 @@ impl DamLevNfa {
 
     /// Check if we can do an insertion.
     fn can_insert(&self, state: &State) -> bool {
-        if state.total_edits() >= self.limits.max_edits {
+        if state.total_edits >= self.limits.max_edits {
             return false;
         }
         self.limits
@@ -272,7 +273,7 @@ impl DamLevNfa {
 
     /// Check if we can do a deletion.
     fn can_delete(&self, state: &State) -> bool {
-        if state.total_edits() >= self.limits.max_edits {
+        if state.total_edits >= self.limits.max_edits {
             return false;
         }
         self.limits
@@ -282,7 +283,7 @@ impl DamLevNfa {
 
     /// Check if we can do a substitution.
     fn can_substitute(&self, state: &State) -> bool {
-        if state.total_edits() >= self.limits.max_edits {
+        if state.total_edits >= self.limits.max_edits {
             return false;
         }
         self.limits
@@ -292,7 +293,7 @@ impl DamLevNfa {
 
     /// Check if we can do a swap (transposition).
     fn can_swap(&self, state: &State) -> bool {
-        if state.total_edits() >= self.limits.max_edits {
+        if state.total_edits >= self.limits.max_edits {
             return false;
         }
         self.limits.max_swaps.is_none_or(|max| state.swaps < max)
@@ -344,7 +345,7 @@ impl DamLevNfa {
             return 1.0;
         }
 
-        let edit_distance = f32::from(state.total_edits());
+        let edit_distance = f32::from(state.total_edits);
         // Matched text length = pattern_len + insertions - deletions
         let matched_len = pattern_len + f32::from(state.insertions) - f32::from(state.deletions);
         let max_len = pattern_len.max(matched_len).max(1.0);
@@ -369,7 +370,7 @@ impl DamLevNfa {
             return 1.0;
         }
 
-        let min_edits = f32::from(state.total_edits());
+        let min_edits = f32::from(state.total_edits);
 
         // Current matched length estimate (can grow with more insertions)
         let current_matched_len =
@@ -377,7 +378,7 @@ impl DamLevNfa {
 
         // The max possible denominator is max(pattern_len, current_matched_len + remaining_edits)
         // We're conservative: use the largest plausible denominator
-        let remaining_edits = f32::from(self.limits.max_edits - state.total_edits());
+        let remaining_edits = f32::from(self.limits.max_edits - state.total_edits);
         let max_denominator = pattern_len.max(current_matched_len + remaining_edits);
 
         // Best case: no more edits needed, largest denominator
@@ -393,9 +394,9 @@ impl DamLevNfa {
             // go to the front, the rest go to the back. This is O(n) instead of
             // O(n log n) full sort.
             let (kept, _, _) =
-                states.select_nth_unstable_by_key(self.beam_width, |s| s.state.total_edits());
+                states.select_nth_unstable_by_key(self.beam_width, |s| s.state.total_edits);
             // Sort only the kept portion (beam_width elements) for stable ordering
-            kept.sort_by_key(|s| s.state.total_edits());
+            kept.sort_by_key(|s| s.state.total_edits);
             states.truncate(self.beam_width);
         }
     }
@@ -598,7 +599,7 @@ impl DamLevNfa {
                     .entry(key)
                     .and_modify(|existing| {
                         // Keep state with fewer edits
-                        if active_state.state.total_edits() < existing.state.total_edits() {
+                        if active_state.state.total_edits < existing.state.total_edits {
                             *existing = active_state.clone();
                         }
                     })
@@ -661,7 +662,7 @@ impl DamLevNfa {
             let remaining = (self.pattern_chars.len() - state.pos) as u8;
 
             // Can we delete all remaining pattern chars?
-            if remaining <= self.limits.max_edits - state.total_edits() {
+            if remaining <= self.limits.max_edits - state.total_edits {
                 let dels_needed = remaining;
                 let total_dels = state.deletions + dels_needed;
 
@@ -673,6 +674,7 @@ impl DamLevNfa {
                     let final_state = State {
                         pos: self.pattern_chars.len(),
                         deletions: total_dels,
+                        total_edits: state.total_edits + dels_needed,
                         ..state
                     };
 
@@ -859,7 +861,7 @@ impl DamLevNfa {
                     .deduped
                     .entry(key)
                     .and_modify(|existing| {
-                        if active_state.state.total_edits() < existing.state.total_edits() {
+                        if active_state.state.total_edits < existing.state.total_edits {
                             *existing = active_state.clone();
                         }
                     })
@@ -895,7 +897,7 @@ impl DamLevNfa {
                             .entry(key)
                             .and_modify(|existing| {
                                 if m.similarity > existing.similarity {
-                                    *existing = m.clone();
+                                    *existing = m;
                                 }
                             })
                             .or_insert(m);
@@ -921,7 +923,7 @@ impl DamLevNfa {
             }
             let remaining = self.pattern_chars.len() - state.pos;
 
-            if remaining as u8 <= self.limits.max_edits - state.total_edits() {
+            if remaining as u8 <= self.limits.max_edits - state.total_edits {
                 let dels_needed = remaining as u8;
                 let total_dels = state.deletions + dels_needed;
 
@@ -933,6 +935,7 @@ impl DamLevNfa {
                     let final_state = State {
                         pos: self.pattern_chars.len(),
                         deletions: total_dels,
+                        total_edits: state.total_edits + dels_needed,
                         ..state
                     };
 
@@ -954,7 +957,7 @@ impl DamLevNfa {
                             .entry(key)
                             .and_modify(|existing| {
                                 if m.similarity > existing.similarity {
-                                    *existing = m.clone();
+                                    *existing = m;
                                 }
                             })
                             .or_insert(m);
@@ -1168,7 +1171,7 @@ impl DamLevNfa {
                     .deduped
                     .entry(key)
                     .and_modify(|existing| {
-                        if active_state.state.total_edits() < existing.state.total_edits() {
+                        if active_state.state.total_edits < existing.state.total_edits {
                             *existing = active_state.clone();
                         }
                     })
@@ -1204,7 +1207,7 @@ impl DamLevNfa {
                             .entry(key)
                             .and_modify(|existing| {
                                 if m.similarity > existing.similarity {
-                                    *existing = m.clone();
+                                    *existing = m;
                                 }
                             })
                             .or_insert(m);
@@ -1230,7 +1233,7 @@ impl DamLevNfa {
             }
             let remaining = self.pattern_chars.len() - state.pos;
 
-            if remaining as u8 <= self.limits.max_edits - state.total_edits() {
+            if remaining as u8 <= self.limits.max_edits - state.total_edits {
                 let dels_needed = remaining as u8;
                 let total_dels = state.deletions + dels_needed;
 
@@ -1242,6 +1245,7 @@ impl DamLevNfa {
                     let final_state = State {
                         pos: self.pattern_chars.len(),
                         deletions: total_dels,
+                        total_edits: state.total_edits + dels_needed,
                         ..state
                     };
 
@@ -1263,7 +1267,7 @@ impl DamLevNfa {
                             .entry(key)
                             .and_modify(|existing| {
                                 if m.similarity > existing.similarity {
-                                    *existing = m.clone();
+                                    *existing = m;
                                 }
                             })
                             .or_insert(m);
@@ -1440,7 +1444,7 @@ impl DamLevNfa {
                     .deduped
                     .entry(key)
                     .and_modify(|existing| {
-                        if active_state.state.total_edits() < existing.state.total_edits() {
+                        if active_state.state.total_edits < existing.state.total_edits {
                             *existing = active_state.clone();
                         }
                     })
@@ -1498,7 +1502,7 @@ impl DamLevNfa {
             }
             let remaining = self.pattern_chars.len() - state.pos;
 
-            if remaining as u8 <= self.limits.max_edits - state.total_edits() {
+            if remaining as u8 <= self.limits.max_edits - state.total_edits {
                 let dels_needed = remaining as u8;
                 let total_dels = state.deletions + dels_needed;
 
@@ -1510,6 +1514,7 @@ impl DamLevNfa {
                     let final_state = State {
                         pos: self.pattern_chars.len(),
                         deletions: total_dels,
+                        total_edits: state.total_edits + dels_needed,
                         ..state
                     };
 
