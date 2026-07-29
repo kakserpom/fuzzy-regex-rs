@@ -10,6 +10,17 @@
     clippy::too_many_lines
 )]
 
+/// Fast case-insensitive character conversion.
+/// Uses ASCII fast-path to avoid ToLowercase iterator allocation for common case.
+#[inline]
+fn to_lower_char(c: char) -> char {
+    if c.is_ascii() {
+        c.to_ascii_lowercase()
+    } else {
+        c.to_lowercase().next().unwrap_or(c)
+    }
+}
+
 use super::hash::{FxHashMap, FxHashSet};
 
 /// Reusable buffers for NFA search to avoid allocations.
@@ -469,7 +480,7 @@ impl DamLevNfa {
         // Process text character by character
         for (char_idx, &(byte_pos, text_char)) in text_chars.iter().enumerate() {
             let text_char = if self.case_insensitive {
-                text_char.to_lowercase().next().unwrap_or(text_char)
+                to_lower_char(text_char)
             } else {
                 text_char
             };
@@ -477,7 +488,7 @@ impl DamLevNfa {
             // Get next text char for transposition detection
             let next_text_char = text_chars.get(char_idx + 1).map(|&(_, c)| {
                 if self.case_insensitive {
-                    c.to_lowercase().next().unwrap_or(c)
+                    to_lower_char(c)
                 } else {
                     c
                 }
@@ -735,21 +746,23 @@ impl DamLevNfa {
             }];
         }
 
-        // Stream through chars without collecting - use peekable for lookahead
-        let mut char_iter = text.char_indices().peekable();
+        // Stream through chars without peekable overhead
+        let mut char_iter = text.char_indices();
+        let mut next_char = char_iter.next();
 
         let mut char_idx = 0usize;
-        while let Some((byte_pos, raw_char)) = char_iter.next() {
+        while let Some((byte_pos, raw_char)) = next_char {
+            next_char = char_iter.next();
             let text_char = if self.case_insensitive {
-                raw_char.to_lowercase().next().unwrap_or(raw_char)
+                to_lower_char(raw_char)
             } else {
                 raw_char
             };
 
-            // Peek next char for transposition detection and end_byte calculation
-            let next_info = char_iter.peek().map(|&(next_byte, next_char)| {
+            // Next char for transposition detection and end_byte calculation
+            let next_info = next_char.map(|(next_byte, next_char)| {
                 let c = if self.case_insensitive {
-                    next_char.to_lowercase().next().unwrap_or(next_char)
+                    to_lower_char(next_char)
                 } else {
                     next_char
                 };
@@ -1039,21 +1052,23 @@ impl DamLevNfa {
             }];
         }
 
-        // Stream through chars without collecting - use peekable for lookahead
-        let mut char_iter = text.char_indices().peekable();
+        // Stream through chars without peekable overhead
+        let mut char_iter = text.char_indices();
+        let mut next_char = char_iter.next();
 
         let mut char_idx = 0usize;
-        while let Some((byte_pos, raw_char)) = char_iter.next() {
+        while let Some((byte_pos, raw_char)) = next_char {
+            next_char = char_iter.next();
             let text_char = if self.case_insensitive {
-                raw_char.to_lowercase().next().unwrap_or(raw_char)
+                to_lower_char(raw_char)
             } else {
                 raw_char
             };
 
-            // Peek next char for transposition detection and end_byte calculation
-            let next_info = char_iter.peek().map(|&(next_byte, next_char)| {
+            // Next char for transposition detection and end_byte calculation
+            let next_info = next_char.map(|(next_byte, next_char)| {
                 let c = if self.case_insensitive {
-                    next_char.to_lowercase().next().unwrap_or(next_char)
+                    to_lower_char(next_char)
                 } else {
                     next_char
                 };
@@ -1306,21 +1321,23 @@ impl DamLevNfa {
             });
         }
 
-        // Stream through chars without collecting - use peekable for lookahead
-        let mut char_iter = text.char_indices().peekable();
+        // Stream through chars without peekable overhead
+        let mut char_iter = text.char_indices();
+        let mut next_char = char_iter.next();
 
         let mut char_idx = 0usize;
-        while let Some((byte_pos, raw_char)) = char_iter.next() {
+        while let Some((byte_pos, raw_char)) = next_char {
+            next_char = char_iter.next();
             let text_char = if self.case_insensitive {
-                raw_char.to_lowercase().next().unwrap_or(raw_char)
+                to_lower_char(raw_char)
             } else {
                 raw_char
             };
 
-            // Peek next char for transposition detection and end_byte calculation
-            let next_info = char_iter.peek().map(|&(next_byte, next_char)| {
+            // Next char for transposition detection and end_byte calculation
+            let next_info = next_char.map(|(next_byte, next_char)| {
                 let c = if self.case_insensitive {
-                    next_char.to_lowercase().next().unwrap_or(next_char)
+                    to_lower_char(next_char)
                 } else {
                     next_char
                 };
