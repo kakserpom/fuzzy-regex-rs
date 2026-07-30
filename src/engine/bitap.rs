@@ -519,7 +519,7 @@ impl BitapMatcher {
         self.find_all_buffered(text, threshold, &mut buf)
     }
 
-    /// Find all matches with a pre-allocated text_chars buffer to avoid per-call allocation.
+    /// Find all matches with a pre-allocated `text_chars` buffer to avoid per-call allocation.
     ///
     /// Same as `find_all`, but reuses the `buf` for `text_chars` storage.
     /// The buffer is cleared and filled on each call.
@@ -615,7 +615,7 @@ impl BitapMatcher {
                                 .entry(key)
                                 .and_modify(|existing| {
                                     if m.similarity > existing.similarity {
-                                        *existing = m.clone();
+                                        *existing = m;
                                     }
                                 })
                                 .or_insert(m);
@@ -679,7 +679,7 @@ impl BitapMatcher {
                                         .entry(key)
                                         .and_modify(|existing| {
                                             if m.similarity > existing.similarity {
-                                                *existing = m.clone();
+                                                *existing = m;
                                             }
                                         })
                                         .or_insert(m);

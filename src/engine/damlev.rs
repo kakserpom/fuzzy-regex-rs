@@ -11,7 +11,7 @@
 )]
 
 /// Fast case-insensitive character conversion.
-/// Uses ASCII fast-path to avoid ToLowercase iterator allocation for common case.
+/// Uses ASCII fast-path to avoid `ToLowercase` iterator allocation for common case.
 #[inline]
 fn to_lower_char(c: char) -> char {
     if c.is_ascii() {
@@ -493,11 +493,7 @@ impl DamLevNfa {
                 for a in &buffers.active {
                     buffers.seen_set.insert((a.state, a.start_byte));
                 }
-                self.epsilon_closure_from(
-                    &mut buffers.active,
-                    start_idx,
-                    &mut buffers.seen_set,
-                );
+                self.epsilon_closure_from(&mut buffers.active, start_idx, &mut buffers.seen_set);
             }
 
             // Process active states - reuse next_active buffer
@@ -618,8 +614,7 @@ impl DamLevNfa {
                         // Prefer leftmost, then fewest edits, then shortest span
                         if best_match.as_ref().is_none_or(|best| {
                             m.start < best.start
-                                || (m.start == best.start
-                                    && m.total_edits() < best.total_edits())
+                                || (m.start == best.start && m.total_edits() < best.total_edits())
                                 || (m.start == best.start
                                     && m.total_edits() == best.total_edits()
                                     && m.end < best.end)
@@ -679,8 +674,7 @@ impl DamLevNfa {
                         // Prefer leftmost, then fewest edits, then shortest span
                         if best_match.as_ref().is_none_or(|best| {
                             m.start < best.start
-                                || (m.start == best.start
-                                    && m.total_edits() < best.total_edits())
+                                || (m.start == best.start && m.total_edits() < best.total_edits())
                                 || (m.start == best.start
                                     && m.total_edits() == best.total_edits()
                                     && m.end < best.end)
@@ -859,14 +853,14 @@ impl DamLevNfa {
                     .and_modify(|existing| {
                         // Keep state with fewer edits
                         if active_state.state.total_edits < existing.state.total_edits {
-                            *existing = active_state.clone();
+                            *existing = active_state;
                         }
                     })
                     .or_insert(active_state);
             }
 
             active.clear();
-            active.extend(deduped.values().cloned());
+            active.extend(deduped.values().copied());
 
             // Beam pruning: if too many states, keep only the best ones
             self.beam_prune(&mut active);
@@ -895,7 +889,7 @@ impl DamLevNfa {
                             .entry(key)
                             .and_modify(|existing| {
                                 if m.similarity > existing.similarity {
-                                    *existing = m.clone();
+                                    *existing = m;
                                 }
                             })
                             .or_insert(m);
@@ -954,7 +948,7 @@ impl DamLevNfa {
                             .entry(key)
                             .and_modify(|existing| {
                                 if m.similarity > existing.similarity {
-                                    *existing = m.clone();
+                                    *existing = m;
                                 }
                             })
                             .or_insert(m);
@@ -966,7 +960,7 @@ impl DamLevNfa {
         matches.into_values().collect()
     }
 
-    /// Find all matches using pre-allocated buffers (streaming, no text_chars Vec).
+    /// Find all matches using pre-allocated buffers (streaming, no `text_chars` Vec).
     ///
     /// Like `find_all` but avoids the per-call allocation of `text_chars` and uses
     /// the caller-supplied `SearchBuffers` for all internal state. This is the
@@ -1123,14 +1117,14 @@ impl DamLevNfa {
                     .entry(key)
                     .and_modify(|existing| {
                         if active_state.state.total_edits < existing.state.total_edits {
-                            *existing = active_state.clone();
+                            *existing = active_state;
                         }
                     })
                     .or_insert(active_state);
             }
 
             buffers.active.clear();
-            buffers.active.extend(buffers.deduped.values().cloned());
+            buffers.active.extend(buffers.deduped.values().copied());
 
             // Beam pruning: limit state explosion
             self.beam_prune(&mut buffers.active);
@@ -1435,14 +1429,14 @@ impl DamLevNfa {
                     .entry(key)
                     .and_modify(|existing| {
                         if active_state.state.total_edits < existing.state.total_edits {
-                            *existing = active_state.clone();
+                            *existing = active_state;
                         }
                     })
                     .or_insert(active_state);
             }
 
             buffers.active.clear();
-            buffers.active.extend(buffers.deduped.values().cloned());
+            buffers.active.extend(buffers.deduped.values().copied());
 
             // Beam pruning: limit state explosion
             self.beam_prune(&mut buffers.active);
@@ -1710,14 +1704,14 @@ impl DamLevNfa {
                     .entry(key)
                     .and_modify(|existing| {
                         if active_state.state.total_edits < existing.state.total_edits {
-                            *existing = active_state.clone();
+                            *existing = active_state;
                         }
                     })
                     .or_insert(active_state);
             }
 
             buffers.active.clear();
-            buffers.active.extend(buffers.deduped.values().cloned());
+            buffers.active.extend(buffers.deduped.values().copied());
 
             // Beam pruning: limit state explosion
             self.beam_prune(&mut buffers.active);

@@ -106,7 +106,7 @@ pub struct FuzzyBridge {
     case_insensitive: bool,
     /// Reusable search buffers to avoid per-call allocations.
     search_buffers: RefCell<SearchBuffers>,
-    /// Reusable text_chars buffer for Bitap to avoid Vec<char> allocation per call.
+    /// Reusable `text_chars` buffer for Bitap to avoid Vec<char> allocation per call.
     text_chars_buf: RefCell<Vec<(usize, char)>>,
     /// Word list patterns (from \L<name>) added at runtime.
     word_list_patterns: Vec<String>,
