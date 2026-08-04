@@ -773,7 +773,17 @@ impl<'t> Iterator for Split<'_, 't> {
 
         if let Some(m) = result {
             let segment = &self.text[self.pos..m.start()];
-            self.pos = m.end();
+            self.pos = if m.end() > self.pos {
+                m.end()
+            } else {
+                // Zero-width match (e.g. a fuzzy literal that deleted the whole
+                // pattern at end of text): advance one char to guarantee
+                // progress, otherwise `split` loops forever.
+                self.text[self.pos..]
+                    .char_indices()
+                    .nth(1)
+                    .map_or(self.text.len() + 1, |(i, _)| self.pos + i)
+            };
             Some(segment)
         } else {
             let segment = &self.text[self.pos..];

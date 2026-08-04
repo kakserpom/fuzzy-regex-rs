@@ -2945,7 +2945,7 @@ mod tests {
         let bridge = if literals.is_empty() {
             None
         } else {
-            FuzzyBridge::new(&literals, None, None, case_insensitive)
+            FuzzyBridge::new(&literals, None, None, case_insensitive, false)
         };
 
         Dfa::from_nfa(&nfa, bridge.as_ref(), case_insensitive, multi_line, 1.0)

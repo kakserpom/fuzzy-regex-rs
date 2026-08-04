@@ -2346,7 +2346,7 @@ impl State {
         let bridge = if literals.is_empty() {
             None
         } else {
-            FuzzyBridge::new(&literals, None, None, false).map(Arc::new)
+            FuzzyBridge::new(&literals, None, None, false, false).map(Arc::new)
         };
         State::Lookbehind {
             positive,

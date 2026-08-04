@@ -220,6 +220,32 @@ fn extract_fuzzy_group_budgets(nfa: &Nfa) -> Vec<FuzzyLimits> {
     budgets.into_values().collect()
 }
 
+/// Extract per-group `min_edits` lower bounds from the NFA states.
+/// Returns a vec indexed by `fuzzy_group_id` (matching `fuzzy_group_budgets`).
+fn extract_fuzzy_group_mins(nfa: &Nfa) -> Vec<Option<u8>> {
+    use std::collections::BTreeMap;
+    let mut mins: BTreeMap<usize, Option<u8>> = BTreeMap::new();
+    for state in &nfa.states {
+        match state {
+            State::FuzzyLiteral {
+                fuzzy_group_id: Some(id),
+                min_edits,
+                ..
+            }
+            | State::FuzzyChar {
+                fuzzy_group_id: Some(id),
+                min_edits,
+                ..
+            } => {
+                mins.entry(*id)
+                    .or_insert_with(|| *min_edits);
+            }
+            _ => {}
+        }
+    }
+    mins.into_values().collect()
+}
+
 /// Configuration for the matcher.
 #[derive(Debug, Clone)]
 pub struct MatcherConfig {
@@ -298,6 +324,8 @@ pub struct Matcher<'a> {
     /// Per-group shared edit budgets for multi-piece fuzzy groups.
     /// Indexed by `fuzzy_group_id` from the NFA states.
     fuzzy_group_budgets: Vec<FuzzyLimits>,
+    /// Per-group `min_edits` lower bounds, indexed by `fuzzy_group_id`.
+    fuzzy_group_mins: Vec<Option<u8>>,
 }
 
 impl<'a> Matcher<'a> {
@@ -316,6 +344,7 @@ impl<'a> Matcher<'a> {
         let ends_with_end_anchor = nfa.ends_with_end_anchor();
         let max_simple_length = Self::calculate_max_length(nfa, fuzzy_bridge);
         let fuzzy_group_budgets = extract_fuzzy_group_budgets(nfa);
+        let fuzzy_group_mins = extract_fuzzy_group_mins(nfa);
         Matcher {
             nfa,
             fuzzy_bridge,
@@ -330,6 +359,7 @@ impl<'a> Matcher<'a> {
             max_simple_length,
             handlers,
             fuzzy_group_budgets,
+            fuzzy_group_mins,
         }
     }
 
@@ -360,6 +390,7 @@ impl<'a> Matcher<'a> {
         let max_simple_length = Self::calculate_max_length(nfa, fuzzy_bridge);
 
         let fuzzy_group_budgets = extract_fuzzy_group_budgets(nfa);
+        let fuzzy_group_mins = extract_fuzzy_group_mins(nfa);
         Matcher {
             nfa,
             fuzzy_bridge,
@@ -374,6 +405,7 @@ impl<'a> Matcher<'a> {
             max_simple_length,
             handlers,
             fuzzy_group_budgets,
+            fuzzy_group_mins,
         }
     }
 
@@ -1345,6 +1377,27 @@ impl<'a> Matcher<'a> {
         self.find_at_with_cache(text, start, None)
     }
 
+    /// Search cost for the beam dedup: global edit cost plus a penalty for each
+    /// fuzzy group whose accumulated edits are still below its `min_edits`
+    /// bound. Without the penalty, a cheap trailing-padding alignment (which
+    /// never satisfies a `{1<=e<=N}` minimum) would dedup away the
+    /// min-satisfying alignment at the same (state, pos), producing a false
+    /// negative — e.g. `^(?:[a-c]+){1<=e<=3}` on "aaccad".
+    #[must_use]
+    fn thread_search_cost(&self, thread: &Thread) -> u16 {
+        let base = thread.edits.cost(1, 1, 1, 1);
+        let mut shortfall: u32 = 0;
+        for (id, min) in self.fuzzy_group_mins.iter().enumerate() {
+            if let Some(m) = min
+                && let Some(e) = thread.group_edits.get(id)
+                && e.total() < *m
+            {
+                shortfall += u32::from(*m - e.total());
+            }
+        }
+        base + (shortfall.saturating_mul(8).min(u16::MAX as u32 - u32::from(base))) as u16
+    }
+
     /// Build the fuzzy cache for the given text.
     ///
     /// This can be used for lazy iteration where we want to compute the cache
@@ -1426,10 +1479,10 @@ impl<'a> Matcher<'a> {
             best_at_pos.clear();
             for (idx, thread) in next_threads.iter().enumerate() {
                 let key = (thread.state, thread.pos);
-                let cost = thread.edits.cost(1, 1, 1, 1);
+                let cost = self.thread_search_cost(thread);
                 match best_at_pos.get(&key) {
                     Some(&existing_idx)
-                        if next_threads[existing_idx].edits.cost(1, 1, 1, 1) <= cost => {}
+                        if self.thread_search_cost(&next_threads[existing_idx]) <= cost => {}
                     _ => {
                         best_at_pos.insert(key, idx);
                     }
@@ -1437,7 +1490,7 @@ impl<'a> Matcher<'a> {
             }
             admitted.clear();
             admitted.extend(best_at_pos.iter().filter_map(|(key, &idx)| {
-                let cost = next_threads[idx].edits.cost(1, 1, 1, 1);
+                let cost = self.thread_search_cost(&next_threads[idx]);
                 match best_cost.get(key) {
                     Some(&prev) if cost >= prev => None,
                     _ => {
@@ -1489,9 +1542,41 @@ impl<'a> Matcher<'a> {
         cached: Option<&CachedMatches>,
     ) {
         let state = &self.nfa.states[thread.state];
+        let trace = std::env::var("MATCHER_TRACE").is_ok();
+        if trace {
+            eprintln!(
+                "STEP st={} pos={} edits={:?} start={} sim={:.3}",
+                thread.state, thread.pos, thread.edits, thread.match_start, thread.similarity
+            );
+        }
 
         match state {
             State::Accept => {
+                if trace {
+                    eprintln!(
+                        "  ACCEPT pos={} edits={:?} sim={:.3}",
+                        thread.pos, thread.edits, thread.similarity
+                    );
+                }
+                // Enforce per-group `min_edits` lower bounds: a fuzzy group must
+                // have accumulated at least its minimum core edits by the time
+                // the pattern accepts. Trailing-padding insertions are not part
+                // of `group_edits` (see the FuzzyChar handler), so a zero-edit
+                // exact group match is rejected, matching mrab's `{1<=e<=N}`.
+                let group_min_ok = self
+                    .fuzzy_group_mins
+                    .iter()
+                    .enumerate()
+                    .all(|(id, min)|                     match min {
+                        None => true,
+                        Some(m) => thread
+                            .group_edits
+                            .get(id)
+                            .is_none_or(|e| e.total() >= *m),
+                    });
+                if !group_min_ok {
+                    return;
+                }
                 let match_start = thread.match_start;
                 let end_pos = thread.pos;
                 let similarity = thread.similarity;
@@ -1627,7 +1712,7 @@ impl<'a> Matcher<'a> {
             State::FuzzyChar {
                 class,
                 limits,
-                min_edits: _,
+                min_edits,
                 cost_constraint: _,
                 edit_chars,
                 fuzzy_group_id,
@@ -1657,12 +1742,25 @@ impl<'a> Matcher<'a> {
 
                 let current_edits = thread.edits.total();
 
+                // mrab semantics: when the text char at this position matches the
+                // class exactly, only the exact transition is generated. Deletion
+                // and leading insertion are only available when the char does not
+                // match (or the text is exhausted), so a zero-edit exact match is
+                // rejected by `{1<=e<=N}` instead of being rescued by fallback ops.
+                let current_matches = thread.pos < text.len()
+                    && text[thread.pos..]
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| class.matches(ch));
+
                 // Calculate similarity penalty per edit
                 let edit_penalty = if max_edits > 0 {
                     1.0 / (f32::from(max_edits) + 1.0)
                 } else {
                     1.0
                 };
+
+                let has_min = min_edits.is_some_and(|m| m > 0);
 
                 // Emit a completed class-char match advancing to `next` at
                 // `base_pos`, then also emit "trailing insertion" variants that
@@ -1671,7 +1769,7 @@ impl<'a> Matcher<'a> {
                 // a fuzzy class match extra characters on either side, e.g.
                 // `^(?:[cd]){i<=1}$` matching "dz" (trailing) or "zd" (leading).
                 let push_match_and_trailing =
-                    |next_threads: &mut Vec<Thread>,
+                     |next_threads: &mut Vec<Thread>,
                      base_pos: usize,
                      base_edits: EditCounts,
                      base_sim: f32| {
@@ -1706,7 +1804,15 @@ impl<'a> Matcher<'a> {
                         let mut edits = base_edits;
                         let mut extra_insertions: u8 = 0;
                         let mut sim = base_sim;
-                        while edits.total() < max_edits
+                        // mrab: trailing insertions from single-char fuzzy
+                        // classes are suppressed for min-edit groups when the
+                        // base match is exact (0 core edits).  Multi-char
+                        // trailing insertions are handled by the FuzzyLiteral
+                        // handler instead.
+                        let suppress_trailing = has_min
+                            && base_delta.total() == 0;
+                        if !suppress_trailing {
+                            while edits.total() < max_edits
                             && edits.insertions < max_insertions
                             && tpos < text.len()
                         {
@@ -1748,6 +1854,7 @@ impl<'a> Matcher<'a> {
                                     &acc_delta,
                                 ),
                             });
+                        }
                         }
                     };
 
@@ -1792,7 +1899,10 @@ impl<'a> Matcher<'a> {
                 }
 
                 // 2. Try deletion (skip this pattern char without consuming text)
-                if current_edits < max_edits && thread.edits.deletions < max_deletions {
+                if !current_matches
+                    && current_edits < max_edits
+                    && thread.edits.deletions < max_deletions
+                {
                     let del_edit = EditCounts {
                         deletions: 1,
                         ..EditCounts::default()
@@ -1823,7 +1933,8 @@ impl<'a> Matcher<'a> {
                 // 3. Try leading insertion (consume an extra text char before the
                 // class char). Self-loop on this FuzzyChar state; the (state, pos)
                 // dedup in the driver keeps it terminating.
-                if thread.pos < text.len()
+                if !current_matches
+                    && thread.pos < text.len()
                     && current_edits < max_edits
                     && thread.edits.insertions < max_insertions
                     && let Some(ch) = text[thread.pos..].chars().next()
@@ -1911,10 +2022,18 @@ impl<'a> Matcher<'a> {
                     } else {
                         let expected_end = self.find_expected_end(*next, text.len());
 
+                        // Minimum edits for group-less literals (e.g. the
+                        // trailing atom in `abc{1<=e<=2}`) are enforced here.
+                        // Literals inside a fuzzy group (`(?:...)`) defer the
+                        // minimum to the group-level check at Accept, since
+                        // mrab accumulates errors across the whole group and an
+                        // exact prefix piece must not be rejected on its own
+                        // (`(?:bbcab(?:aaa|cb)bc){1<=e<=2}` deletes one char in
+                        // the final `bc` piece).
                         let meets_min_edits = |result: &FuzzyMatchResult| -> bool {
-                            match min_edits {
-                                Some(min) => result.total_edits() >= *min,
-                                None => true,
+                            match (min_edits, fuzzy_group_id) {
+                                (Some(min), None) => result.total_edits() >= *min,
+                                _ => true,
                             }
                         };
 
@@ -1934,148 +2053,262 @@ impl<'a> Matcher<'a> {
                             meets_min_edits(result) && meets_cost_constraint(result)
                         };
 
-                        // Use cached results if available, otherwise fall back to direct search
-                        let result = if let Some(cache) = cached {
-                            bridge.find_at_cached(cache, *pattern_index, thread.pos)
-                        } else {
-                            bridge.find_at(text, *pattern_index, thread.pos, self.config.threshold)
-                        };
-
-                        if let Some(result) = result {
-                            let should_try_boundary = expected_end.is_some()
-                                && result.end < expected_end.unwrap()
-                                && limits.as_ref().is_some_and(|l| {
-                                    l.get_insertions().unwrap_or(0) > 0
-                                        || l.get_edits().unwrap_or(0) > 0
-                                });
-
-                            if should_try_boundary
-                                && let Some(boundary_result) = bridge.find_with_boundary_insertions(
+                        // Collect every alignment of this literal anchored at
+                        // `thread.pos`. The best alignment is not always the one
+                        // that lets the rest of the pattern match — e.g.
+                        // `(?:cé[a-c](?:a|a)){e<=1}` on "ca..." has both (1 sub,
+                        // "ca") and (1 del, "c") at the same cost, and only the
+                        // deletion aligns with the continuation. The cache stores
+                        // all alignments per start; the direct path searches them
+                        // all at once.
+                        let candidates: Vec<FuzzyMatchResult> = if let Some(cache) = cached {
+                            let from_cache = cache
+                                .get_all(*pattern_index, thread.pos)
+                                .map(|s| s.to_vec())
+                                .unwrap_or_default();
+                            if !from_cache.is_empty() {
+                                from_cache
+                            } else {
+                                // The cache only stores alignments the automata
+                                // found; pure whole-literal deletions at end of
+                                // text are produced by `find_at_all` (its
+                                // `from >= text.len()` branch), so fall back to it
+                                // on a cache miss (`(?:a?[cb]中){d<=1}` on "ac"
+                                // deletes the trailing `中`).
+                                bridge.find_at_all(
                                     text,
                                     *pattern_index,
                                     thread.pos,
-                                    expected_end,
                                     self.config.threshold,
-                                    cached,
                                 )
-                                && meets_all_constraints(&boundary_result)
-                            {
-                                let match_edits = EditCounts::from_fuzzy_result(&boundary_result);
-                                if check_group_budget(
-                                    &thread.group_edits,
-                                    *fuzzy_group_id,
-                                    &match_edits,
-                                    &self.fuzzy_group_budgets,
-                                ) {
-                                    next_threads.push(Thread {
-                                        state: *next,
-                                        pos: boundary_result.end,
-                                        similarity: thread.similarity * boundary_result.similarity,
-                                        edits: thread.edits.merge(&match_edits),
-                                        captures: thread.captures.clone(),
-                                        match_start: thread.match_start,
-                                        handler_overrides: thread.handler_overrides.clone(),
-                                        group_edits: apply_group_edits(
-                                            thread.group_edits.clone(),
-                                            *fuzzy_group_id,
-                                            &match_edits,
-                                        ),
-                                    });
-                                }
                             }
+                        } else {
+                            bridge.find_at_all(
+                                text,
+                                *pattern_index,
+                                thread.pos,
+                                self.config.threshold,
+                            )
+                        };
 
-                            // Only accept matches that consume at least one character
-                            // to prevent infinite loops with quantifiers when fuzzy
-                            // match can delete entire pattern
-                            if meets_all_constraints(&result) && result.end > thread.pos {
-                                let match_edits = EditCounts::from_fuzzy_result(&result);
-                                if check_group_budget(
-                                    &thread.group_edits,
-                                    *fuzzy_group_id,
-                                    &match_edits,
-                                    &self.fuzzy_group_budgets,
-                                ) {
-                                    next_threads.push(Thread {
-                                        state: *next,
-                                        pos: result.end,
-                                        similarity: thread.similarity * result.similarity,
-                                        edits: thread.edits.merge(&match_edits),
-                                        captures: thread.captures.clone(),
-                                        match_start: thread.match_start,
-                                        handler_overrides: thread.handler_overrides.clone(),
-                                        group_edits: apply_group_edits(
-                                            thread.group_edits.clone(),
-                                            *fuzzy_group_id,
-                                            &match_edits,
-                                        ),
-                                    });
+                        // mrab semantics for min-edit groups (`{1<=e<=N}`): when
+                        // the literal matches exactly at this position, the
+                        // 0-edit alignment is the only one attempted (an exact
+                        // match short-circuits the per-atom fuzzy retries), so
+                        // alternative sub/del alignments must not be emitted
+                        // (e.g. `(?:ab){1<=e<=2}` on "ab" -> no match). Only a
+                        // >=2-char literal may extend an exact match with
+                        // trailing insertions to reach the minimum.
+                        let has_min = min_edits.is_some_and(|m| m > 0);
+                        let literal_chars =
+                            bridge.pattern_text(*pattern_index).map(|t| t.chars().count());
+                        let exact_exists =
+                            has_min && candidates.iter().any(|c| c.total_edits() == 0);
+
+                        if !candidates.is_empty() {
+                            for (ci, result) in candidates.iter().enumerate() {
+                                if trace {
+                                    eprintln!(
+                                        "  LIT pat={} pos={} cand={} -> end={} ins={} dels={} subs={}",
+                                        pattern_index,
+                                        thread.pos,
+                                        ci,
+                                        result.end,
+                                        result.insertions,
+                                        result.deletions,
+                                        result.substitutions
+                                    );
                                 }
-                            }
+                                // With a min-edit bound and an exact match at this
+                                // position, mrab only tries the exact alignment.
+                                if exact_exists && result.total_edits() != 0 {
+                                    continue;
+                                }
+                                // Boundary insertions and trailing insertions are
+                                // only tried for the best alignment, to avoid a
+                                // combinatorial blow-up of threads.
+                                if ci == 0 {
+                                    // For min-edit groups a matched CHARACTER
+                                    // (single-char literal) pushes no
+                                    // insertion retry, so leading/trailing
+                                    // insertions toward an expected end are
+                                    // suppressed when it matched exactly
+                                    // (`^(?:c){1<=e<=2}$` on "cX" -> None).
+                                    let suppress_boundary = has_min
+                                        && exact_exists
+                                        && literal_chars.is_some_and(|l| l < 2);
+                                    let should_try_boundary = expected_end.is_some()
+                                        && !suppress_boundary
+                                        && result.end < expected_end.unwrap()
+                                        && limits.as_ref().is_some_and(|l| {
+                                            l.get_insertions().unwrap_or(0) > 0
+                                                || l.get_edits().unwrap_or(0) > 0
+                                        });
 
-                            // Trailing boundary insertions: when more pattern must
-                            // still consume text after this fuzzy literal (not `$`,
-                            // which the boundary path above already handles), also
-                            // emit threads that absorb up to the remaining insertion
-                            // budget of chars right after the match, so a following
-                            // literal can match past inserted chars (e.g.
-                            // `t(?:es){i<=1}t` on "tesxt"). Honours `{i<=N:[...]}`.
-                            if expected_end.is_none() && self.next_consumes_or_asserts(*next) {
-                                let max_ins = limits.as_ref().map_or(0u8, |l| {
-                                    l.get_insertions().or_else(|| l.get_edits()).unwrap_or(0)
-                                });
-                                let max_e = max_edits.unwrap_or(0);
-                                let rem_ins = max_ins.saturating_sub(result.insertions);
-                                let rem_e = max_e.saturating_sub(result.total_edits());
-                                let budget = rem_ins.min(rem_e);
-                                // Each trailing insertion lowers similarity so a
-                                // shorter, lower-edit match (e.g. the exact base
-                                // that already satisfies a following lookahead)
-                                // outranks a longer inserted one.
-                                let edit_penalty = 1.0 / (f32::from(max_e) + 1.0);
-                                let mut pos = result.end;
-                                let mut added: u8 = 0;
-                                for ch in text[result.end..].chars() {
-                                    if added >= budget
-                                        || !bridge.boundary_insertion_allowed(*pattern_index, ch)
+                                    if should_try_boundary
+                                        && let Some(boundary_result) =
+                                            bridge.find_with_boundary_insertions(
+                                                text,
+                                                *pattern_index,
+                                                thread.pos,
+                                                expected_end,
+                                                self.config.threshold,
+                                                cached,
+                                            )
+                                        && meets_all_constraints(&boundary_result)
                                     {
-                                        break;
+                                        let match_edits =
+                                            EditCounts::from_fuzzy_result(&boundary_result);
+                                        if check_group_budget(
+                                            &thread.group_edits,
+                                            *fuzzy_group_id,
+                                            &match_edits,
+                                            &self.fuzzy_group_budgets,
+                                        ) {
+                                            next_threads.push(Thread {
+                                                state: *next,
+                                                pos: boundary_result.end,
+                                                similarity: thread.similarity
+                                                    * boundary_result.similarity,
+                                                edits: thread.edits.merge(&match_edits),
+                                                captures: thread.captures.clone(),
+                                                match_start: thread.match_start,
+                                                handler_overrides: thread
+                                                    .handler_overrides
+                                                    .clone(),
+                                                group_edits: apply_group_edits(
+                                                    thread.group_edits.clone(),
+                                                    *fuzzy_group_id,
+                                                    &match_edits,
+                                                ),
+                                            });
+                                        }
                                     }
-                                    pos += ch.len_utf8();
-                                    added += 1;
-                                    let ext = FuzzyMatchResult {
-                                        end: pos,
-                                        similarity: result.similarity,
-                                        insertions: result.insertions + added,
-                                        deletions: result.deletions,
-                                        substitutions: result.substitutions,
-                                        swaps: result.swaps,
-                                    };
-                                    if !meets_all_constraints(&ext) {
-                                        continue;
-                                    }
-                                    let ext_edits = EditCounts::from_fuzzy_result(&ext);
+                                }
+
+                                // Only accept matches that consume at least one
+                                // character to prevent infinite loops with
+                                // quantifiers when fuzzy match can delete entire
+                                // pattern. `result.end == thread.pos` (whole
+                                // literal deleted, e.g. `ab(?:c){d<=1}` on "ab")
+                                // is fine: the bridge only returns it when the
+                                // deletion is within budget, and the (state, pos,
+                                // cost) dedup bounds any quantifier loop.
+                                if meets_all_constraints(result) && result.end >= thread.pos {
+                                    let match_edits = EditCounts::from_fuzzy_result(result);
                                     if check_group_budget(
                                         &thread.group_edits,
                                         *fuzzy_group_id,
-                                        &ext_edits,
+                                        &match_edits,
                                         &self.fuzzy_group_budgets,
                                     ) {
                                         next_threads.push(Thread {
                                             state: *next,
-                                            pos,
-                                            similarity: thread.similarity
-                                                * result.similarity
-                                                * (1.0 - edit_penalty).powi(i32::from(added)),
-                                            edits: thread.edits.merge(&ext_edits),
+                                            pos: result.end,
+                                            similarity: thread.similarity * result.similarity,
+                                            edits: thread.edits.merge(&match_edits),
                                             captures: thread.captures.clone(),
                                             match_start: thread.match_start,
                                             handler_overrides: thread.handler_overrides.clone(),
                                             group_edits: apply_group_edits(
                                                 thread.group_edits.clone(),
                                                 *fuzzy_group_id,
-                                                &ext_edits,
+                                                &match_edits,
                                             ),
                                         });
+                                    }
+                                }
+
+                                // Trailing boundary insertions: when more pattern
+                                // must still consume text after this fuzzy literal
+                                // (not `$`, which the boundary path above already
+                                // handles), also emit threads that absorb up to
+                                // the remaining insertion budget of chars right
+                                // after the match, so a following literal can
+                                // match past inserted chars (e.g. `t(?:es){i<=1}t`
+                                // on "tesxt"). Honours `{i<=N:[...]}`.
+                                //
+                                // mrab nuance: a matched CHARACTER (single-char
+                                // literal) pushes no trailing-insertion retry, so
+                                // `(?:c){1<=e<=2}` on "cd" -> no match; a >=2-char
+                                // string pushes one even on an exact match, so
+                                // `^(?:baaa){1<=e<=2}` on "baaac" matches by
+                                // inserting past the end of the pattern.
+                                let suppress_trailing = has_min
+                                    && exact_exists
+                                    && literal_chars.is_some_and(|l| l < 2);
+                                if ci == 0
+                                    && expected_end.is_none()
+                                    && !suppress_trailing
+                                    && (self.next_consumes_or_asserts(*next)
+                                        || (has_min
+                                            && literal_chars.is_some_and(|l| l >= 2)))
+                                {
+                                    let max_ins = limits.as_ref().map_or(0u8, |l| {
+                                        l.get_insertions()
+                                            .or_else(|| l.get_edits())
+                                            .unwrap_or(0)
+                                    });
+                                    let max_e = max_edits.unwrap_or(0);
+                                    let rem_ins = max_ins.saturating_sub(result.insertions);
+                                    let rem_e = max_e.saturating_sub(result.total_edits());
+                                    let budget = rem_ins.min(rem_e);
+                                    // Each trailing insertion lowers similarity so
+                                    // a shorter, lower-edit match (e.g. the exact
+                                    // base that already satisfies a following
+                                    // lookahead) outranks a longer inserted one.
+                                    let edit_penalty = 1.0 / (f32::from(max_e) + 1.0);
+                                    let mut pos = result.end;
+                                    let mut added: u8 = 0;
+                                    for ch in text[result.end..].chars() {
+                                        if added >= budget
+                                            || !bridge.boundary_insertion_allowed(
+                                                *pattern_index,
+                                                ch,
+                                            )
+                                        {
+                                            break;
+                                        }
+                                        pos += ch.len_utf8();
+                                        added += 1;
+                                        let ext = FuzzyMatchResult {
+                                            end: pos,
+                                            similarity: result.similarity,
+                                            insertions: result.insertions + added,
+                                            deletions: result.deletions,
+                                            substitutions: result.substitutions,
+                                            swaps: result.swaps,
+                                        };
+                                        if !meets_all_constraints(&ext) {
+                                            continue;
+                                        }
+                                        let ext_edits = EditCounts::from_fuzzy_result(&ext);
+                                        if check_group_budget(
+                                            &thread.group_edits,
+                                            *fuzzy_group_id,
+                                            &ext_edits,
+                                            &self.fuzzy_group_budgets,
+                                        ) {
+                                            next_threads.push(Thread {
+                                                state: *next,
+                                                pos,
+                                                similarity: thread.similarity
+                                                    * result.similarity
+                                                    * (1.0 - edit_penalty)
+                                                        .powi(i32::from(added)),
+                                                edits: thread.edits.merge(&ext_edits),
+                                                captures: thread.captures.clone(),
+                                                match_start: thread.match_start,
+                                                handler_overrides: thread
+                                                    .handler_overrides
+                                                    .clone(),
+                                                group_edits: apply_group_edits(
+                                                    thread.group_edits.clone(),
+                                                    *fuzzy_group_id,
+                                                    &ext_edits,
+                                                ),
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -2096,7 +2329,7 @@ impl<'a> Matcher<'a> {
                                 )
                             {
                                 // Must consume at least one character
-                                if meets_all_constraints(&result) && result.end > thread.pos {
+                                if meets_all_constraints(&result) && result.end >= thread.pos {
                                     let match_edits = EditCounts::from_fuzzy_result(&result);
                                     if check_group_budget(
                                         &thread.group_edits,
@@ -2127,17 +2360,27 @@ impl<'a> Matcher<'a> {
                         // This allows patterns like (?:b){e<=1}(?:c){e<=1} to match "c"
                         // by deleting 'b' and exactly matching 'c'
                         // Only do this when:
-                        // 1. We've already consumed some text (thread.pos > 0) - prevents spurious empty matches at start
-                        // 2. AND there's still text remaining (thread.pos < text.len()) - at end, find_at handles deletion
+                        // 1. There's still text remaining (thread.pos < text.len()) - at end, find_at handles deletion
+                        // 2. The literal can be fully deleted within its deletion budget
+                        // (Deletion at pos == 0 is valid too: `(?:bc+){e<=1}` on "c"
+                        // deletes leading 'b' before 'c+' matches "c".)
                         let max_edits_for_deletion = max_edits.unwrap_or(0);
                         let max_deletions = limits
                             .as_ref()
                             .and_then(FuzzyLimits::get_deletions)
                             .unwrap_or(max_edits_for_deletion);
 
-                        // Only allow pure deletion when we're in the middle of matching (not at start)
-                        // and there's still text to match by subsequent patterns
-                        if max_deletions > 0 && thread.pos > 0 && thread.pos < text.len() {
+                        // Only allow pure deletion when there's still text to match by
+                        // subsequent patterns. Deletion at pos == 0 is valid only for
+                        // groups WITHOUT a minimum-edit bound: min-edit groups reject a
+                        // leading zero-width deletion (`^(?:c){1<=e<=2}` on "cd.." ->
+                        // None), while non-min groups need it to delete a leading
+                        // literal so a later piece can consume text
+                        // (`(?:bc+){e<=1}` on "c" deletes leading 'b').
+                        if max_deletions > 0
+                            && thread.pos < text.len()
+                            && (min_edits.is_none() || thread.pos > 0)
+                        {
                             // Get pattern length to determine deletion cost
                             if let Some(pattern_char_len) = bridge.pattern_char_len(*pattern_index)
                             {
@@ -2265,7 +2508,7 @@ impl<'a> Matcher<'a> {
                 let lookahead_bridge = if literals.is_empty() {
                     None
                 } else {
-                    FuzzyBridge::new(literals, None, None, false)
+                    FuzzyBridge::new(literals, None, None, false, false)
                 };
 
                 // Create a sub-matcher for the lookahead with its own bridge
@@ -2981,7 +3224,7 @@ mod tests {
         let hir = lower(&ast, 0);
         let (nfa, literals) = build_nfa(&hir);
 
-        let bridge = FuzzyBridge::new(&literals, None, None, false);
+        let bridge = FuzzyBridge::new(&literals, None, None, false, false);
 
         // Count capture groups from AST
         let capture_count = count_captures(&ast);

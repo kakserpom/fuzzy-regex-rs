@@ -7,7 +7,10 @@ SPAN (byte offsets). The harness reports find() AND find_iter().next() per case.
 
 Usage:
     cargo build --release --example diff_harness
-    python3 examples/diff_fuzz.py [N_CASES] [SEED] [--spans]
+    python3 examples/diff_fuzz.py [N_CASES] [SEED] [--spans] [--mrab-compat]
+
+`--mrab-compat` runs the Rust harness in mrab-regex compatibility mode
+(transpositions disabled), which should drive is_match divergences to zero.
 
 Categories reported:
   * is_match divergences  -- mrab matched but rust didn't (or vice versa).
@@ -197,6 +200,7 @@ def parse_rust(tok: str):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     show_spans = "--spans" in sys.argv[1:]
+    mrab_compat = "--mrab-compat" in sys.argv[1:]
     n = int(args[0]) if len(args) > 0 else 20000
     seed = int(args[1]) if len(args) > 1 else 12345
     rng = random.Random(seed)
@@ -217,7 +221,10 @@ def main():
         oracle.append(m)
 
     payload = "".join(f"{pct(p)}\t{pct(t)}\n" for p, t in cases)
-    proc = subprocess.run([HARNESS], input=payload, capture_output=True, text=True)
+    env = dict(os.environ)
+    if mrab_compat:
+        env["MRAB_COMPAT"] = "1"
+    proc = subprocess.run([HARNESS], input=payload, capture_output=True, text=True, env=env)
     rust_lines = proc.stdout.splitlines()
     if len(rust_lines) != len(cases):
         print(f"WARN: harness returned {len(rust_lines)} lines for {len(cases)} cases")

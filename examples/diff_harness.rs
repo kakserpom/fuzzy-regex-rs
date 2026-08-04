@@ -63,6 +63,9 @@ fn main() {
     // MATCH_END_POLICY=minedit switches to MinEdit (tightest span) instead of the
     // default LongestWithinBudget, for measuring mrab-alignment of each policy.
     let min_edit = std::env::var("MATCH_END_POLICY").as_deref() == Ok("minedit");
+    // MRAB_COMPAT=1 enables mrab-regex compatibility mode (transpositions off),
+    // so is_match should line up with mrab-regex on swap patterns too.
+    let mrab_compat = std::env::var("MRAB_COMPAT").as_deref() == Ok("1");
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -84,6 +87,9 @@ fn main() {
             let mut builder = FuzzyRegexBuilder::new(&pat);
             if min_edit {
                 builder = builder.match_end_policy(MatchEndPolicy::MinEdit);
+            }
+            if mrab_compat {
+                builder = builder.mrab_compat(true);
             }
             match builder.build() {
                 Ok(re) => {

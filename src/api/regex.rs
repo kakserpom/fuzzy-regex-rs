@@ -291,6 +291,7 @@ impl FuzzyRegex {
             config.default_limits.clone(),
             config.penalties.clone(),
             config.case_insensitive,
+            config.mrab_compat,
         )
         .map(|mut bridge| {
             bridge.set_prefer_min_edit(
@@ -325,6 +326,7 @@ impl FuzzyRegex {
                     config.default_limits.clone(),
                     config.penalties.clone(),
                     config.case_insensitive,
+                    config.mrab_compat,
                 );
                 ExactShadow {
                     nfa: exact_nfa,
@@ -4490,6 +4492,46 @@ fn hir_greedy_prefix_min(hir: &Hir) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_mrab_compat_flag() {
+        let default_re = FuzzyRegexBuilder::new(r"(?:bcaa){e<=1}").build().unwrap();
+        assert!(default_re.is_match("cbacadac"));
+
+        let compat_re = FuzzyRegexBuilder::new(r"(?:bcaa){e<=1}")
+            .mrab_compat(true)
+            .build()
+            .unwrap();
+        assert!(!compat_re.is_match("cbacadac"));
+
+        let t_re = FuzzyRegexBuilder::new(r"(?:bcaa){t<=1}")
+            .mrab_compat(true)
+            .build()
+            .unwrap();
+        assert!(!t_re.is_match("cbacadac"));
+
+        let compat2 = FuzzyRegexBuilder::new(r"(?:test){e<=1}")
+            .mrab_compat(true)
+            .build()
+            .unwrap();
+        assert!(!compat2.is_match("tset"));
+        assert!(compat2.is_match("tezt"));
+        assert!(compat2.is_match("test"));
+
+        let anchored = FuzzyRegexBuilder::new(r"^(?:bac){e<=1}")
+            .mrab_compat(true)
+            .build()
+            .unwrap();
+        assert!(!anchored.is_match("abccbbdcdad"));
+
+        let non_swap = FuzzyRegexBuilder::new(r"(?:foo){e<=1}")
+            .mrab_compat(true)
+            .build()
+            .unwrap();
+        assert!(non_swap.is_match("fo"));
+        assert!(non_swap.is_match("fao"));
+        assert!(non_swap.is_match("fo0"));
+    }
 
     #[test]
     fn test_simple_match() {

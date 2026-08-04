@@ -116,12 +116,19 @@ pub struct FuzzyBridge {
 
 impl FuzzyBridge {
     /// Create a new fuzzy bridge from literal patterns.
+    ///
+    /// With `mrab_compat` set, transpositions are disabled: every literal's
+    /// swap cap is forced to 0 (mirroring mrab-regex, which has no
+    /// transposition error type), and fuzzy literals are routed through the
+    /// Damerau-Levenshtein NFA since the Bitap DP does not enforce per-op swap
+    /// caps.
     #[must_use]
     pub fn new(
         literals: &[LiteralPattern],
         _default_limits: Option<FuzzyLimits>,
         _penalties: Option<FuzzyPenalties>,
         case_insensitive: bool,
+        mrab_compat: bool,
     ) -> Option<Self> {
         if literals.is_empty() {
             return None;
@@ -146,12 +153,15 @@ impl FuzzyBridge {
                     let t = lim.get_swaps().unwrap_or(0);
                     i.saturating_add(d).saturating_add(s).saturating_add(t)
                 });
+                // mrab-regex has no transposition error type, so in compatibility
+                // mode swaps are never allowed, even under an explicit `{t<=N}`.
+                let swaps = if mrab_compat { Some(0) } else { lim.get_swaps() };
                 EditLimits::with_limits(
                     max_edits,
                     lim.get_insertions(),
                     lim.get_deletions(),
                     lim.get_substitutions(),
-                    lim.get_swaps(),
+                    swaps,
                 )
             } else {
                 EditLimits::new(0) // Exact match
@@ -181,7 +191,13 @@ impl FuzzyBridge {
             ]
             .iter()
             .any(|cap| matches!(cap, Some(x) if (*x as usize) < max_edits));
-            let bitap = if has_binding_per_op && lit.edit_chars.is_none() {
+            // In mrab compatibility mode the Bitap Damerau DP does not enforce
+            // per-op swap caps, so fuzzy literals must use the NFA (which
+            // honours the forced `max_swaps = Some(0)`). Exact literals
+            // (max_edits == 0) cannot swap and keep Bitap.
+            let bitap_disabled = (has_binding_per_op && lit.edit_chars.is_none())
+                || (mrab_compat && edit_limits.max_edits > 0);
+            let bitap = if bitap_disabled {
                 None
             } else {
                 BitapMatcher::new(&lit.text, edit_limits, case_insensitive)
@@ -1903,7 +1919,29 @@ impl FuzzyBridge {
         from: usize,
         threshold: f32,
     ) -> Option<FuzzyMatchResult> {
-        let pattern = self.patterns.get(pattern_index)?;
+        self.find_at_all(text, pattern_index, from, threshold).into_iter().next()
+    }
+
+    /// Find all distinct fuzzy alignments for a pattern anchored at `from`.
+    ///
+    /// Returns every (end, edit-count) alignment whose match starts exactly at
+    /// `from`, ordered best-first (fewest edits, then longest, then highest
+    /// similarity). The caller may need to try several alignments before finding
+    /// one that lets the rest of the pattern match (e.g. `(?:cé...){e<=1}` on
+    /// "ca..." — both (end=2, 1 sub) and (end=1, 1 del) cost the same, but only
+    /// the deletion aligns with the continuation).
+    #[must_use]
+    pub fn find_at_all(
+        &self,
+        text: &str,
+        pattern_index: usize,
+        from: usize,
+        threshold: f32,
+    ) -> Vec<FuzzyMatchResult> {
+        let pattern = match self.patterns.get(pattern_index) {
+            Some(p) => p,
+            None => return Vec::new(),
+        };
 
         // Fast path for exact matching (no fuzzy edits allowed)
         // Just check if the pattern is a prefix of the substring
@@ -1931,17 +1969,17 @@ impl FuzzyBridge {
                 let max_len = pattern_char_len.max(1) as f32;
                 let sim = (1.0 - f32::from(deletions) / max_len).max(0.0);
                 if sim >= threshold {
-                    return Some(FuzzyMatchResult {
+                    return vec![FuzzyMatchResult {
                         end: from,
                         similarity: sim,
                         insertions: 0,
                         deletions,
                         substitutions: 0,
                         swaps: 0,
-                    });
+                    }];
                 }
             }
-            return None;
+            return Vec::new();
         }
 
         let substring = &text[from..];
@@ -1966,65 +2004,68 @@ impl FuzzyBridge {
                     } else {
                         end_byte
                     };
-                    return Some(FuzzyMatchResult {
+                    return vec![FuzzyMatchResult {
                         end: from + actual_end,
                         similarity: 1.0,
                         insertions: 0,
                         deletions: 0,
                         substitutions: 0,
                         swaps: 0,
-                    });
+                    }];
                 }
             } else if substring.starts_with(pattern) {
-                return Some(FuzzyMatchResult {
+                return vec![FuzzyMatchResult {
                     end: from + pattern.len(),
                     similarity: 1.0,
                     insertions: 0,
                     deletions: 0,
                     substitutions: 0,
                     swaps: 0,
-                });
+                }];
             }
-            return None;
+            return Vec::new();
         }
 
         // Fuzzy matching path - need to search
-        let nfa = self.automata.get(pattern_index)?;
+        let Some(nfa) = self.automata.get(pattern_index) else {
+            return Vec::new();
+        };
         let effective_threshold = self.calculate_effective_threshold(pattern_index, threshold);
         let mut buffers = self.search_buffers.borrow_mut();
         let matches = nfa.find_all_buffered(substring, effective_threshold, &mut buffers);
 
-        // Find match that starts at position 0 of the substring
+        // Collect all matches that start at position 0 of the substring,
+        // validating character class restrictions.
+        let mut out: Vec<FuzzyMatchResult> = Vec::new();
         for m in matches {
-            if m.start == 0 {
-                // Validate character class restrictions
-                if let Some(restriction) = self
-                    .edit_char_restrictions
-                    .get(pattern_index)
-                    .and_then(|r| r.as_ref())
-                {
-                    let matched_text = &substring[m.start..m.end];
-                    if !self.validate_edit_chars(
-                        &self.patterns[pattern_index],
-                        matched_text,
-                        restriction,
-                    ) {
-                        continue;
-                    }
-                }
-
-                return Some(FuzzyMatchResult {
-                    end: from + m.end,
-                    similarity: m.similarity,
-                    insertions: m.insertions,
-                    deletions: m.deletions,
-                    substitutions: m.substitutions,
-                    swaps: m.swaps,
-                });
+            if m.start != 0 {
+                continue;
             }
+
+            // Validate character class restrictions
+            if let Some(restriction) = self
+                .edit_char_restrictions
+                .get(pattern_index)
+                .and_then(|r| r.as_ref())
+            {
+                let matched_text = &substring[m.start..m.end];
+                if !self.validate_edit_chars(pattern, matched_text, restriction) {
+                    continue;
+                }
+            }
+
+            out.push(FuzzyMatchResult {
+                end: from + m.end,
+                similarity: m.similarity,
+                insertions: m.insertions,
+                deletions: m.deletions,
+                substitutions: m.substitutions,
+                swaps: m.swaps,
+            });
         }
 
-        None
+        out.sort_by(cmp_cached_candidates);
+        out
     }
 
     /// Whether `ch` may be used as a boundary insertion for `pattern_index`.
@@ -2084,13 +2125,31 @@ impl FuzzyBridge {
         let mut best: Option<FuzzyMatchResult> = None;
 
         for (match_start, m) in matches {
-            // Calculate boundary insertions
+            // A cached match anchored before `from` overlaps text already
+            // consumed by earlier pattern atoms; re-anchoring it here would
+            // double-count those chars. mrab's accounting requires the pattern
+            // chars they matched to become deletions (or the alignment to
+            // change), never a fresh insertion of overlapped text, so such
+            // candidates are rejected (`(?:[d][a-c]a{2}){i<=1,e<=2}` on
+            // "cbacabcbdaac" must not match). Only matches anchored at `from`
+            // can be extended by trailing insertions toward `to`.
+            if match_start < from {
+                continue;
+            }
+            // Calculate boundary insertions. Offsets are BYTES; insertion counts
+            // must be in CHARACTERS (a multi-byte char like `😀` is one insertion,
+            // not four), otherwise `{i<=N}` boundary matches wrongly reject text
+            // that ends in non-ASCII characters.
             // start_insertions: characters between match_start and from
-            let start_insertions = (from.saturating_sub(match_start)) as u8;
+            let start_insertions = text[match_start.min(text.len())..from.min(text.len())]
+                .chars()
+                .count() as u8;
             // end_insertions: characters between match end and expected end
             let end_insertions = if let Some(expected_end) = to {
                 if m.end < expected_end {
-                    (expected_end - m.end) as u8
+                    text[m.end.min(text.len())..expected_end.min(text.len())]
+                        .chars()
+                        .count() as u8
                 } else {
                     0
                 }
@@ -2638,7 +2697,7 @@ fn test_search_all_the_quick() {
     let limits = FuzzyLimits::new().edits(1);
     let lit = LiteralPattern::new("quik".to_string(), Some(limits), None);
 
-    let bridge = FuzzyBridge::new(&[lit], None, None, false).unwrap();
+    let bridge = FuzzyBridge::new(&[lit], None, None, false, false).unwrap();
 
     let text = "The quick brown fox";
     let cached = bridge.search_all(text, 0.5);

@@ -247,6 +247,22 @@ impl<'a> Parser<'a> {
             expr = Ast::Literal { text, fuzziness };
         }
 
+        // mrab-style fuzziness directly on an atom: `a{i<=1}`, `[a-c]{s<=2}`,
+        // or the trailing atom of a concatenation: `abc{d<=1}`. Like mrab, the
+        // constraint applies to the immediately-preceding atom only, so wrap it
+        // in a fuzzy non-capturing group rather than letting literal merging
+        // spread the budget across the whole concatenation.
+        if matches!(self.lexer.peek_token()?, Token::OpenBrace)
+            && self.peek_is_mrab_fuzziness()
+        {
+            self.lexer.next_token()?; // consume '{'
+            let fuzziness = self.parse_mrab_fuzziness()?;
+            return Ok(Ast::NonCapturingGroup {
+                expr: Box::new(expr),
+                fuzziness,
+            });
+        }
+
         // Check for quantifier
         match self.lexer.peek_token()? {
             Token::Star | Token::Plus | Token::Question | Token::OpenBrace => {

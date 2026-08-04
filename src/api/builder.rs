@@ -161,6 +161,16 @@ pub struct RegexConfig {
     /// alternation. Smaller lists keep using the NFA. Only relevant with the
     /// `word-list-ac` feature (enabled by default); ignored otherwise.
     pub word_list_ac_threshold: usize,
+
+    /// mrab-regex compatibility mode.
+    ///
+    /// When enabled, transpositions (swaps) are disallowed everywhere: a
+    /// `{t<=N}` fuzzy group never matches and a bare `{e<=N}` no longer treats
+    /// an adjacent-character swap as a single edit (mirroring mrab-regex, which
+    /// has no transposition error type and counts a swap as two edits).
+    ///
+    /// Off by default so fuzzy-regex keeps its documented `{t<=N}` extension.
+    pub mrab_compat: bool,
 }
 
 impl Clone for RegexConfig {
@@ -186,6 +196,7 @@ impl Clone for RegexConfig {
             full_dfa: self.full_dfa,
             match_end_policy: self.match_end_policy,
             word_list_ac_threshold: self.word_list_ac_threshold,
+            mrab_compat: self.mrab_compat,
         }
     }
 }
@@ -216,6 +227,7 @@ impl Default for RegexConfig {
             full_dfa: false,
             match_end_policy: MatchEndPolicy::default(),
             word_list_ac_threshold: DEFAULT_WORD_LIST_AC_THRESHOLD,
+            mrab_compat: false,
         }
     }
 }
@@ -376,6 +388,20 @@ impl FuzzyRegexBuilder {
     #[must_use]
     pub fn word_list_ac_threshold(mut self, threshold: usize) -> Self {
         self.config.word_list_ac_threshold = threshold;
+        self
+    }
+
+    /// Enable mrab-regex compatibility mode.
+    ///
+    /// When enabled, transpositions (swaps) are disallowed everywhere: a
+    /// `{t<=N}` fuzzy group never matches and a bare `{e<=N}` no longer treats
+    /// an adjacent-character swap as a single edit (mrab-regex has no
+    /// transposition error type and counts a swap as two edits).
+    ///
+    /// Off by default; fuzzy-regex keeps its documented `{t<=N}` extension.
+    #[must_use]
+    pub fn mrab_compat(mut self, yes: bool) -> Self {
+        self.config.mrab_compat = yes;
         self
     }
 
