@@ -1654,12 +1654,16 @@ impl<'a> Matcher<'a> {
                             // fuzzy matching is leftmost-longest, so a longer span with
                             // more edits outranks a shorter, lower-edit one (e.g.
                             // `(?:Q+){e}` on "abc" matches all of "abc", not just "a").
+                            // Lazy-quantifier semantics (e.g. `a+?` matching "a" on
+                            // "aaaa") are handled by the early-termination break in the
+                            // BFS loop plus the greedy flag on the NFA Split states —
+                            // NOT by shortening the match here. mrab's leftmost-longest
+                            // rule holds even when the pattern has a lazy quantifier:
+                            // `(?:A.*B.*?CDE){e<=2}` on "A B CYZ" matches [0,7), with
+                            // CDE aligned via substitutions, not [0,5) via deletions.
                             m.similarity > best.similarity
-                                || (m.similarity == best.similarity && if prefer_shorter {
-                                m.end - m.start < best.end - best.start
-                            } else {
-                                m.end - m.start > best.end - best.start
-                            })
+                                || (m.similarity == best.similarity
+                                    && m.end - m.start > best.end - best.start)
                         }
                     })
                 }) {

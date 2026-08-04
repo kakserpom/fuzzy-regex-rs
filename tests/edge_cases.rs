@@ -166,6 +166,32 @@ fn test_lazy_with_html_tag_pattern() {
 }
 
 #[test]
+fn test_lazy_quantifier_in_fuzzy_group_still_leftmost_longest() {
+    // A lazy `.*?` inside a fuzzy group must not shorten the overall match:
+    // the lazy quantifier controls its own consumption (minimal chars before
+    // CDE), but the fuzzy literal still prefers the longest alignment (CDE
+    // consumes "CYZ" via 2 substitutions over deleting D+E and ending early).
+    // Matches mrab-regex, which returns [0,7).
+    let re = FuzzyRegex::new(r"(?:A.*B.*?CDE){e<=2}").unwrap();
+    let text = "A B CYZ";
+    let m = re.find(text).unwrap();
+    assert_eq!((m.start(), m.end()), (0, 7));
+    assert_eq!(m.as_str(), "A B CYZ");
+
+    let re = FuzzyRegex::new(r"(?:A.*?B.*CDE){e<=2}").unwrap();
+    let m = re.find(text).unwrap();
+    assert_eq!((m.start(), m.end()), (0, 7));
+
+    let re = FuzzyRegex::new(r"(?:A.*?B.*?CDE){e<=2}").unwrap();
+    let m = re.find(text).unwrap();
+    assert_eq!((m.start(), m.end()), (0, 7));
+
+    // Without the fuzzy modifier the lazy quantifier still matches minimally.
+    let lazy = FuzzyRegex::new(r"A.*B.*?CDE").unwrap();
+    assert!(lazy.find("A B CDE").unwrap().as_str().ends_with("CDE"));
+}
+
+#[test]
 fn test_possessive_quantifier_style() {
     // a++b - possessive (no backtracking) - may not be supported
     // If not supported, this test just verifies the pattern is handled
