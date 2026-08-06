@@ -775,24 +775,176 @@ impl Nfa {
         class.cloned()
     }
 
+    /// Whether a consuming fuzzy state (FuzzyChar/FuzzyLiteral) may match zero
+    /// characters, i.e. its repetition has minimum 0 (`*`, `?`, `{0,m}`). A
+    /// fuzzy atom is zero-width capable when some Split that can reach it is
+    /// itself reachable from the pattern start without passing through the
+    /// atom — the quantifier can be skipped entirely — and that Split also has
+    /// a branch that skips to a non-consuming terminal (`$`/Accept) without
+    /// passing through the atom (which excludes alternation: every `a|b`
+    /// branch passes through a consuming atom). This is what mrab models as
+    /// pure insertions over the following text (e.g. `(?:b*){i<=1}$` on "d"
+    /// matches (0,1) by inserting "d"). It excludes `+`, whose loop Split is
+    /// only reachable through the atom itself.
+    pub(crate) fn fuzzy_state_zero_width(&self, id: StateId) -> bool {
+        let fuzzy = matches!(
+            &self.states[id],
+            State::FuzzyChar { .. } | State::FuzzyLiteral { .. }
+        );
+        if !fuzzy {
+            return false;
+        }
+        for (sid, s) in self.states.iter().enumerate() {
+            if let State::Split { branches, .. } = s
+                && branches.iter().any(|&b| self.state_reaches_eps(b, id))
+                && self.reachable_avoiding(sid, id)
+            {
+                for &b in branches {
+                    let mut visited = vec![false; self.states.len()];
+                    if self.branch_skips_to_end(b, id, &mut visited) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether from `from` a non-consuming terminal (`Accept` or an end
+    /// anchor) is reachable without passing through `ignore` and without
+    /// crossing any other consuming state or text-sensitive lookaround.
+    fn branch_skips_to_end(
+        &self,
+        from: StateId,
+        ignore: StateId,
+        visited: &mut Vec<bool>,
+    ) -> bool {
+        if from == ignore || visited[from] {
+            return false;
+        }
+        visited[from] = true;
+        match &self.states[from] {
+            State::Accept => true,
+            State::Anchor { kind: Anchor::End, .. } => true,
+            State::Char { .. }
+            | State::FuzzyChar { .. }
+            | State::FuzzyLiteral { .. }
+            | State::Backreference { .. }
+            | State::Lookahead { .. }
+            | State::LookaheadLiteral { .. } => false,
+            State::Epsilon { targets } => targets
+                .iter()
+                .any(|t| self.branch_skips_to_end(*t, ignore, visited)),
+            State::Split { branches, .. } => branches
+                .iter()
+                .any(|t| self.branch_skips_to_end(*t, ignore, visited)),
+            State::CaptureStart { next, .. }
+            | State::CaptureEnd { next, .. }
+            | State::ResetMatchStart { next }
+            | State::Anchor { next, .. }
+            | State::Lookbehind { next, .. }
+            | State::LookbehindLiteral { next, .. }
+            | State::Handler { next, .. }
+            | State::AtomicGroup { next, .. }
+            | State::RecursivePattern { next, .. }
+            | State::RecursiveGroup { next, .. }
+            | State::RecursiveNamedGroup { next, .. } => {
+                self.branch_skips_to_end(*next, ignore, visited)
+            }
+        }
+    }
+
+    /// Whether `from` can reach `target` through only epsilon/split
+    /// transitions (the trivial zero-length path counts).
+    fn state_reaches_eps(&self, from: StateId, target: StateId) -> bool {
+        let mut stack = vec![from];
+        let mut visited = vec![false; self.states.len()];
+        while let Some(s) = stack.pop() {
+            if s == target {
+                return true;
+            }
+            if visited[s] {
+                continue;
+            }
+            visited[s] = true;
+            match &self.states[s] {
+                State::Epsilon { targets } => stack.extend(targets.iter().copied()),
+                State::Split { branches, .. } => stack.extend(branches.iter().copied()),
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Whether `target` is reachable from the pattern start without passing
+    /// through `avoid`.
+    fn reachable_avoiding(&self, target: StateId, avoid: StateId) -> bool {
+        if target == avoid {
+            return false;
+        }
+        let mut stack = vec![self.start];
+        let mut visited = vec![false; self.states.len()];
+        while let Some(s) = stack.pop() {
+            if s == target {
+                return true;
+            }
+            if s == avoid || visited[s] {
+                continue;
+            }
+            visited[s] = true;
+            match &self.states[s] {
+                State::Epsilon { targets } => stack.extend(targets.iter().copied()),
+                State::Split { branches, .. } => stack.extend(branches.iter().copied()),
+                State::Char { next, .. }
+                | State::FuzzyChar { next, .. }
+                | State::FuzzyLiteral { next, .. }
+                | State::CaptureStart { next, .. }
+                | State::CaptureEnd { next, .. }
+                | State::Anchor { next, .. }
+                | State::Lookahead { next, .. }
+                | State::LookaheadLiteral { next, .. }
+                | State::Lookbehind { next, .. }
+                | State::LookbehindLiteral { next, .. }
+                | State::Backreference { next, .. }
+                | State::AtomicGroup { next, .. }
+                | State::RecursivePattern { next, .. }
+                | State::RecursiveGroup { next, .. }
+                | State::RecursiveNamedGroup { next, .. }
+                | State::Handler { next, .. }
+                | State::ResetMatchStart { next } => stack.push(*next),
+                _ => {}
+            }
+        }
+        false
+    }
+
     /// Whether `fc` (a consuming class state) sits on a repetition loop: its
     /// successor can reach `fc` again through only epsilon/split transitions.
     fn class_state_loops(&self, fc: StateId) -> bool {
-        let start = match &self.states[fc] {
-            State::FuzzyChar { next, .. } | State::Char { next, .. } => *next,
+        self.fuzzy_state_loops(fc)
+    }
+
+    /// Whether a consuming state (Char/FuzzyChar/FuzzyLiteral) sits on a
+    /// repetition loop: its successor can reach it again through only
+    /// epsilon/split transitions.
+    fn fuzzy_state_loops(&self, id: StateId) -> bool {
+        let start = match &self.states[id] {
+            State::FuzzyChar { next, .. }
+            | State::Char { next, .. }
+            | State::FuzzyLiteral { next, .. } => *next,
             _ => return false,
         };
         let mut stack = vec![start];
         let mut visited = vec![false; self.states.len()];
-        while let Some(id) = stack.pop() {
-            if id == fc {
+        while let Some(s) = stack.pop() {
+            if s == id {
                 return true;
             }
-            if visited[id] {
+            if visited[s] {
                 continue;
             }
-            visited[id] = true;
-            match &self.states[id] {
+            visited[s] = true;
+            match &self.states[s] {
                 State::Epsilon { targets } => stack.extend(targets.iter().copied()),
                 State::Split { branches, .. } => stack.extend(branches.iter().copied()),
                 _ => {}

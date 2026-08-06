@@ -192,6 +192,32 @@ fn test_lazy_quantifier_in_fuzzy_group_still_leftmost_longest() {
 }
 
 #[test]
+fn test_min_edit_single_char_group_requires_edit() {
+    // A min-edit fuzzy group whose last literal matches exactly at a position
+    // may not fall back to a pure deletion of that literal to force an edit:
+    // mrab rejects `(?:a|a)aacc{1<=e<=3}` on "dcddbaaacccbbc" entirely (the
+    // trailing 'c' matches exactly, so there is no valid ≥1-edit alignment).
+    let re = FuzzyRegex::new(r"(?:a|a)aacc{1<=e<=3}").unwrap();
+    assert!(!re.is_match("dcddbaaacccbbc"));
+
+    // Same shape: exact match at end -> no match (needs an edit).
+    let re = FuzzyRegex::new(r"(?:a|a)aa(?:c){1<=e<=3}").unwrap();
+    assert!(!re.is_match("dcddbaaacccbbc"));
+
+    // A genuine ≥1-edit alignment still works: "ab" is a 1-deletion of "abc".
+    let re = FuzzyRegex::new(r"abc{1<=e<=2}$").unwrap();
+    assert_eq!((re.find("ab").unwrap().start(), re.find("ab").unwrap().end()), (0, 2));
+    assert!(!re.is_match("abc"));
+
+    // Grouping the whole suffix keeps it a valid match (mrab returns (5,11)).
+    let re = FuzzyRegex::new(r"(?:a|a)(?:aacc){1<=e<=3}").unwrap();
+    assert_eq!(
+        (re.find("dcddbaaacccbbc").unwrap().start(), re.find("dcddbaaacccbbc").unwrap().end()),
+        (5, 11)
+    );
+}
+
+#[test]
 fn test_possessive_quantifier_style() {
     // a++b - possessive (no backtracking) - may not be supported
     // If not supported, this test just verifies the pattern is handled

@@ -326,6 +326,15 @@ pub struct Matcher<'a> {
     fuzzy_group_budgets: Vec<FuzzyLimits>,
     /// Per-group `min_edits` lower bounds, indexed by `fuzzy_group_id`.
     fuzzy_group_mins: Vec<Option<u8>>,
+    /// Whether each NFA state is a consuming fuzzy state on a repetition loop
+    /// (`*`/`+`/`?`/`{0,n}`), i.e. it may match zero characters. Used by the
+    /// zero-width insertion path (see FuzzyLiteral/FuzzyChar handlers).
+    fuzzy_zero_width_states: Vec<bool>,
+    /// Whether any fuzzy atom in the NFA may match zero characters. Such a
+    /// match need not contain any literal alignment (it can be pure insertions
+    /// over an empty group), so the literal-guide/prefilter scans that only
+    /// probe positions near literal occurrences would miss it.
+    has_zero_width_fuzzy: bool,
 }
 
 impl<'a> Matcher<'a> {
@@ -345,6 +354,10 @@ impl<'a> Matcher<'a> {
         let max_simple_length = Self::calculate_max_length(nfa, fuzzy_bridge);
         let fuzzy_group_budgets = extract_fuzzy_group_budgets(nfa);
         let fuzzy_group_mins = extract_fuzzy_group_mins(nfa);
+        let fuzzy_zero_width_states: Vec<bool> = (0..nfa.states.len())
+            .map(|id| nfa.fuzzy_state_zero_width(id))
+            .collect();
+        let has_zero_width_fuzzy = fuzzy_zero_width_states.iter().any(|&b| b);
         Matcher {
             nfa,
             fuzzy_bridge,
@@ -360,6 +373,8 @@ impl<'a> Matcher<'a> {
             handlers,
             fuzzy_group_budgets,
             fuzzy_group_mins,
+            fuzzy_zero_width_states,
+            has_zero_width_fuzzy,
         }
     }
 
@@ -391,6 +406,10 @@ impl<'a> Matcher<'a> {
 
         let fuzzy_group_budgets = extract_fuzzy_group_budgets(nfa);
         let fuzzy_group_mins = extract_fuzzy_group_mins(nfa);
+        let fuzzy_zero_width_states: Vec<bool> = (0..nfa.states.len())
+            .map(|id| nfa.fuzzy_state_zero_width(id))
+            .collect();
+        let has_zero_width_fuzzy = fuzzy_zero_width_states.iter().any(|&b| b);
         Matcher {
             nfa,
             fuzzy_bridge,
@@ -406,6 +425,8 @@ impl<'a> Matcher<'a> {
             handlers,
             fuzzy_group_budgets,
             fuzzy_group_mins,
+            fuzzy_zero_width_states,
+            has_zero_width_fuzzy,
         }
     }
 
@@ -1223,8 +1244,13 @@ impl<'a> Matcher<'a> {
 
         // Optimization: Use cached literal positions to guide search
         // If we have literal matches in the cache, only try positions within
-        // MAX_LOOKBACK of a literal position
-        if let Some(ref cache) = cached
+        // MAX_LOOKBACK of a literal position.
+        // Skipped for patterns with a zero-width-capable fuzzy atom: such a
+        // match need not align with any literal (e.g. `(?:b*){i<=1}$` on
+        // "caddbaaccbcbcd" matches (13,14) via pure insertions), so probing
+        // only literal neighborhoods would miss it.
+        if !self.has_zero_width_fuzzy
+            && let Some(ref cache) = cached
             && !cache.is_empty()
         {
             return self.find_all_with_literal_guide(text, cache, limit);
@@ -1528,6 +1554,13 @@ impl<'a> Matcher<'a> {
             threads = next_threads;
         }
 
+        if std::env::var("MATCHER_TRACE").is_ok() {
+            eprintln!(
+                "  find_at({start}) -> {:?}",
+                best_match.as_ref().map(|m| (m.start, m.end, m.edits.clone()))
+            );
+        }
+
         best_match
     }
 
@@ -1544,8 +1577,18 @@ impl<'a> Matcher<'a> {
         let state = &self.nfa.states[thread.state];
         let trace = std::env::var("MATCHER_TRACE").is_ok();
         if trace {
+            let kind = match state {
+                State::Accept => "Accept",
+                State::Char { .. } => "Char",
+                State::FuzzyChar { .. } => "FuzzyChar",
+                State::FuzzyLiteral { .. } => "FuzzyLit",
+                State::Epsilon { .. } => "Eps",
+                State::Split { .. } => "Split",
+                State::Anchor { .. } => "Anchor",
+                _ => "Other",
+            };
             eprintln!(
-                "STEP st={} pos={} edits={:?} start={} sim={:.3}",
+                "STEP st={} ({kind}) pos={} edits={:?} start={} sim={:.3}",
                 thread.state, thread.pos, thread.edits, thread.match_start, thread.similarity
             );
         }
@@ -1563,6 +1606,12 @@ impl<'a> Matcher<'a> {
                 // the pattern accepts. Trailing-padding insertions are not part
                 // of `group_edits` (see the FuzzyChar handler), so a zero-edit
                 // exact group match is rejected, matching mrab's `{1<=e<=N}`.
+                if std::env::var("MATCHER_TRACE").is_ok() {
+                    eprintln!(
+                        "  MINCHECK mins={:?} group_edits={:?}",
+                        self.fuzzy_group_mins, thread.group_edits
+                    );
+                }
                 let group_min_ok = self
                     .fuzzy_group_mins
                     .iter()
@@ -1972,6 +2021,71 @@ impl<'a> Matcher<'a> {
                         });
                     }
                 }
+
+                // 4. Zero-width exit for an optional fuzzy class
+                // (`[a-c]?`/`[c]{0,2}` on a repetition loop): when the class char
+                // does not match and the atom may match empty, mrab consumes the
+                // following text as pure insertions (`^(?:[a-c]?){i<=1}$` on "d"
+                // -> (0,1)). Gated on the continuation not consuming text itself,
+                // so inserted chars land before `$`/Accept.
+                let zero_width_capable = self
+                    .fuzzy_zero_width_states
+                    .get(thread.state)
+                    .copied()
+                    .unwrap_or(false);
+                if zero_width_capable
+                    && !current_matches
+                    && thread.pos < text.len()
+                    && current_edits < max_edits
+                    && thread.edits.insertions < max_insertions
+                    && !self.next_consumes_beyond(*next, thread.state)
+                {
+                    let mut pos = thread.pos;
+                    let mut added: u8 = 0;
+                    let mut sim = thread.similarity;
+                    let mut edits = thread.edits.clone();
+                    while thread.edits.insertions + added < max_insertions
+                        && edits.total() < max_edits
+                        && pos < text.len()
+                    {
+                        let Some(ch) = text[pos..].chars().next() else {
+                            break;
+                        };
+                        if !edit_allows(ch) {
+                            break;
+                        }
+                        let ins_edit = EditCounts {
+                            insertions: added + 1,
+                            ..EditCounts::default()
+                        };
+                        if !check_group_budget(
+                            &thread.group_edits,
+                            *fuzzy_group_id,
+                            &ins_edit,
+                            &self.fuzzy_group_budgets,
+                        ) {
+                            break;
+                        }
+                        pos += ch.len_utf8();
+                        added += 1;
+                        edits.insertions += 1;
+                        sim *= 1.0 - edit_penalty;
+                        next_threads.push(Thread {
+                            state: *next,
+                            pos,
+                            similarity: sim,
+                            edits: edits.clone(),
+                            captures: thread.captures.clone(),
+                            match_start: thread.match_start,
+                            handler_overrides: thread.handler_overrides.clone(),
+                            group_edits: apply_group_edits(
+                                thread.group_edits.clone(),
+                                *fuzzy_group_id,
+                                &ins_edit,
+                            ),
+                        });
+                    }
+                }
             }
 
             State::FuzzyLiteral {
@@ -2113,8 +2227,9 @@ impl<'a> Matcher<'a> {
                             for (ci, result) in candidates.iter().enumerate() {
                                 if trace {
                                     eprintln!(
-                                        "  LIT pat={} pos={} cand={} -> end={} ins={} dels={} subs={}",
+                                        "  LIT pat={} '{}' pos={} cand={} -> end={} ins={} dels={} subs={}",
                                         pattern_index,
+                                        bridge.pattern_text(*pattern_index).unwrap_or(""),
                                         thread.pos,
                                         ci,
                                         result.end,
@@ -2358,6 +2473,89 @@ impl<'a> Matcher<'a> {
                                     }
                                 }
                             }
+
+                            // Zero-width exit: a fuzzy literal on a repetition
+                            // loop (`(?:b*){i<=1}$`) produced no alignment here,
+                            // but the atom may match empty. When nothing beyond
+                            // it consumes text (next is `$`/Accept), mrab
+                            // absorbs the following text as pure insertions:
+                            // `(?:b*){i<=1}$` on "d" -> (0,1).
+                            let optional_loop = self
+                                .fuzzy_zero_width_states
+                                .get(thread.state)
+                                .copied()
+                                .unwrap_or(false);
+                            let max_ins = limits.as_ref().map_or(0u8, |l| {
+                                l.get_insertions()
+                                    .or_else(|| l.get_edits())
+                                    .unwrap_or(0)
+                            });
+                            let max_e = max_edits.unwrap_or(0);
+                            if optional_loop
+                                && thread.pos < text.len()
+                                && thread.edits.insertions < max_ins
+                                && thread.edits.total() < max_e
+                                && !self.next_consumes_beyond(*next, thread.state)
+                            {
+                                let edit_penalty = 1.0 / (f32::from(max_e) + 1.0);
+                                let mut pos = thread.pos;
+                                let mut added: u8 = 0;
+                                let mut sim = thread.similarity;
+                                let mut edits = thread.edits.clone();
+                                while thread.edits.insertions + added < max_ins
+                                    && edits.total() < max_e
+                                    && pos < text.len()
+                                {
+                                    let Some(ch) = text[pos..].chars().next() else {
+                                        break;
+                                    };
+                                    if !bridge.boundary_insertion_allowed(*pattern_index, ch) {
+                                        break;
+                                    }
+                                    let delta = EditCounts {
+                                        insertions: added + 1,
+                                        ..EditCounts::default()
+                                    };
+                                    if !check_group_budget(
+                                        &thread.group_edits,
+                                        *fuzzy_group_id,
+                                        &delta,
+                                        &self.fuzzy_group_budgets,
+                                    ) {
+                                        break;
+                                    }
+                                    pos += ch.len_utf8();
+                                    added += 1;
+                                    edits.insertions += 1;
+                                    sim *= 1.0 - edit_penalty;
+                                    let result = FuzzyMatchResult {
+                                        end: pos,
+                                        similarity: sim,
+                                        insertions: added,
+                                        deletions: 0,
+                                        substitutions: 0,
+                                        swaps: 0,
+                                    };
+                                    if !meets_all_constraints(&result) {
+                                        continue;
+                                    }
+                                    let result_edits = EditCounts::from_fuzzy_result(&result);
+                                    next_threads.push(Thread {
+                                        state: *next,
+                                        pos,
+                                        similarity: sim,
+                                        edits: thread.edits.merge(&result_edits),
+                                        captures: thread.captures.clone(),
+                                        match_start: thread.match_start,
+                                        handler_overrides: thread.handler_overrides.clone(),
+                                        group_edits: apply_group_edits(
+                                            thread.group_edits.clone(),
+                                            *fuzzy_group_id,
+                                            &delta,
+                                        ),
+                                    });
+                                }
+                            }
                         }
 
                         // Also try pure deletion path: skip entire pattern without consuming text
@@ -2384,6 +2582,7 @@ impl<'a> Matcher<'a> {
                         if max_deletions > 0
                             && thread.pos < text.len()
                             && (min_edits.is_none() || thread.pos > 0)
+                            && !exact_exists
                         {
                             // Get pattern length to determine deletion cost
                             if let Some(pattern_char_len) = bridge.pattern_char_len(*pattern_index)
@@ -2794,6 +2993,65 @@ impl<'a> Matcher<'a> {
     fn next_consumes_or_asserts(&self, state_id: StateId) -> bool {
         let mut visited = vec![false; self.nfa.states.len()];
         self.next_reaches(state_id, true, &mut visited)
+    }
+
+    /// Whether the continuation from `state_id` reaches a consuming state or
+    /// forward assertion other than `ignore` itself. Used to gate the
+    /// zero-width insertion path: a fuzzy atom on a repetition loop (e.g. the
+    /// `b*` in `(?:b*){i<=1}$`) may match empty, and when nothing beyond it
+    /// consumes text the following text is pure insertion before `$`/Accept.
+    /// The state's own loop-back must be excluded (`[c]{0,2}` reaches the
+    /// FuzzyChar again through the Split, which is not "more text to match").
+    fn next_consumes_beyond(&self, state_id: StateId, ignore: StateId) -> bool {
+        let mut visited = vec![false; self.nfa.states.len()];
+        self.next_reaches_beyond(state_id, ignore, &mut visited)
+    }
+
+    fn next_reaches_beyond(
+        &self,
+        state_id: StateId,
+        ignore: StateId,
+        visited: &mut Vec<bool>,
+    ) -> bool {
+        if state_id == ignore || visited[state_id] {
+            return false;
+        }
+        visited[state_id] = true;
+
+        match &self.nfa.states[state_id] {
+            // Consuming states: more text must be matched.
+            State::Char { .. }
+            | State::FuzzyChar { .. }
+            | State::FuzzyLiteral { .. }
+            | State::Backreference { .. } => true,
+
+            // Forward assertions count as text-sensitive stops.
+            State::Lookahead { .. } | State::LookaheadLiteral { .. } => true,
+
+            // Non-consuming: follow through to the next state(s).
+            State::CaptureStart { next, .. }
+            | State::CaptureEnd { next, .. }
+            | State::ResetMatchStart { next, .. }
+            | State::Lookbehind { next, .. }
+            | State::LookbehindLiteral { next, .. }
+            | State::Handler { next, .. } => self.next_reaches_beyond(*next, ignore, visited),
+
+            // A non-end anchor (e.g. word boundary) doesn't consume; keep going.
+            // An end anchor means no further text is consumed.
+            State::Anchor { kind, next, .. } => {
+                !matches!(kind, Anchor::End) && self.next_reaches_beyond(*next, ignore, visited)
+            }
+
+            State::Epsilon { targets }
+            | State::Split {
+                branches: targets, ..
+            } => targets
+                .iter()
+                .any(|t| self.next_reaches_beyond(*t, ignore, visited)),
+
+            // Accept and constructs we don't reason about: treat as non-consuming.
+            _ => false,
+        }
     }
 
     fn next_reaches(&self, state_id: StateId, assert_stops: bool, visited: &mut Vec<bool>) -> bool {
