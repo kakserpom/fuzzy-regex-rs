@@ -1163,34 +1163,57 @@ impl Nfa {
             return false;
         }
 
-        // Must have Split (for +) and Char states with named classes
-        let has_split = self.states.iter().any(
-            |s| matches!(s, State::Split { greedy: true, branches, .. } if branches.len() >= 2),
-        );
-
-        // Check for named character class, but exclude "." (Any/AnyExceptNewline)
-        let has_named_char = self.states.iter().any(|s| {
-            if let State::Char { class, .. } = s {
-                class.named.iter().any(|n| {
-                    !matches!(
-                        n,
-                        crate::parser::NamedClass::Any
-                            | crate::parser::NamedClass::AnyExceptNewline
-                    )
-                })
-            } else {
-                false
-            }
-        });
-
-        // Also check for FuzzyLiteral state - this is what represents the literal part
-        let has_fuzzy_literal = self
+        // The class+literal fast path (`find_all_class_plus_literal`) can only
+        // account for plain class chars and plain literals. A FuzzyChar state
+        // means the pattern has a fuzzy operation the fast path ignores, so it
+        // must not fire (e.g. `(?:b|aba|bca)\d[^d]{e<=1}`).
+        if self
             .states
             .iter()
-            .any(|s| matches!(s, State::FuzzyLiteral { .. }));
+            .any(|s| matches!(s, State::FuzzyChar { .. }))
+        {
+            return false;
+        }
 
-        // Must have Split, named char class, AND a FuzzyLiteral (the literal part)
-        has_split && has_named_char && has_fuzzy_literal
+        // A named char class must be the body of a greedy repetition loop
+        // (`a+`/`a*`) whose exit leads to a FuzzyLiteral that ends the match.
+        // This is the only shape `find_all_class_plus_literal` can soundly
+        // handle: it extends the match backwards over class chars, which is only
+        // valid for an unbounded greedy loop. Bounded/lazy repetitions
+        // (`a{1,3}`, `a+?`) and bare `a` without a loop must not be treated as
+        // class-plus, or the fast path over-extends. Likewise, patterns that
+        // merely *contain* a named class, a Split and a literal (e.g. an
+        // alternation of literals followed by `\d`) are misclassified, and the
+        // fast path emits bare literal spans that ignore the rest of the pattern.
+        self.states.iter().enumerate().any(|(idx, state)| {
+            let State::Char { class, next } = state else {
+                return false;
+            };
+            if class.named.is_empty() {
+                return false;
+            }
+            if let Some(State::Split {
+                branches,
+                greedy: true,
+                ..
+            }) = self.states.get(*next)
+                && branches.iter().any(|&b| b == idx)
+                && branches.iter().any(|&b| self.class_fed_literal_ends_at_accept(b))
+            {
+                return true;
+            }
+            false
+        })
+    }
+
+    /// Whether `state` is a FuzzyLiteral whose `next` is the Accept state.
+    fn class_fed_literal_ends_at_accept(&self, state: StateId) -> bool {
+        match self.states.get(state) {
+            Some(State::FuzzyLiteral { next, .. }) => {
+                matches!(self.states.get(*next), Some(State::Accept))
+            }
+            _ => false,
+        }
     }
 
     /// Check if this NFA is a digit sequence with separators: \d{4}-\d{2}-\d{2}

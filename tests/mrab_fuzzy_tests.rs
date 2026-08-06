@@ -1069,3 +1069,48 @@ fn test_fuzzy_changes_method() {
     assert!(del.is_empty() || !del.is_empty());
     assert!(sub.is_empty() || !sub.is_empty());
 }
+
+// =============================================================================
+// Class+literal fast path (find_all_class_plus_literal) regression tests
+// =============================================================================
+
+#[test]
+fn test_class_plus_literal_does_not_fire_for_alternation_class_fuzzy() {
+    // Regression for a fuzz finding: `is_class_plus_with_literal` used a loose
+    // "has any Split + named class + literal" heuristic, so an alternation of
+    // literals followed by `\d[^d]{e<=1}` was misclassified as CLASS+LITERAL.
+    // The fast path then emitted the bare "aba" literal span, ignoring the
+    // `\d[^d]{e<=1}` suffix. "acdbababbd" has no digit, so mrab says no match.
+    let re = FuzzyRegex::new(r"(?:b|aba|bca)\d[^d]{e<=1}").unwrap();
+    assert!(!re.is_match("acdbababbd"));
+    assert!(re.find("acdbababbd").is_none());
+    assert!(re.find_iter("acdbababbd").next().is_none());
+
+    // With a digit present the real match still works (mrab: (3,6)).
+    let m = re.find("acdb4ababbd").unwrap();
+    assert_eq!((m.start(), m.end()), (3, 6));
+
+    // Same misclassification for an alternation + bounded class + fuzzy class.
+    let re = FuzzyRegex::new(r"(?:bc|cac|a)[a-c]c{1,3}cc\d[a-c]{e<=2}").unwrap();
+    assert!(!re.is_match("acacbaababc"));
+
+    // A fuzzy suffix after the literal must not be swallowed either.
+    let re = FuzzyRegex::new(r"\d+ab[^d]{e<=1}").unwrap();
+    assert!(re.find("1abc").is_some()); // "1ab" + "c" (0 edits)
+}
+
+#[test]
+fn test_class_plus_literal_keeps_genuine_shapes() {
+    // Genuine CLASS+LITERAL shapes keep using the fast path and stay correct.
+    let re = FuzzyRegex::new(r"\d+ab").unwrap();
+    assert!(re.find("12ab").is_some());
+    assert!(!re.is_match("xab"));
+
+    let re = FuzzyRegex::new(r"ab\w+cd").unwrap();
+    let m = re.find("zzabXYcd").unwrap();
+    assert_eq!((m.start(), m.end()), (2, 8));
+
+    let re = FuzzyRegex::new(r"\w+@").unwrap();
+    assert!(re.is_match("x@"));
+    assert!(!re.is_match("@y"));
+}
