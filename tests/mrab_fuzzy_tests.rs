@@ -1114,3 +1114,105 @@ fn test_class_plus_literal_keeps_genuine_shapes() {
     assert!(re.is_match("x@"));
     assert!(!re.is_match("@y"));
 }
+
+// =============================================================================
+// Session regression tests (mrab parity fixes)
+// =============================================================================
+
+#[test]
+fn test_end_anchor_window_counts_fuzzy_insertions() {
+    // Regression: `length_range` for the end-anchor probe window ignored the
+    // insertion budget of a following fuzzy class, under-sizing the window so
+    // `[a-c]{e<=2}$` could never reach the insertions needed to match. mrab
+    // matches at (16,21) with 2 insertions.
+    let re = FuzzyRegex::new(r"(?:ca|ca|ca)[a-c]{e<=2}$").unwrap();
+    let m = re.find("adcaabaabcacacaacadac").unwrap();
+    assert_eq!((m.start(), m.end()), (16, 21));
+    assert_eq!(m.fuzzy_counts(), (0, 2, 0));
+}
+
+#[test]
+fn test_dedup_keeps_viable_zero_edit_thread() {
+    // Regression: the thread-search-cost dedup penalised threads whose edits
+    // fell short of the min-edit bound, letting an edit-spent thread evict a
+    // still-viable 0-edit continuation at the same (state, pos). mrab matches
+    // at (34,45) with 2 deletions.
+    let re = FuzzyRegex::new(r"(?:cbcb[a]{2,3}üabcacb){1<=e<=2}").unwrap();
+    let m = re.find("d中éédbcüb😀中c中cb中😀cbcbaabcacbd").unwrap();
+    assert_eq!((m.start(), m.end()), (34, 45));
+    assert_eq!(m.fuzzy_counts(), (0, 0, 2));
+}
+
+#[test]
+fn test_group_trailing_insertion_requires_group_edits() {
+    // Regression: trailing insertions were suppressed whenever the base
+    // alignment had 0 edits, but mrab only suppresses them when the whole
+    // group has 0 edits accumulated. A leading insertion re-enables trailing
+    // insertions, so `^(?:[ab]){1<=e<=2}$` matches "Xab" but not "abX".
+    let re = FuzzyRegex::new(r"^(?:[ab]){1<=e<=2}$").unwrap();
+    let m = re.find("Xab").unwrap();
+    assert_eq!((m.start(), m.end()), (0, 3));
+    assert_eq!(m.fuzzy_counts(), (0, 2, 0));
+    assert!(re.find("abX").is_none());
+
+    // Same rule with a >=2-char group.
+    let re = FuzzyRegex::new(r"^(?:[ab][cd]){1<=e<=2}$").unwrap();
+    let m = re.find("aXdy").unwrap();
+    assert_eq!((m.start(), m.end()), (0, 4));
+    assert_eq!(m.fuzzy_counts(), (0, 2, 0));
+    assert!(re.find("acX").is_none());
+    // One leading insertion is enough; the group reaches min via the trailing
+    // insertion, so "aX" matches.
+    let m = re.find("aX").unwrap();
+    assert_eq!((m.start(), m.end()), (0, 2));
+    assert_eq!(m.fuzzy_counts(), (1, 0, 0));
+
+    let re = FuzzyRegex::new(r"^(?:[bca]{0,2}){1<=e<=4}$").unwrap();
+    let m = re.find("adcbaa").unwrap();
+    assert_eq!((m.start(), m.end()), (0, 6));
+}
+
+#[test]
+fn test_mid_text_whole_literal_deletion() {
+    // Regression: whole-pattern deletions were only emitted at end of text, so
+    // a group whose only viable alignment deletes its leading literal mid-text
+    // never matched. mrab deletes the leading "a" (counts (0,0,1)) and lets the
+    // rest of the group match "d".."a" at (0,2).
+    let re = FuzzyRegex::new(r"(?:a[^b]\w+){0<=e<=1}").unwrap();
+    let m = re.find("da").unwrap();
+    assert_eq!((m.start(), m.end()), (0, 2));
+    assert_eq!(m.fuzzy_counts(), (0, 0, 1));
+
+    let re = FuzzyRegex::new(r"^(?:cb{2}){1<=e<=2}").unwrap();
+    let m = re.find("bccabcbca").unwrap();
+    assert_eq!((m.start(), m.end()), (0, 2));
+    assert_eq!(m.fuzzy_counts(), (1, 0, 1));
+}
+
+#[test]
+fn test_whole_literal_deletion_end_of_text() {
+    // Whole-pattern deletion at end of text must keep working (this path is
+    // exercised by `find_at_all`'s exhausted-text branch).
+    let re = FuzzyRegex::new(r"ab(?:c){d<=1}").unwrap();
+    let m = re.find("ab").unwrap();
+    assert_eq!((m.start(), m.end()), (0, 2));
+    assert_eq!(m.fuzzy_counts(), (0, 0, 1));
+}
+
+#[test]
+fn test_whole_literal_deletion_does_not_displace_optional_skip() {
+    // Regression: when a fuzzy literal cannot match at a position, the matcher
+    // falls through to the optional path and can match via leading insertions.
+    // Injecting a lone deletion candidate must not displace that path.
+    // mrab: `^(?:c?){i<=2}$` matches "a" with 1 insertion.
+    let re = FuzzyRegex::new(r"^(?:c?){i<=2}$").unwrap();
+    let m = re.find("a").unwrap();
+    assert_eq!((m.start(), m.end()), (0, 1));
+    assert_eq!(m.fuzzy_counts(), (0, 1, 0));
+
+    // The same via a multi-byte inserted char.
+    let re = FuzzyRegex::new(r"^(?:c?){i<=2}$").unwrap();
+    let m = re.find("😀a").unwrap();
+    assert_eq!((m.start(), m.end()), (0, 5));
+    assert_eq!(m.fuzzy_counts(), (0, 2, 0));
+}

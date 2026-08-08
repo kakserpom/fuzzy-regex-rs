@@ -888,17 +888,6 @@ impl FuzzyRegex {
     /// consistency guard that keeps this in sync with `find_iter`.
     #[inline]
     fn find_dispatch<'t>(&self, text: &'t str) -> Option<Match<'t>> {
-        if std::env::var("DISPATCH_TRACE").is_ok() {
-            eprintln!(
-                "DISPATCH simple_fuzzy={} lazy={} class_plus={:?} greedy_dotstar={} anchored={} end_anchor={}",
-                self.is_simple_fuzzy(),
-                self.has_lazy,
-                self.fuzzy_class_plus.is_some(),
-                self.is_pure_greedy_dotstar,
-                self.anchored,
-                self.ends_with_end_anchor,
-            );
-        }
         // An unresolved \L<name> reference matches nothing (see the note on
         // has_unresolved_named_lists): report no match instead of the empty-string
         // placeholder the NFA would produce.
@@ -1135,14 +1124,6 @@ impl FuzzyRegex {
         // trailing comma), no `Split` states — i.e. no `?`/`*`/`+`/`|`, so the
         // literal is neither optional (`(?:ab)?$`) nor repeated (`(?:ab)+$`) —
         // and no start anchor (`rfind` ignores `^`).
-        if std::env::var("DISPATCH_TRACE").is_ok() {
-            eprintln!(
-                "DISPATCH end-anchor-cand lits={} caps={} classes={}",
-                self.literals.len(),
-                self.capture_count,
-                self.nfa.has_char_classes(),
-            );
-        }
         if self.ends_with_end_anchor
             && !self.config.multi_line
             && self.literals.len() == 1
@@ -1454,9 +1435,6 @@ impl FuzzyRegex {
             && self.word_lists.is_empty()
             && !self.is_class_plus_with_literal
         {
-            if std::env::var("DISPATCH_TRACE").is_ok() {
-                eprintln!("DISPATCH -> DFA path");
-            }
             let mut dfa = dfa.borrow_mut();
             return dfa.find(text).map(|m| {
                 self.make_match(
@@ -1619,12 +1597,6 @@ impl FuzzyRegex {
             && !self.has_lazy
             && !self.has_literal_word_boundary
             && !self.is_char_class_plus_or_lazy;
-        if std::env::var("DISPATCH_TRACE").is_ok() {
-            eprintln!(
-                "DISPATCH general_path={find_iter_uses_general_path} simple_fuzzy_only={} char_class_plus_or_lazy={}",
-                self.is_simple_fuzzy_only, self.is_char_class_plus_or_lazy
-            );
-        }
         if find_iter_uses_general_path {
             return self
                 .create_matcher(self.is_unanchored())
@@ -2156,9 +2128,6 @@ impl FuzzyRegex {
             && self.capture_count == 0
             && !self.config.case_insensitive
         {
-            if std::env::var("DISPATCH_TRACE").is_ok() {
-                eprintln!("DISPATCH class+literal candidate");
-            }
             let all_simple = self
                 .literals
                 .iter()
@@ -2167,9 +2136,6 @@ impl FuzzyRegex {
                 && self.literals.len() <= 3
                 && let Some(class_type) = self.nfa.get_char_class_type()
             {
-                if std::env::var("DISPATCH_TRACE").is_ok() {
-                    eprintln!("DISPATCH -> class+literal path fired");
-                }
                 return Matches::new(Self::find_all_class_plus_literal(
                     text,
                     class_type,

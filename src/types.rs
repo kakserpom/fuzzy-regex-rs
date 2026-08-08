@@ -76,6 +76,20 @@ impl FuzzyLimits {
         self.insertions
     }
 
+    /// Maximum number of text characters insertions may consume at a single
+    /// fuzzy position. A shared `{e<=k}` budget allows up to `k` insertions
+    /// (plus any explicit `i` cap); an explicit `i` cap is used when no shared
+    /// budget is present. `{s<=k}`/`{d<=k}` alone add no text.
+    #[must_use]
+    pub fn insertion_capacity(&self) -> NumEdits {
+        match (self.edits, self.insertions) {
+            (Some(e), Some(i)) => e.min(i),
+            (Some(e), None) => e,
+            (None, Some(i)) => i,
+            (None, None) => 0,
+        }
+    }
+
     /// Get the maximum deletions allowed.
     #[must_use]
     pub fn get_deletions(&self) -> Option<NumEdits> {

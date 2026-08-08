@@ -1922,6 +1922,51 @@ impl FuzzyBridge {
         self.find_at_all(text, pattern_index, from, threshold).into_iter().next()
     }
 
+    /// Whole-pattern deletion candidate: the entire literal can be deleted,
+    /// leaving a zero-width match at `from`. mrab emits this anywhere in the
+    /// text (e.g. `(?:a){d<=1}` on "ba" -> (0,0) by deleting "a", and
+    /// `(?:a[^b]\w+){0<=e<=1}` on "da" deletes the leading "a" so the rest of
+    /// the group can match "d"), not just at end of text. The caller's
+    /// (state, pos) dedup and Accept-time budget keep it from looping.
+    #[must_use]
+    pub fn whole_literal_deletion(
+        &self,
+        pattern_index: usize,
+        from: usize,
+        threshold: f32,
+    ) -> Option<FuzzyMatchResult> {
+        let pattern = self.patterns.get(pattern_index)?;
+        let max_edits = self.limits.get(pattern_index).and_then(|lim| {
+            lim.as_ref().map(|l| {
+                l.get_edits().unwrap_or_else(|| {
+                    let i = l.get_insertions().unwrap_or(0);
+                    let d = l.get_deletions().unwrap_or(0);
+                    let s = l.get_substitutions().unwrap_or(0);
+                    let t = l.get_swaps().unwrap_or(0);
+                    i.saturating_add(d).saturating_add(s).saturating_add(t)
+                })
+            })
+        })?;
+        let char_len = pattern.chars().count();
+        if char_len > max_edits as usize {
+            return None;
+        }
+        let deletions = char_len as u8;
+        let max_len = char_len.max(1) as f32;
+        let sim = (1.0 - f32::from(deletions) / max_len).max(0.0);
+        if sim < threshold {
+            return None;
+        }
+        Some(FuzzyMatchResult {
+            end: from,
+            similarity: sim,
+            insertions: 0,
+            deletions,
+            substitutions: 0,
+            swaps: 0,
+        })
+    }
+
     /// Find all distinct fuzzy alignments for a pattern anchored at `from`.
     ///
     /// Returns every (end, edit-count) alignment whose match starts exactly at
@@ -1938,9 +1983,8 @@ impl FuzzyBridge {
         from: usize,
         threshold: f32,
     ) -> Vec<FuzzyMatchResult> {
-        let pattern = match self.patterns.get(pattern_index) {
-            Some(p) => p,
-            None => return Vec::new(),
+        let Some(pattern) = self.patterns.get(pattern_index) else {
+            return Vec::new();
         };
 
         // Fast path for exact matching (no fuzzy edits allowed)
@@ -1957,29 +2001,14 @@ impl FuzzyBridge {
             })
         });
 
+        let deletion_candidate = self.whole_literal_deletion(pattern_index, from, threshold);
+
         // Handle empty/exhausted text: can still match via pure deletions
         if from >= text.len() {
-            // Check if we can delete the entire pattern
-            let pattern_char_len = pattern.chars().count();
-            if let Some(max) = max_edits
-                && pattern_char_len <= max as usize
-            {
-                // Calculate similarity for deleting entire pattern
-                let deletions = pattern_char_len as u8;
-                let max_len = pattern_char_len.max(1) as f32;
-                let sim = (1.0 - f32::from(deletions) / max_len).max(0.0);
-                if sim >= threshold {
-                    return vec![FuzzyMatchResult {
-                        end: from,
-                        similarity: sim,
-                        insertions: 0,
-                        deletions,
-                        substitutions: 0,
-                        swaps: 0,
-                    }];
-                }
-            }
-            return Vec::new();
+            return match deletion_candidate {
+                Some(c) => vec![c],
+                None => Vec::new(),
+            };
         }
 
         let substring = &text[from..];
@@ -2062,6 +2091,19 @@ impl FuzzyBridge {
                 substitutions: m.substitutions,
                 swaps: m.swaps,
             });
+        }
+
+        // The automaton never reports a zero-width whole-literal deletion in the
+        // middle of the text (only at end), so append the candidate here. Skip
+        // if the automaton already produced an identical (end == from) match, or
+        // if it produced no candidates at all — an empty result is the caller's
+        // signal that the literal cannot match and should be skipped (optional
+        // fallthrough), which a lone deletion candidate would displace.
+        if !out.is_empty()
+            && let Some(c) = deletion_candidate
+            && !out.iter().any(|m| m.end == c.end && m.deletions == c.deletions)
+        {
+            out.push(c);
         }
 
         out.sort_by(cmp_cached_candidates);

@@ -2023,8 +2023,7 @@ impl Nfa {
                     m + 1
                         + limits
                             .as_ref()
-                            .and_then(FuzzyLimits::get_insertions)
-                            .unwrap_or(0) as usize
+                            .map_or(0, FuzzyLimits::insertion_capacity) as usize
                 })
             }
 
@@ -2134,19 +2133,23 @@ impl Nfa {
             }
 
             State::FuzzyChar { next, limits, .. } => {
-                // FuzzyChar can match 0-2 characters depending on edits:
+                // FuzzyChar can match 0 or more characters depending on edits:
                 // - Deletion: 0 chars (pattern char skipped)
                 // - Exact/Substitution: 1 char
-                // - (Insertion handled elsewhere in text loop)
+                // - Insertions: consume extra text chars (bounded by the
+                //   per-type insertion budget)
                 let (next_min, next_max) =
                     self.length_range_state(*next, pattern_lengths, visited, memo);
                 let max_edits = limits
                     .as_ref()
                     .and_then(FuzzyLimits::get_edits)
                     .unwrap_or(0) as usize;
+                let insertions = limits
+                    .as_ref()
+                    .map_or(0, FuzzyLimits::insertion_capacity) as usize;
                 // With deletion allowed, can consume 0 chars; otherwise 1 char
                 let char_min = usize::from(max_edits == 0);
-                (next_min + char_min, next_max.map(|m| m + 1))
+                (next_min + char_min, next_max.map(|m| m + 1 + insertions))
             }
 
             State::FuzzyLiteral {

@@ -1403,25 +1403,34 @@ impl<'a> Matcher<'a> {
         self.find_at_with_cache(text, start, None)
     }
 
-    /// Search cost for the beam dedup: global edit cost plus a penalty for each
-    /// fuzzy group whose accumulated edits are still below its `min_edits`
-    /// bound. Without the penalty, a cheap trailing-padding alignment (which
-    /// never satisfies a `{1<=e<=N}` minimum) would dedup away the
-    /// min-satisfying alignment at the same (state, pos), producing a false
-    /// negative — e.g. `^(?:[a-c]+){1<=e<=3}` on "aaccad".
+    /// Search cost for the beam dedup: global edit cost. Minimum-edit shortfalls
+    /// are NOT folded into the cost — instead the dedup key carries a
+    /// `mins_met` flag (see `find_at_with_cache`), so a below-minimum thread is
+    /// never collapsed with an at-minimum thread at the same (state, pos). A
+    /// cost penalty here would let a thread that already spent its edits (and
+    /// can no longer reach the group minimum via later atoms) dedup away the
+    /// still-viable 0-edit continuation — e.g.
+    /// `(?:cbcb[a]{2,3}üabcacb){1<=e<=2}` needs its 2 deletions in the final
+    /// literal, not before it.
     #[must_use]
-    fn thread_search_cost(&self, thread: &Thread) -> u16 {
-        let base = thread.edits.cost(1, 1, 1, 1);
-        let mut shortfall: u32 = 0;
-        for (id, min) in self.fuzzy_group_mins.iter().enumerate() {
-            if let Some(m) = min
-                && let Some(e) = thread.group_edits.get(id)
-                && e.total() < *m
-            {
-                shortfall += u32::from(*m - e.total());
-            }
-        }
-        base + (shortfall.saturating_mul(8).min(u16::MAX as u32 - u32::from(base))) as u16
+    fn thread_search_cost(thread: &Thread) -> u16 {
+        thread.edits.cost(1, 1, 1, 1)
+    }
+
+    /// Whether every fuzzy group with a `min_edits` lower bound has already
+    /// accumulated at least that many core edits. Threads that haven't yet met
+    /// their group minimums are deduped separately from those that have: both
+    /// remain viable (the minimum may be satisfied by later atoms), so one must
+    /// not evict the other at the same (state, pos).
+    #[must_use]
+    fn mins_met(&self, thread: &Thread) -> bool {
+        self.fuzzy_group_mins
+            .iter()
+            .enumerate()
+            .all(|(id, min)| match min {
+                None => true,
+                Some(m) => thread.group_edits.get(id).is_none_or(|e| e.total() >= *m),
+            })
     }
 
     /// Build the fuzzy cache for the given text.
@@ -1462,18 +1471,19 @@ impl<'a> Matcher<'a> {
 
         let mut best_match: Option<MatchResult> = None;
 
-        // Track the lowest edit-cost reached at each (state, pos). A thread is
-        // re-explored only when it arrives at a key with strictly lower cost than
-        // seen before (or the key is new), so the minimal-edit alignment always
-        // wins. Crucially, a greedy *exact* continuation can reclaim a (state,
-        // pos) that a higher-cost insertion self-loop touched first — a plain
-        // "visited" set would block it, breaking greedy quantifiers over fuzzy
-        // classes (e.g. `(?:\d+){i<=2}` matching one digit instead of all).
-        let mut best_cost: FxHashMap<(StateId, usize), u16> = FxHashMap::default();
-        best_cost.insert((self.nfa.start, start), 0);
+        // Track the lowest edit-cost reached at each (state, pos, mins_met). A
+        // thread is re-explored only when it arrives at a key with strictly
+        // lower cost than seen before (or the key is new), so the
+        // minimal-edit alignment always wins. Crucially, a greedy *exact*
+        // continuation can reclaim a (state, pos) that a higher-cost insertion
+        // self-loop touched first — a plain "visited" set would block it,
+        // breaking greedy quantifiers over fuzzy classes (e.g. `(?:\d+){i<=2}`
+        // matching one digit instead of all).
+        let mut best_cost: FxHashMap<(StateId, usize, bool), u16> = FxHashMap::default();
+        best_cost.insert((self.nfa.start, start, self.mins_met(&threads[0])), 0);
 
         // Reused across batches to avoid a fresh allocation per BFS level.
-        let mut best_at_pos: FxHashMap<(StateId, usize), usize> = FxHashMap::default();
+        let mut best_at_pos: FxHashMap<(StateId, usize, bool), usize> = FxHashMap::default();
         let mut admitted: Vec<usize> = Vec::new();
 
         while !threads.is_empty() {
@@ -1495,20 +1505,22 @@ impl<'a> Matcher<'a> {
                 );
             }
 
-            // Collapse to the lowest-cost thread per (state, pos) within this
-            // batch (ties keep the earliest thread — a stable "first match"
-            // tie-break), then admit it only if it beats the best cost recorded
-            // so far at that key, or the key is new. Strictly-lower cost
-            // supersedes; equal or higher cost is dropped. This keeps the
-            // minimal-edit alignment while letting exact continuations reclaim a
-            // key a costlier path reached earlier.
+            // Collapse to the lowest-cost thread per (state, pos, mins_met)
+            // within this batch (ties keep the earliest thread — a stable
+            // "first match" tie-break), then admit it only if it beats the best
+            // cost recorded so far at that key, or the key is new.
+            // Strictly-lower cost supersedes; equal or higher cost is dropped.
+            // This keeps the minimal-edit alignment while letting exact
+            // continuations reclaim a key a costlier path reached earlier. The
+            // `mins_met` flag keeps a below-minimum thread from evicting (or
+            // being evicted by) an at-minimum thread at the same (state, pos).
             best_at_pos.clear();
             for (idx, thread) in next_threads.iter().enumerate() {
-                let key = (thread.state, thread.pos);
-                let cost = self.thread_search_cost(thread);
+                let key = (thread.state, thread.pos, self.mins_met(thread));
+                let cost = Self::thread_search_cost(thread);
                 match best_at_pos.get(&key) {
                     Some(&existing_idx)
-                        if self.thread_search_cost(&next_threads[existing_idx]) <= cost => {}
+                        if Self::thread_search_cost(&next_threads[existing_idx]) <= cost => {}
                     _ => {
                         best_at_pos.insert(key, idx);
                     }
@@ -1516,7 +1528,7 @@ impl<'a> Matcher<'a> {
             }
             admitted.clear();
             admitted.extend(best_at_pos.iter().filter_map(|(key, &idx)| {
-                let cost = self.thread_search_cost(&next_threads[idx]);
+                let cost = Self::thread_search_cost(&next_threads[idx]);
                 match best_cost.get(key) {
                     Some(&prev) if cost >= prev => None,
                     _ => {
@@ -1554,13 +1566,6 @@ impl<'a> Matcher<'a> {
             threads = next_threads;
         }
 
-        if std::env::var("MATCHER_TRACE").is_ok() {
-            eprintln!(
-                "  find_at({start}) -> {:?}",
-                best_match.as_ref().map(|m| (m.start, m.end, m.edits.clone()))
-            );
-        }
-
         best_match
     }
 
@@ -1575,43 +1580,14 @@ impl<'a> Matcher<'a> {
         cached: Option<&CachedMatches>,
     ) {
         let state = &self.nfa.states[thread.state];
-        let trace = std::env::var("MATCHER_TRACE").is_ok();
-        if trace {
-            let kind = match state {
-                State::Accept => "Accept",
-                State::Char { .. } => "Char",
-                State::FuzzyChar { .. } => "FuzzyChar",
-                State::FuzzyLiteral { .. } => "FuzzyLit",
-                State::Epsilon { .. } => "Eps",
-                State::Split { .. } => "Split",
-                State::Anchor { .. } => "Anchor",
-                _ => "Other",
-            };
-            eprintln!(
-                "STEP st={} ({kind}) pos={} edits={:?} start={} sim={:.3}",
-                thread.state, thread.pos, thread.edits, thread.match_start, thread.similarity
-            );
-        }
 
         match state {
             State::Accept => {
-                if trace {
-                    eprintln!(
-                        "  ACCEPT pos={} edits={:?} sim={:.3}",
-                        thread.pos, thread.edits, thread.similarity
-                    );
-                }
                 // Enforce per-group `min_edits` lower bounds: a fuzzy group must
                 // have accumulated at least its minimum core edits by the time
                 // the pattern accepts. Trailing-padding insertions are not part
                 // of `group_edits` (see the FuzzyChar handler), so a zero-edit
                 // exact group match is rejected, matching mrab's `{1<=e<=N}`.
-                if std::env::var("MATCHER_TRACE").is_ok() {
-                    eprintln!(
-                        "  MINCHECK mins={:?} group_edits={:?}",
-                        self.fuzzy_group_mins, thread.group_edits
-                    );
-                }
                 let group_min_ok = self
                     .fuzzy_group_mins
                     .iter()
@@ -1859,11 +1835,21 @@ impl<'a> Matcher<'a> {
                         let mut sim = base_sim;
                         // mrab: trailing insertions from single-char fuzzy
                         // classes are suppressed for min-edit groups when the
-                        // base match is exact (0 core edits).  Multi-char
-                        // trailing insertions are handled by the FuzzyLiteral
-                        // handler instead.
+                        // base match is exact (0 core edits) AND the group has
+                        // not accumulated any edits yet. Once an edit has been
+                        // spent anywhere in the group (e.g. a leading insertion
+                        // consumed by the self-loop below), a later exact match
+                        // may be extended by trailing insertions again —
+                        // `(?:[ab]){1<=e<=2}$` on "Xab" inserts "X" before and
+                        // "b" after the exact "a", while "abX" stays a miss.
+                        // Multi-char trailing insertions are handled by the
+                        // FuzzyLiteral handler instead.
+                        let group_has_edits = fuzzy_group_id
+                            .and_then(|id| thread.group_edits.get(id))
+                            .is_some_and(|e| e.total() > 0);
                         let suppress_trailing = has_min
-                            && base_delta.total() == 0;
+                            && base_delta.total() == 0
+                            && !group_has_edits;
                         if !suppress_trailing {
                             while edits.total() < max_edits
                             && edits.insertions < max_insertions
@@ -2182,11 +2168,9 @@ impl<'a> Matcher<'a> {
                         let candidates: Vec<FuzzyMatchResult> = if let Some(cache) = cached {
                             let from_cache = cache
                                 .get_all(*pattern_index, thread.pos)
-                                .map(|s| s.to_vec())
+                                .map(<[FuzzyMatchResult]>::to_vec)
                                 .unwrap_or_default();
-                            if !from_cache.is_empty() {
-                                from_cache
-                            } else {
+                            if from_cache.is_empty() {
                                 // The cache only stores alignments the automata
                                 // found; pure whole-literal deletions at end of
                                 // text are produced by `find_at_all` (its
@@ -2199,6 +2183,8 @@ impl<'a> Matcher<'a> {
                                     thread.pos,
                                     self.config.threshold,
                                 )
+                            } else {
+                                from_cache
                             }
                         } else {
                             bridge.find_at_all(
@@ -2208,6 +2194,26 @@ impl<'a> Matcher<'a> {
                                 self.config.threshold,
                             )
                         };
+
+                        // The cache never contains mid-text whole-pattern
+                        // deletions (the automata only emit them at end of
+                        // text), so inject the candidate here. Only when the
+                        // automaton produced at least one alignment: an empty
+                        // candidate list is the signal that the literal cannot
+                        // match here and must be skipped via the optional
+                        // fallthrough (e.g. `^(?:c?){i<=2}$` on "a" inserts
+                        // past the skipped `c?`), and injecting a deletion
+                        // would displace that path.
+                        let mut candidates = candidates;
+                        if !candidates.is_empty()
+                            && let Some(del) = bridge.whole_literal_deletion(
+                                *pattern_index,
+                                thread.pos,
+                                self.config.threshold,
+                            ) && !candidates.iter().any(|m| m.end == del.end && m.deletions == del.deletions)
+                        {
+                            candidates.push(del);
+                        }
 
                         // mrab semantics for min-edit groups (`{1<=e<=N}`): when
                         // the literal matches exactly at this position, the
@@ -2223,21 +2229,9 @@ impl<'a> Matcher<'a> {
                         let exact_exists =
                             has_min && candidates.iter().any(|c| c.total_edits() == 0);
 
+                        #[allow(clippy::if_not_else)]
                         if !candidates.is_empty() {
                             for (ci, result) in candidates.iter().enumerate() {
-                                if trace {
-                                    eprintln!(
-                                        "  LIT pat={} '{}' pos={} cand={} -> end={} ins={} dels={} subs={}",
-                                        pattern_index,
-                                        bridge.pattern_text(*pattern_index).unwrap_or(""),
-                                        thread.pos,
-                                        ci,
-                                        result.end,
-                                        result.insertions,
-                                        result.deletions,
-                                        result.substitutions
-                                    );
-                                }
                                 // With a min-edit bound and an exact match at this
                                 // position, mrab only tries the exact alignment.
                                 if exact_exists && result.total_edits() != 0 {
@@ -3001,7 +2995,7 @@ impl<'a> Matcher<'a> {
     /// `b*` in `(?:b*){i<=1}$`) may match empty, and when nothing beyond it
     /// consumes text the following text is pure insertion before `$`/Accept.
     /// The state's own loop-back must be excluded (`[c]{0,2}` reaches the
-    /// FuzzyChar again through the Split, which is not "more text to match").
+    /// `FuzzyChar` again through the Split, which is not "more text to match").
     fn next_consumes_beyond(&self, state_id: StateId, ignore: StateId) -> bool {
         let mut visited = vec![false; self.nfa.states.len()];
         self.next_reaches_beyond(state_id, ignore, &mut visited)
