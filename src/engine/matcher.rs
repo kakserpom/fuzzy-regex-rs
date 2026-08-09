@@ -1349,11 +1349,18 @@ impl<'a> Matcher<'a> {
         let mut pos = 0;
         let mut lit_idx = 0;
 
-        while pos < text.len() && lit_idx < literal_positions.len() && matches.len() < limit {
-            let next_lit_pos = literal_positions[lit_idx];
+        while pos < text.len() && matches.len() < limit {
+            let next_lit_pos = literal_positions
+                .get(lit_idx)
+                .copied()
+                .unwrap_or(text.len());
 
             // Skip to position within MAX_LOOKBACK of the next literal
-            if pos + MAX_LOOKBACK < next_lit_pos {
+            // (past the last literal there is no guide; scan the tail
+            // exhaustively so a match that starts after every cached literal
+            // occurrence -- e.g. one whose trailing fuzzy literal is deleted
+            // to empty -- is still found).
+            if lit_idx < literal_positions.len() && pos + MAX_LOOKBACK < next_lit_pos {
                 // Jump to MAX_LOOKBACK before the literal
                 pos = next_lit_pos.saturating_sub(MAX_LOOKBACK);
                 // Snap to char boundary
@@ -1392,7 +1399,7 @@ impl<'a> Matcher<'a> {
                 .map_or(text.len() + 1, |(i, _)| pos + i);
 
             // If we've passed the current literal, move to the next one
-            if next_pos > next_lit_pos {
+            if lit_idx < literal_positions.len() && next_pos > next_lit_pos {
                 lit_idx += 1;
             }
 

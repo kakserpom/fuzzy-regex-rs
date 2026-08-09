@@ -1273,3 +1273,42 @@ fn test_end_anchored_match_after_last_literal_via_deletions() {
     assert_eq!(m.fuzzy_counts(), (0, 0, 2));
 }
 
+#[test]
+fn test_match_starting_after_last_cached_literal_via_trailing_deletion() {
+    // Regression: `(?:c|ccc|ccc)\w{2}a{d<=1}` on "adbabcbb" matches (5,8) with
+    // one deletion: `c` at 5, `\w{2}` consumes "bb", then the trailing fuzzy
+    // literal `a{d<=1}` matches EMPTY (whole-literal deletion) at end of text.
+    // The literal cache only anchors positions 0 and 3 (the two `a`s), so the
+    // literal-guide prefilter -- which used to terminate once past the last
+    // cached literal position -- never tried position 5. mrab reports (5,8)
+    // with (s,i,d) = (0,0,1).
+    let re = FuzzyRegex::new(r"(?:c|ccc|ccc)\w{2}a{d<=1}").unwrap();
+    let find = re.find("adbabcbb").map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+    assert_eq!(find, Some((5, 8, (0, 0, 1))));
+    let iter = re
+        .find_iter("adbabcbb")
+        .next()
+        .map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+    assert_eq!(iter, find);
+
+    // A single-literal group `(?:c)` triggers the same miss.
+    let re = FuzzyRegex::new(r"(?:c)\w{2}a{d<=1}").unwrap();
+    let m = re.find("adbabcbb").unwrap();
+    assert_eq!((m.start(), m.end()), (5, 8));
+    assert_eq!(m.fuzzy_counts(), (0, 0, 1));
+
+    // find_iter must also keep scanning past the last cached literal position
+    // after an earlier match jumped past it.
+    let re = FuzzyRegex::new(r"(?:c)\w{2}a{d<=1}").unwrap();
+    let iter: Vec<_> = re
+        .find_iter("cbbaXcbb")
+        .map(|m| (m.start(), m.end(), m.fuzzy_counts()))
+        .collect();
+    assert_eq!(iter, vec![(0, 4, (0, 0, 0)), (5, 8, (0, 0, 1))]);
+    let iter: Vec<_> = re
+        .find_iter("cbbcbb")
+        .map(|m| (m.start(), m.end(), m.fuzzy_counts()))
+        .collect();
+    assert_eq!(iter, vec![(0, 3, (0, 0, 1)), (3, 6, (0, 0, 1))]);
+}
+
