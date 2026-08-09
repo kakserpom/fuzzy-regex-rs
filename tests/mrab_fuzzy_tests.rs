@@ -1216,3 +1216,29 @@ fn test_whole_literal_deletion_does_not_displace_optional_skip() {
     assert_eq!((m.start(), m.end()), (0, 5));
     assert_eq!(m.fuzzy_counts(), (0, 2, 0));
 }
+
+#[test]
+fn test_find_and_find_iter_agree_on_substitution_tie_break() {
+    // Regression: `(?:caba){0<=e<=2}` on "bcbdaccdaaa" has two equal-edit
+    // alignments at (1,5): 2 substitutions vs 1 insertion + 1 deletion. mrab
+    // reports (1,5) with (s,i,d) = (2,0,0). The engine used to return whichever
+    // equal-similarity candidate the FxHashMap iterated first, so the first
+    // call on a fresh regex could disagree with later calls (and `find` could
+    // disagree with `find_iter().next()`).
+    let text = "bcbdaccdaaa";
+    for _ in 0..3 {
+        let re = FuzzyRegex::new(r"(?:caba){0<=e<=2}").unwrap();
+        let find = re.find(text).map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+        let iter = re
+            .find_iter(text)
+            .next()
+            .map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+        assert_eq!(find, Some((1, 5, (2, 0, 0))), "find() must be deterministic and mrab-aligned");
+        assert_eq!(iter, find, "find_iter().next() must agree with find()");
+
+        // Repeating on the same regex must also be stable.
+        let again = re.find(text).map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+        assert_eq!(again, find, "repeated find() must be deterministic");
+    }
+}
+

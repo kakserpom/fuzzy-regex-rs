@@ -551,9 +551,11 @@ impl FuzzyBridge {
 
         // Fallback to NFA. `find_all` returns every (overlapping) candidate
         // match; a non-overlapping search must return leftmost, best-per-start,
-        // non-overlapping matches. Sort by (start, fewest edits, shortest end)
-        // — so the first element equals `search_first`/`find_first` and `find`
-        // agrees with `find_iter().next()` — then greedily drop overlaps.
+        // non-overlapping matches. Sort by (start, fewest edits, most
+        // substitutions, longest end) — matching `find_first_buffered` and
+        // `cmp_cached_candidates`, so the first element equals
+        // `search_first`/`find_first` and `find` agrees with `find_iter().next()`
+        // — then greedily drop overlaps.
         let mut all = {
             let mut buffers = self.search_buffers.borrow_mut();
             self.automata[pattern_idx].find_all_buffered(text, pattern_threshold, &mut buffers)
@@ -562,7 +564,8 @@ impl FuzzyBridge {
             a.start
                 .cmp(&b.start)
                 .then_with(|| a.total_edits().cmp(&b.total_edits()))
-                .then_with(|| a.end.cmp(&b.end))
+                .then_with(|| (a.insertions + a.deletions).cmp(&(b.insertions + b.deletions)))
+                .then_with(|| b.end.cmp(&a.end))
         });
         let mut result: Vec<super::damlev::DamLevMatch> = Vec::new();
         let mut last_end = 0;

@@ -365,6 +365,30 @@ impl DamLevNfa {
         (1.0 - edit_distance / max_len).max(0.0)
     }
 
+    /// Returns true if `a` is a strictly better alignment than `b`.
+    ///
+    /// Prefers fewer total edits, then more substitutions (fewer
+    /// insertions+deletions), then higher similarity. mrab-regex prefers
+    /// substitution alignments over equal-cost insertion/deletion alignments
+    /// (e.g. for `(?:caba){0<=e<=2}` on "bcbdaccdaaa" it reports `(1,5)` with
+    /// 2 substitutions, not the 1-insertion-1-deletion `(1,5)`), and both
+    /// alignments have the same span so only the edit breakdown differs.
+    ///
+    /// This is the deterministic tie-break used everywhere a span
+    /// (`start`,`end`) may be reached through several edit paths. It also
+    /// removes the nondeterminism that previously came from keeping whichever
+    /// equal-similarity candidate the `FxHashMap` happened to iterate first —
+    /// that made results depend on buffer reuse across calls (e.g.
+    /// `find()` could differ from `find_iter().next()`).
+    fn better_match(a: &DamLevMatch, b: &DamLevMatch) -> bool {
+        a.total_edits() < b.total_edits()
+            || (a.total_edits() == b.total_edits()
+                && (a.insertions + a.deletions) < (b.insertions + b.deletions))
+            || (a.total_edits() == b.total_edits()
+                && (a.insertions + a.deletions) == (b.insertions + b.deletions)
+                && a.similarity > b.similarity)
+    }
+
     /// Calculate the maximum possible similarity a state can achieve.
     /// Used for early pruning - if max possible < threshold, prune the state.
     ///
@@ -401,13 +425,15 @@ impl DamLevNfa {
     #[inline]
     fn beam_prune(&self, states: &mut Vec<ActiveState>) {
         if states.len() > self.beam_width * 2 {
-            // Use select_nth_unstable to partition: states with <= beam_width edits
-            // go to the front, the rest go to the back. This is O(n) instead of
-            // O(n log n) full sort.
-            let (kept, _, _) =
-                states.select_nth_unstable_by_key(self.beam_width, |s| s.state.total_edits);
-            // Sort only the kept portion (beam_width elements) for stable ordering
-            kept.sort_by_key(|s| s.state.total_edits);
+            // Keep the lowest-cost states. Sort by (total edits, ins+del) so
+            // ties resolve to the most-substitution alignment deterministically
+            // (select_nth_unstable_by_key is not stable for ties).
+            states.sort_by_key(|s| {
+                (
+                    s.state.total_edits,
+                    s.state.insertions + s.state.deletions,
+                )
+            });
             states.truncate(self.beam_width);
         }
     }
@@ -425,11 +451,17 @@ impl DamLevNfa {
     ///
     /// Returns the earliest match found, or None if no match exists.
     /// Picks the leftmost match, and among matches starting at the same
-    /// position prefer the best one: fewest edits, then shortest span. This
-    /// mirrors mrab-regex's default `search` (which reports the minimal-error
-    /// match at the leftmost position) rather than whichever alignment the
-    /// NFA happens to accept first (e.g. a 2-edit "hetl" over a 1-edit
-    /// "hetlo" for `(?:hello){i<=1,d<=1,s<=1}`).
+    /// position prefer the best one: fewest edits, then most substitutions
+    /// (fewest insertions+deletions), then longest span. This mirrors
+    /// mrab-regex's default `search` (which reports the minimal-error match at
+    /// the leftmost position, preferring substitution alignments over equal-cost
+    /// insertion/deletion alignments) rather than whichever alignment the NFA
+    /// happens to accept first (e.g. a 2-edit "hetl" over a 1-edit "hetlo" for
+    /// `(?:hello){i<=1,d<=1,s<=1}`). The same rule drives the
+    /// `find_all_buffered` dedup, so `find` agrees with `find_iter().next()` —
+    /// e.g. for `(?:caba){0<=e<=2}` on "bcbdaccdaaa" both report `(1,5)` (2
+    /// substitutions) over the 2-deletion `(1,3)` or insertion/deletion
+    /// `(1,4)`.
     #[must_use]
     pub fn find_first_buffered(
         &self,
@@ -581,7 +613,17 @@ impl DamLevNfa {
                     .deduped
                     .entry(key)
                     .and_modify(|existing| {
-                        if active_state.state.total_edits < existing.state.total_edits {
+                        // Prefer fewest edits, then most substitutions (fewest
+                        // ins+del). States at the same key share (start, end) in
+                        // this iteration, so equal total edits implies equal
+                        // similarity — the tie-break is safe and makes the
+                        // result independent of FxHashMap iteration order.
+                        if active_state.state.total_edits < existing.state.total_edits
+                            || (active_state.state.total_edits == existing.state.total_edits
+                                && (active_state.state.insertions
+                                    + active_state.state.deletions)
+                                    < (existing.state.insertions + existing.state.deletions))
+                        {
                             *existing = active_state;
                         }
                     })
@@ -594,7 +636,7 @@ impl DamLevNfa {
             // Beam pruning: limit state explosion
             self.beam_prune(&mut buffers.active);
 
-            // Check for accepting states - track best match by (start, fewest edits, shortest end)
+            // Check for accepting states - track best match by (start, fewest edits, longest end)
             for active_state in &buffers.active {
                 if active_state.state.pos == self.pattern_chars.len()
                     && !active_state.state.skip_next
@@ -611,13 +653,20 @@ impl DamLevNfa {
                             similarity: sim,
                         };
 
-                        // Prefer leftmost, then fewest edits, then shortest span
+                        // Prefer leftmost, then fewest edits, then most
+                        // substitutions (fewest ins+del), then longest span
                         if best_match.as_ref().is_none_or(|best| {
                             m.start < best.start
                                 || (m.start == best.start && m.total_edits() < best.total_edits())
                                 || (m.start == best.start
                                     && m.total_edits() == best.total_edits()
-                                    && m.end < best.end)
+                                    && (m.insertions + m.deletions)
+                                        < (best.insertions + best.deletions))
+                                || (m.start == best.start
+                                    && m.total_edits() == best.total_edits()
+                                    && (m.insertions + m.deletions)
+                                        == (best.insertions + best.deletions)
+                                    && best.end < m.end)
                         }) {
                             best_match = Some(m);
                         }
@@ -671,13 +720,20 @@ impl DamLevNfa {
                             similarity: sim,
                         };
 
-                        // Prefer leftmost, then fewest edits, then shortest span
+                        // Prefer leftmost, then fewest edits, then most
+                        // substitutions (fewest ins+del), then longest span
                         if best_match.as_ref().is_none_or(|best| {
                             m.start < best.start
                                 || (m.start == best.start && m.total_edits() < best.total_edits())
                                 || (m.start == best.start
                                     && m.total_edits() == best.total_edits()
-                                    && m.end < best.end)
+                                    && (m.insertions + m.deletions)
+                                        < (best.insertions + best.deletions))
+                                || (m.start == best.start
+                                    && m.total_edits() == best.total_edits()
+                                    && (m.insertions + m.deletions)
+                                        == (best.insertions + best.deletions)
+                                    && best.end < m.end)
                         }) {
                             best_match = Some(m);
                         }
@@ -888,7 +944,7 @@ impl DamLevNfa {
                         matches
                             .entry(key)
                             .and_modify(|existing| {
-                                if m.similarity > existing.similarity {
+                                if Self::better_match(&m, existing) {
                                     *existing = m;
                                 }
                             })
@@ -947,7 +1003,7 @@ impl DamLevNfa {
                         matches
                             .entry(key)
                             .and_modify(|existing| {
-                                if m.similarity > existing.similarity {
+                                if Self::better_match(&m, existing) {
                                     *existing = m;
                                 }
                             })
@@ -1116,7 +1172,17 @@ impl DamLevNfa {
                     .deduped
                     .entry(key)
                     .and_modify(|existing| {
-                        if active_state.state.total_edits < existing.state.total_edits {
+                        // Prefer fewest edits, then most substitutions (fewest
+                        // ins+del). States at the same key share (start, end) in
+                        // this iteration, so equal total edits implies equal
+                        // similarity — the tie-break is safe and makes the
+                        // result independent of FxHashMap iteration order.
+                        if active_state.state.total_edits < existing.state.total_edits
+                            || (active_state.state.total_edits == existing.state.total_edits
+                                && (active_state.state.insertions
+                                    + active_state.state.deletions)
+                                    < (existing.state.insertions + existing.state.deletions))
+                        {
                             *existing = active_state;
                         }
                     })
@@ -1151,7 +1217,7 @@ impl DamLevNfa {
                             .matches
                             .entry(key)
                             .and_modify(|existing| {
-                                if m.similarity > existing.similarity {
+                                if Self::better_match(&m, existing) {
                                     *existing = m;
                                 }
                             })
@@ -1211,7 +1277,7 @@ impl DamLevNfa {
                             .matches
                             .entry(key)
                             .and_modify(|existing| {
-                                if m.similarity > existing.similarity {
+                                if Self::better_match(&m, existing) {
                                     *existing = m;
                                 }
                             })
@@ -1236,8 +1302,17 @@ impl DamLevNfa {
 
         let mut all_matches = self.find_all(text, threshold);
 
-        // Sort by start position
-        all_matches.sort_by_key(|m| m.start);
+        // Sort by start position, then prefer the best alignment (fewest edits,
+        // most substitutions, longest span) so ties don't depend on the
+        // non-deterministic order `find_all` returns matches in.
+        all_matches.sort_by_key(|m| {
+            (
+                m.start,
+                m.total_edits(),
+                m.insertions + m.deletions,
+                std::cmp::Reverse(m.end),
+            )
+        });
 
         // Take non-overlapping matches up to limit
         let mut result = Vec::with_capacity(n.min(all_matches.len()));
@@ -1428,7 +1503,17 @@ impl DamLevNfa {
                     .deduped
                     .entry(key)
                     .and_modify(|existing| {
-                        if active_state.state.total_edits < existing.state.total_edits {
+                        // Prefer fewest edits, then most substitutions (fewest
+                        // ins+del). States at the same key share (start, end) in
+                        // this iteration, so equal total edits implies equal
+                        // similarity — the tie-break is safe and makes the
+                        // result independent of FxHashMap iteration order.
+                        if active_state.state.total_edits < existing.state.total_edits
+                            || (active_state.state.total_edits == existing.state.total_edits
+                                && (active_state.state.insertions
+                                    + active_state.state.deletions)
+                                    < (existing.state.insertions + existing.state.deletions))
+                        {
                             *existing = active_state;
                         }
                     })
@@ -1463,7 +1548,7 @@ impl DamLevNfa {
                             .matches
                             .entry(key)
                             .and_modify(|existing| {
-                                if m.similarity > existing.similarity {
+                                if Self::better_match(&m, existing) {
                                     *existing = m;
                                 }
                             })
@@ -1523,7 +1608,7 @@ impl DamLevNfa {
                             .matches
                             .entry(key)
                             .and_modify(|existing| {
-                                if m.similarity > existing.similarity {
+                                if Self::better_match(&m, existing) {
                                     *existing = m;
                                 }
                             })
@@ -1703,7 +1788,17 @@ impl DamLevNfa {
                     .deduped
                     .entry(key)
                     .and_modify(|existing| {
-                        if active_state.state.total_edits < existing.state.total_edits {
+                        // Prefer fewest edits, then most substitutions (fewest
+                        // ins+del). States at the same key share (start, end) in
+                        // this iteration, so equal total edits implies equal
+                        // similarity — the tie-break is safe and makes the
+                        // result independent of FxHashMap iteration order.
+                        if active_state.state.total_edits < existing.state.total_edits
+                            || (active_state.state.total_edits == existing.state.total_edits
+                                && (active_state.state.insertions
+                                    + active_state.state.deletions)
+                                    < (existing.state.insertions + existing.state.deletions))
+                        {
                             *existing = active_state;
                         }
                     })
