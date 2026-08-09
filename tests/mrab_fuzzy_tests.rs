@@ -1242,3 +1242,34 @@ fn test_find_and_find_iter_agree_on_substitution_tie_break() {
     }
 }
 
+#[test]
+fn test_end_anchored_match_after_last_literal_via_deletions() {
+    // Regression: `(?:.a*c(?:c|ca)){d<=2}$` on "baab" matches (3,4) with two
+    // deletions (`.` consumes 'b', `a*` matches empty, `(c|ca)` is fully
+    // deleted). The match starts AFTER every literal occurrence in the text
+    // (the cache only anchors positions 1-2 from "a"/"ca"), so the
+    // literal-guide prefilter, which stops scanning once past the last literal
+    // position, used to miss it. mrab reports (3,4) with (s,i,d) = (0,0,2).
+    let re = FuzzyRegex::new(r"(?:.a*c(?:c|ca)){d<=2}$").unwrap();
+    let find = re.find("baab").map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+    assert_eq!(find, Some((3, 4, (0, 0, 2))));
+    let iter = re
+        .find_iter("baab")
+        .next()
+        .map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+    assert_eq!(iter, find);
+
+    // Without the `$` the literal-guide still applies and finds the unanchored
+    // leftmost match (0,3).
+    let re = FuzzyRegex::new(r"(?:.a*c(?:c|ca)){d<=2}").unwrap();
+    let m = re.find("baab").unwrap();
+    assert_eq!((m.start(), m.end()), (0, 3));
+    assert_eq!(m.fuzzy_counts(), (0, 0, 2));
+
+    // Empty-aligned variants around the same case.
+    let re = FuzzyRegex::new(r"(?:c(?:c|ca)){d<=2}$").unwrap();
+    let m = re.find("b").unwrap();
+    assert_eq!((m.start(), m.end()), (1, 1));
+    assert_eq!(m.fuzzy_counts(), (0, 0, 2));
+}
+

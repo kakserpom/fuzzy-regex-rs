@@ -1249,7 +1249,16 @@ impl<'a> Matcher<'a> {
         // match need not align with any literal (e.g. `(?:b*){i<=1}$` on
         // "caddbaaccbcbcd" matches (13,14) via pure insertions), so probing
         // only literal neighborhoods would miss it.
+        // Also skipped for end-anchored patterns (beyond the max_simple_length
+        // window above): a `$` match ends at its anchor, where every remaining
+        // fuzzy literal can match EMPTY via whole-literal deletions, so such a
+        // match need not align with any literal occurrence and may start after
+        // the last one (`(?:.a*c(?:c|ca)){d<=2}$` on "baab" matches (3,4) via
+        // pure deletions, but the literal cache only anchors positions 1-2).
+        // This applies in multiline mode too: `$` then matches at any line
+        // boundary, and the trailing deletions can still absorb the literals.
         if !self.has_zero_width_fuzzy
+            && !self.ends_with_end_anchor
             && let Some(ref cache) = cached
             && !cache.is_empty()
         {
