@@ -616,6 +616,12 @@ impl<'a> BacktrackMatcher<'a> {
                     }
                 }
 
+                State::GroupEntry { next, .. } => {
+                    // Fuzzy group entry marker: no-op in the backtrack engine
+                    // (group min_edits accounting is NFA-engine only).
+                    state = *next;
+                }
+
                 State::Handler { name: _, next } => {
                     // (?call:name) - invoke custom handler
                     // For now, just continue to next state

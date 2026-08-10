@@ -110,6 +110,12 @@ pub struct MrabFuzziness {
     pub max_errors: Option<u8>,
     /// Minimum total errors required.
     pub min_errors: Option<u8>,
+    /// Minimum insertions required (`{2<=i<=3}`).
+    pub min_insertions: Option<u8>,
+    /// Minimum deletions required (`{2<=d<=3}`).
+    pub min_deletions: Option<u8>,
+    /// Minimum substitutions required (`{1<=s<=1}`).
+    pub min_substitutions: Option<u8>,
     /// Whether insertions are unlimited (e.g., `{i}` without a value).
     pub unlimited_insertions: bool,
     /// Whether deletions are unlimited.
@@ -192,88 +198,145 @@ impl MrabFuzziness {
 
         let mut limits = FuzzyLimits::new();
 
-        // mrab semantics: when ANY of the core edit operations (insertion,
-        // deletion, substitution) is named, every UNSPECIFIED operation defaults
-        // to 0 -- only the named operations are permitted. E.g. `{i<=2}` means
-        // i<=2, d=0, s=0; `{i<=1,e<=3}` means i<=1, d=0, s=0, total<=3. This
-        // holds even when an explicit total `e<=` is given: `e<=` caps the total
-        // but never raises an unspecified operation above 0.
+        // mrab semantics: an operation is "in play" when it is named by an
+        // individual constraint (`{i<=k}`, `{i}`) or by the cost equation
+        // (`{2i+1d<=4}`). When any operation is in play, every UNNAMED
+        // operation defaults to cap 0 -- only the named operations are
+        // permitted. E.g. `{i<=2}` means i<=2, d=0, s=0; `{i<=1,e<=3}` means
+        // i<=1, d=0, s=0, total<=3; `{1i<=1,d<=1}` (cost equation `1i` plus a
+        // `d` cap) means i<=1 (cost-bounded), d<=1, s=0. This holds even when
+        // an explicit total `e<=` is given: `e<=` caps the total but never
+        // raises an unspecified operation above 0.
         //
         // Transposition (`t`) is a fuzzy-regex extension that mrab lacks, so it
         // does NOT trigger this defaulting on its own: `{t<=1,e<=2}` leaves
         // i/d/s governed by the `e` budget (1 transposition plus up to 2 total
         // edits of any kind).
-        //
-        // A cost constraint (e.g. `{s<=1,1i+1d<2}`) also suppresses defaulting:
-        // the cost equation governs which operations are permitted (here i and d
-        // are in play), so they must not be forced to 0.
-        let any_individual = self.max_cost.is_none()
-            && (self.max_insertions.is_some()
-                || self.unlimited_insertions
-                || self.max_deletions.is_some()
-                || self.unlimited_deletions
-                || self.max_substitutions.is_some()
-                || self.unlimited_substitutions);
+        let named_i = self.max_insertions.is_some() || self.unlimited_insertions;
+        let named_d = self.max_deletions.is_some() || self.unlimited_deletions;
+        let named_s = self.max_substitutions.is_some() || self.unlimited_substitutions;
+        let cost_i = self.insertion_cost;
+        let cost_d = self.deletion_cost;
+        let cost_s = self.substitution_cost;
+        let any_in_play = named_i
+            || named_d
+            || named_s
+            || cost_i.is_some()
+            || cost_d.is_some()
+            || cost_s.is_some();
 
-        // Handle insertions
-        if let Some(i) = self.max_insertions {
-            limits = limits.insertions(i);
+        // Max cost: stored as N+1 for `<=N` and N for `<N`; the engine checks
+        // `cost < max`, so the effective budget is max-1.
+        let actual_max_cost = self.max_cost.map_or(0, |c| c.saturating_sub(1));
+        // A cost-named operation is bounded by the budget at its coefficient
+        // (no coefficient -> unbounded).
+        let cost_cap = |coeff: Option<u8>, in_cost: bool| -> Option<u8> {
+            if !in_cost {
+                return None;
+            }
+            match coeff {
+                Some(k) if k > 0 => Some(actual_max_cost / k),
+                Some(_) | None => Some(UNLIMITED),
+            }
+        };
+
+        // Resolve the per-operation caps up front so the total can be derived
+        // from the exact same values.
+        let icap = if let Some(i) = self.max_insertions {
+            Some(i)
         } else if self.unlimited_insertions {
-            limits = limits.insertions(UNLIMITED);
-        } else if any_individual {
-            limits = limits.insertions(0);
-        }
-
-        // Handle deletions
-        if let Some(d) = self.max_deletions {
-            limits = limits.deletions(d);
+            Some(UNLIMITED)
+        } else if let Some(cap) = cost_cap(cost_i, cost_i.is_some()) {
+            Some(cap)
+        } else if any_in_play {
+            Some(0)
+        } else {
+            None
+        };
+        let dcap = if let Some(d) = self.max_deletions {
+            Some(d)
         } else if self.unlimited_deletions {
-            limits = limits.deletions(UNLIMITED);
-        } else if any_individual {
-            limits = limits.deletions(0);
-        }
-
-        // Handle substitutions
-        if let Some(s) = self.max_substitutions {
-            limits = limits.substitutions(s);
+            Some(UNLIMITED)
+        } else if let Some(cap) = cost_cap(cost_d, cost_d.is_some()) {
+            Some(cap)
+        } else if any_in_play {
+            Some(0)
+        } else {
+            None
+        };
+        let scap = if let Some(s) = self.max_substitutions {
+            Some(s)
         } else if self.unlimited_substitutions {
-            limits = limits.substitutions(UNLIMITED);
-        } else if any_individual {
-            limits = limits.substitutions(0);
-        }
-
-        // Handle transpositions
-        if let Some(t) = self.max_transpositions {
-            limits = limits.swaps(t);
+            Some(UNLIMITED)
+        } else if let Some(cap) = cost_cap(cost_s, cost_s.is_some()) {
+            Some(cap)
+        } else if any_in_play {
+            Some(0)
+        } else {
+            None
+        };
+        let tcap = if let Some(t) = self.max_transpositions {
+            Some(t)
         } else if self.unlimited_transpositions {
-            limits = limits.swaps(UNLIMITED);
-        } else if any_individual {
-            limits = limits.swaps(0);
+            Some(UNLIMITED)
+        } else if any_in_play {
+            Some(0)
+        } else {
+            None
+        };
+
+        if let Some(i) = icap {
+            limits = limits.insertions(i);
+        }
+        if let Some(d) = dcap {
+            limits = limits.deletions(d);
+        }
+        if let Some(s) = scap {
+            limits = limits.substitutions(s);
+        }
+        if let Some(t) = tcap {
+            limits = limits.swaps(t);
         }
 
-        // Handle total errors
+        // Total errors. An explicit `e<=` cap always applies. Additionally, a
+        // cost equation bounds the total: operations priced at 0 (explicitly
+        // capped but absent from the equation, so mrab matches them for free)
+        // may all be used, and the positive-cost operations fill the remaining
+        // budget cheapest-first.
+        let cost_total = if self.max_cost.is_some() {
+            let coeffs = [
+                (cost_i, icap),
+                (cost_d, dcap),
+                (cost_s, scap),
+                (self.transposition_cost, tcap),
+            ];
+            let mut budget_items: Vec<(u16, u16)> = Vec::new(); // (coeff, max count)
+            let mut free: u16 = 0;
+            for (coeff, cap) in coeffs {
+                let cap = cap.unwrap_or(0) as u16;
+                match coeff {
+                    Some(k) if k > 0 => budget_items.push((k as u16, cap)),
+                    _ => free += cap,
+                }
+            }
+            budget_items.sort_by_key(|&(c, _)| c);
+            let mut remaining = u16::from(actual_max_cost);
+            let mut total: u16 = 0;
+            for (coeff, cap) in budget_items {
+                let take = cap.min(remaining / coeff.max(1));
+                total += take;
+                remaining -= take * coeff;
+            }
+            total.saturating_add(free).min(u16::from(UNLIMITED)) as u8
+        } else {
+            u8::MAX
+        };
         if let Some(e) = self.max_errors {
-            limits = limits.edits(e);
+            limits = limits.edits(e.min(cost_total));
         } else if self.unlimited_errors {
             limits = limits.edits(UNLIMITED);
-        } else if let Some(max_cost) = self.max_cost {
-            // When cost constraint is used without explicit error limit,
-            // infer max_edits from cost constraint. Use max_cost divided by
-            // minimum operation cost (at least 1).
-            let min_cost = [
-                self.insertion_cost.unwrap_or(1),
-                self.deletion_cost.unwrap_or(1),
-                self.substitution_cost.unwrap_or(1),
-                self.transposition_cost.unwrap_or(1),
-            ]
-            .into_iter()
-            .filter(|&c| c > 0)
-            .min()
-            .unwrap_or(1);
-            // max_cost is stored as N+1 for <=N, so subtract 1 to get actual limit
-            let actual_max_cost = max_cost.saturating_sub(1);
-            let inferred_max_edits = actual_max_cost / min_cost;
-            limits = limits.edits(inferred_max_edits);
+        } else if self.max_cost.is_some() {
+            limits = limits.edits(cost_total);
         }
 
         limits
@@ -309,11 +372,20 @@ impl Fuzziness {
         }
     }
 
-    /// Get the minimum edits required (for exclusive lower bounds like `{0<e<5}`).
+    /// Get the minimum edits required (for exclusive lower bounds like
+    /// `{0<e<5}` and per-operation ranges like `{1<=s<=1}`, `{2<=i<=3}`).
     #[must_use]
-    pub fn min_edits(&self) -> Option<u8> {
+    pub fn min_edits(&self) -> Option<crate::types::MinEdits> {
         match self {
-            Fuzziness::MrabStyle(mrab) => mrab.min_errors,
+            Fuzziness::MrabStyle(mrab) => {
+                let m = crate::types::MinEdits {
+                    total: mrab.min_errors,
+                    insertions: mrab.min_insertions,
+                    deletions: mrab.min_deletions,
+                    substitutions: mrab.min_substitutions,
+                };
+                if m.is_empty() { None } else { Some(m) }
+            }
             _ => None,
         }
     }

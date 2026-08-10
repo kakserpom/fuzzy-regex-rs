@@ -37,6 +37,7 @@ use crate::ir::nfa::State;
 use crate::ir::{Hir, LiteralPattern, Nfa, lower_with_unicode};
 use crate::parser::ast::NamedClass;
 use crate::parser::{Anchor, Ast, parse_with_flags};
+use crate::types::MinEdits;
 
 /// A compiled fuzzy regular expression.
 ///
@@ -310,7 +311,8 @@ impl FuzzyRegex {
         // fuzzy parts (an exact pattern gains nothing) and can be safely
         // stripped (see `strip_fuzzy_to_exact`).
         let flags = &config.match_flags;
-        let exact_shadow = if flags.best_match
+        let exact_shadow = if config.mrab_compat
+            || flags.best_match
             || flags.enhance_match
             || flags.posix
             || flags.reverse
@@ -906,6 +908,17 @@ impl FuzzyRegex {
             return self.find_with_backtrack(text);
         }
 
+        // mrab-compat mode: every bespoke fuzzy fast path below computes its
+        // own best/first alignment (Bitap, guard-NFA, class-plus), which can
+        // disagree with mrab's DFS-first alignment and ignores its
+        // search-anchor insertion rule. Route through the decision-sequence
+        // engine, the only code that implements mrab's exact-commit and
+        // anchor semantics.
+        if self.config.mrab_compat {
+            let matcher = self.create_matcher(self.is_unanchored());
+            return matcher.find(text).map(|m| self.convert_match(text, m));
+        }
+
         // Fast path: whole pattern is a single fuzzy char-class repetition
         // `(?:CLASS+){e<=k}` (unanchored, budget >= 1, no other structure — see
         // `Nfa::fuzzy_char_class_plus`). Such a pattern always matches at
@@ -1226,8 +1239,8 @@ impl FuzzyRegex {
                     suffix_pattern.push('~');
                     suffix_pattern.push_str(&edits.to_string());
                 }
-                if let Some(min_edits) = literal.min_edits {
-                    write!(suffix_pattern, "{{{{{min_edits}}}}}").ok();
+                if let Some(min_edits) = &literal.min_edits {
+                    write!(suffix_pattern, "{{{}}}", render_min_edits_range(*min_edits)).ok();
                 }
 
                 // Compile the suffix pattern with same config
@@ -2089,6 +2102,21 @@ impl FuzzyRegex {
             );
         }
 
+        // mrab-compat mode: the bespoke fuzzy fast paths below (simple-fuzzy
+        // Bitap batch, lazy-dotstar, word-bounded, class-plus, char-class-plus)
+        // compute their own alignments, which can disagree with mrab's
+        // DFS-first semantics and its search-anchor insertion rule. Route
+        // through the general matcher — the same engine `find()` uses.
+        if self.config.mrab_compat {
+            return Matches::new(
+                self.create_matcher(self.is_unanchored())
+                    .find_all(text)
+                    .into_iter()
+                    .map(|m| self.convert_match(text, m))
+                    .collect(),
+            );
+        }
+
         // For simple fuzzy patterns, use optimized batch collection
         if self.is_simple_fuzzy() && self.fuzzy_bridge.is_some() {
             return Matches::new(self.find_all_non_overlapping_fast(text));
@@ -2218,6 +2246,17 @@ impl FuzzyRegex {
         // Start-anchored patterns can only match once
         if self.anchored && !self.config.multi_line {
             return self.find_single_matcher(text).into_iter().collect();
+        }
+
+        // mrab-compat mode: the bridge's non-overlapping scan computes its own
+        // alignments; use the decision-sequence matcher instead.
+        if self.config.mrab_compat {
+            let matcher = self.create_matcher(self.is_unanchored());
+            return matcher
+                .find_n(text, n)
+                .into_iter()
+                .map(|m| self.convert_match(text, m))
+                .collect();
         }
 
         // For simple fuzzy patterns, use bridge with limit
@@ -2475,6 +2514,7 @@ impl FuzzyRegex {
                             cost_constraint: _,
                             next: _,
                             fuzzy_group_id: _,
+                            repeat_fold: _,
                         } = next_state
                         && limits.is_none()
                         && min_edits.is_none()
@@ -2499,6 +2539,7 @@ impl FuzzyRegex {
                             cost_constraint: _,
                             next: next_state,
                             fuzzy_group_id: _,
+                            repeat_fold: _,
                         } = prev_state
                             && *next_state == lookahead_idx
                             && limits.is_none()
@@ -3175,6 +3216,24 @@ impl FuzzyRegex {
     /// Unlike `find_iter`, this method tries every position in the text
     /// and returns all possible matches, even if they overlap.
     pub fn find_all_overlapping<'t>(&self, text: &'t str) -> Vec<Match<'t>> {
+        // mrab-compat mode: the bridge's per-position alignment search ignores
+        // mrab's search-anchor insertion rule; enumerate per-start matches
+        // through the decision-sequence matcher instead.
+        if self.config.mrab_compat {
+            let matcher = self.create_matcher(self.is_unanchored());
+            let mut matches = Vec::new();
+            for start in text
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(text.len()))
+            {
+                if let Some(m) = matcher.find_at(text, start) {
+                    matches.push(self.convert_match(text, m));
+                }
+            }
+            return matches;
+        }
+
         // For simple fuzzy patterns, use optimized FuzzyBridge search
         if self.is_simple_fuzzy()
             && let Some(ref bridge) = self.fuzzy_bridge
@@ -3243,7 +3302,11 @@ impl FuzzyRegex {
         similarity_threshold: f32,
     ) -> Vec<Match<'t>> {
         // For simple fuzzy patterns, use optimized FuzzyBridge search
-        if self.is_simple_fuzzy()
+        // (skipped in mrab-compat mode: the bridge's alignments ignore mrab's
+        // search-anchor insertion rule; fall through to the per-position
+        // matcher fallback below, which is the decision-sequence engine).
+        if !self.config.mrab_compat
+            && self.is_simple_fuzzy()
             && let Some(ref bridge) = self.fuzzy_bridge
         {
             let cached = if self.prefilter.is_active() {
@@ -3628,6 +3691,7 @@ impl FuzzyRegex {
                 prefer_shortest: self.has_lazy,
                 unicode: self.config.match_flags.unicode,
                 greedy_first: self.config.greedy_first,
+                mrab_dfs: self.config.mrab_compat,
             },
             self.prefilter.clone(),
             &self.handlers,
@@ -3685,6 +3749,7 @@ impl FuzzyRegex {
                 prefer_shortest: self.has_lazy,
                 unicode: self.config.match_flags.unicode,
                 greedy_first: self.config.greedy_first,
+                mrab_dfs: self.config.mrab_compat,
             },
             &self.handlers,
         );
@@ -4093,7 +4158,8 @@ fn hir_has_fuzzy(hir: &Hir) -> bool {
         | Hir::Capture { expr, .. }
         | Hir::Lookahead { expr, .. }
         | Hir::Lookbehind { expr, .. }
-        | Hir::AtomicGroup { expr } => hir_has_fuzzy(expr),
+        | Hir::AtomicGroup { expr }
+        | Hir::FuzzyGroup { inner: expr, .. } => hir_has_fuzzy(expr),
         _ => false,
     }
 }
@@ -4112,7 +4178,8 @@ fn hir_has_nullable_fuzzy(hir: &Hir) -> bool {
         | Hir::Capture { expr, .. }
         | Hir::Lookahead { expr, .. }
         | Hir::Lookbehind { expr, .. }
-        | Hir::AtomicGroup { expr } => hir_has_nullable_fuzzy(expr),
+        | Hir::AtomicGroup { expr }
+        | Hir::FuzzyGroup { inner: expr, .. } => hir_has_nullable_fuzzy(expr),
         Hir::Concat(v) | Hir::Alt(v) => v.iter().any(hir_has_nullable_fuzzy),
         _ => false,
     }
@@ -4139,7 +4206,7 @@ fn strip_fuzzy_to_exact(hir: &Hir) -> Option<Hir> {
             cost_info,
             ..
         } => {
-            if min_edits.is_some_and(|m| m > 0) || cost_info.is_some() {
+            if min_edits.is_some_and(|m| !m.is_empty()) || cost_info.is_some() {
                 return None;
             }
             Hir::Literal {
@@ -4149,6 +4216,7 @@ fn strip_fuzzy_to_exact(hir: &Hir) -> Option<Hir> {
                 cost_info: None,
                 edit_chars: None,
                 fuzzy_group_id: None,
+                repeat_fold: false,
             }
         }
         Hir::FuzzyClass {
@@ -4157,7 +4225,7 @@ fn strip_fuzzy_to_exact(hir: &Hir) -> Option<Hir> {
             cost_info,
             ..
         } => {
-            if min_edits.is_some_and(|m| m > 0) || cost_info.is_some() {
+            if min_edits.is_some_and(|m| !m.is_empty()) || cost_info.is_some() {
                 return None;
             }
             Hir::Class(class.clone())
@@ -4188,6 +4256,7 @@ fn strip_fuzzy_to_exact(hir: &Hir) -> Option<Hir> {
             name: name.clone(),
             expr: Box::new(strip_fuzzy_to_exact(expr)?),
         },
+        Hir::FuzzyGroup { inner, .. } => strip_fuzzy_to_exact(inner)?,
         // Backtracking-only or semantics-changing constructs: no exact shadow.
         Hir::Lookahead { .. }
         | Hir::Lookbehind { .. }
@@ -4274,6 +4343,8 @@ fn extract_leading_literal(hir: &Hir) -> Option<(String, Option<crate::types::Fu
         // Capture group: look inside
         Hir::Capture { expr, .. } => extract_leading_literal(expr),
 
+        Hir::FuzzyGroup { inner, .. } => extract_leading_literal(inner),
+
         // Alternation, anchors, and other cases: no leading literal
         // (alternation would need all branches to start with the same literal)
         _ => None,
@@ -4297,6 +4368,8 @@ fn is_anchored_at_start(hir: &Hir) -> bool {
 
         // Capture group: look inside
         Hir::Capture { expr, .. } => is_anchored_at_start(expr),
+
+        Hir::FuzzyGroup { inner, .. } => is_anchored_at_start(inner),
 
         // Other cases: not anchored
         _ => false,
@@ -4322,7 +4395,9 @@ fn hir_is_multi_atom(hir: &Hir) -> bool {
         Hir::Literal { text, .. } => text.chars().count() > 1,
         Hir::Concat(parts) => parts.iter().filter(|h| hir_consumes(h)).take(2).count() > 1,
         Hir::Alt(parts) => parts.iter().any(hir_is_multi_atom),
-        Hir::Capture { expr, .. } | Hir::AtomicGroup { expr } => hir_is_multi_atom(expr),
+        Hir::Capture { expr, .. }
+        | Hir::AtomicGroup { expr }
+        | Hir::FuzzyGroup { inner: expr, .. } => hir_is_multi_atom(expr),
         _ => false,
     }
 }
@@ -4347,7 +4422,8 @@ fn hir_has_repeated_group(hir: &Hir) -> bool {
         Hir::Capture { expr, .. }
         | Hir::AtomicGroup { expr }
         | Hir::Lookahead { expr, .. }
-        | Hir::Lookbehind { expr, .. } => hir_has_repeated_group(expr),
+        | Hir::Lookbehind { expr, .. }
+        | Hir::FuzzyGroup { inner: expr, .. } => hir_has_repeated_group(expr),
         _ => false,
     }
 }
@@ -4450,19 +4526,31 @@ fn hir_named_list_names(hir: &Hir, out: &mut Vec<String>) {
         | Hir::Capture { expr, .. }
         | Hir::Lookahead { expr, .. }
         | Hir::Lookbehind { expr, .. }
-        | Hir::AtomicGroup { expr } => hir_named_list_names(expr, out),
+        | Hir::AtomicGroup { expr }
+        | Hir::FuzzyGroup { inner: expr, .. } => hir_named_list_names(expr, out),
         _ => {}
     }
 }
 
-/// Minimum characters the leading greedy dot-repeat of a `.*SUFFIX`/`.+SUFFIX`
-/// pattern must consume before the suffix (0 for `.*`, 1 for `.+`, `n` for
-/// `.{n,}`). The greedy-prefix fast path anchors the match at position 0 and
-/// places the suffix at the rightmost occurrence; that is only valid when the
-/// suffix sits at position `>= min`, otherwise the prefix cannot meet its
-/// minimum (e.g. `.+-` on `"-…"`: the only `-` is at 0, so `.+` has nothing to
-/// consume and there is no match). Returns 0 when the leading element is not a
-/// greedy dot-repeat, imposing no constraint.
+/// Render `MinEdits` as a mrab range clause (e.g. `1<=e` or `1<=s<=1`,
+/// comma-joined) for re-parsing a fuzzy suffix pattern.
+fn render_min_edits_range(min: MinEdits) -> String {
+    let mut clauses: Vec<String> = Vec::new();
+    if let Some(t) = min.total {
+        clauses.push(format!("{t}<=e"));
+    }
+    if let Some(v) = min.insertions {
+        clauses.push(format!("{v}<=i"));
+    }
+    if let Some(v) = min.deletions {
+        clauses.push(format!("{v}<=d"));
+    }
+    if let Some(v) = min.substitutions {
+        clauses.push(format!("{v}<=s"));
+    }
+    clauses.join(",")
+}
+
 fn hir_greedy_prefix_min(hir: &Hir) -> usize {
     let first = match hir {
         Hir::Concat(parts) => parts.iter().find(|h| hir_consumes(h)),
@@ -4531,6 +4619,95 @@ mod tests {
         assert!(non_swap.is_match("fo"));
         assert!(non_swap.is_match("fao"));
         assert!(non_swap.is_match("fo0"));
+    }
+
+    #[test]
+    fn test_mrab_search_anchor_insertion_rule() {
+        // mrab forbids in-body insertions only at the initial search anchor
+        // (position 0 of the whole unanchored search), not at the per-attempt
+        // start. `(?:c){2<=e<=2}` on "XY" matches at (1,2) via insert 'Y' +
+        // delete 'c' -- the attempt at position 1 may insert because 1 != 0.
+        let re = FuzzyRegexBuilder::new(r"(?:c){2<=e<=2}")
+            .mrab_compat(true)
+            .build()
+            .unwrap();
+
+        for (text, want) in [
+            ("XY", Some((1, 2, 0, 1, 1))),
+            ("XX", Some((1, 2, 0, 1, 1))),
+            ("cX", Some((1, 2, 0, 1, 1))),
+            ("Xc", None),
+            ("X", None),
+            ("c", None),
+            ("cc", None),
+        ] {
+            let got = re.find(text).map(|m| {
+                (
+                    m.start(),
+                    m.end(),
+                    m.fuzzy_counts().0,
+                    m.fuzzy_counts().1,
+                    m.fuzzy_counts().2,
+                )
+            });
+            assert_eq!(got, want, "text {text:?}");
+        }
+
+        // The 2-char literal version is unaffected by the anchor rule (2 subs).
+        let re2 = FuzzyRegexBuilder::new(r"(?:cc){2<=e<=2}")
+            .mrab_compat(true)
+            .build()
+            .unwrap();
+        assert_eq!(
+            re2.find("XX").map(|m| (
+                m.start(),
+                m.end(),
+                m.fuzzy_counts().0,
+                m.fuzzy_counts().1,
+                m.fuzzy_counts().2
+            )),
+            Some((0, 2, 2, 0, 0))
+        );
+    }
+
+    #[test]
+    fn test_mrab_bounded_repeat_fuzzy() {
+        // `(?:b{2,3}){1<=e<=2}`: bounded repeat lowered to a fixed-tail greedy
+        // form must still agree with mrab on deletions of the leading 'b'.
+        let re = FuzzyRegexBuilder::new(r"(?:b{2,3}){1<=e<=2}")
+            .mrab_compat(true)
+            .build()
+            .unwrap();
+        assert_eq!(
+            re.find("bX").map(|m| (
+                m.start(),
+                m.end(),
+                m.fuzzy_counts().0,
+                m.fuzzy_counts().1,
+                m.fuzzy_counts().2
+            )),
+            Some((0, 2, 1, 0, 1))
+        );
+        assert_eq!(
+            re.find("bbX").map(|m| (
+                m.start(),
+                m.end(),
+                m.fuzzy_counts().0,
+                m.fuzzy_counts().1,
+                m.fuzzy_counts().2
+            )),
+            Some((0, 3, 1, 0, 0))
+        );
+        assert_eq!(
+            re.find("bbb").map(|m| (
+                m.start(),
+                m.end(),
+                m.fuzzy_counts().0,
+                m.fuzzy_counts().1,
+                m.fuzzy_counts().2
+            )),
+            Some((1, 3, 0, 0, 1))
+        );
     }
 
     #[test]
@@ -6620,7 +6797,9 @@ mod tests {
         assert_eq!(m.start(), 0);
         assert_eq!(m.end(), 5);
 
-        // find_rev returns last match
+        // find_rev returns last match (default mode: longest-within-budget,
+        // the exact "hello" at 12; mrab-compat mode returns (11,17) " hello"
+        // with 1 insertion, matching Python mrab)
         let m = re.find_rev(text).unwrap();
         assert_eq!(m.start(), 12);
         assert_eq!(m.end(), 17);
@@ -6632,8 +6811,13 @@ mod tests {
         let re = FuzzyRegex::new(r"(?:test){e<=1}").unwrap();
         let text = "best tset trial test contest";
 
-        // All matches found: "best", "tset", "test", "test" (in contest)
-        // Positions: (0,4), (5,9), (16,20), (24,28)
+        // Default-mode matches (longest-within-budget; the engine adds
+        // "tset"@(5,9) via its transposition extension, which mrab lacks):
+        //   (0,4)  "best"  1 substitution
+        //   (5,9)  "tset"  1 transposition (fuzzy-regex extension)
+        //   (16,20) "test"  exact
+        //   (24,28) "test"  exact
+        // (mrab-compat mode matches Python mrab: (0,4), (15,20), (23,28).)
 
         // find returns the LEFTMOST match — the fuzzy "best" at position 0
         // (1 substitution), not the later exact "test". This matches

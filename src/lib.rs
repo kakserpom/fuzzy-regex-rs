@@ -134,4 +134,4 @@ mod book_doctests;
 
 pub use engine::EditCounts;
 pub use error::{Error, Result};
-pub use types::{FuzzyLimits, FuzzyPenalties};
+pub use types::{FuzzyLimits, FuzzyPenalties, MinEdits};

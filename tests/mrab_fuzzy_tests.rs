@@ -1228,16 +1228,24 @@ fn test_find_and_find_iter_agree_on_substitution_tie_break() {
     let text = "bcbdaccdaaa";
     for _ in 0..3 {
         let re = FuzzyRegex::new(r"(?:caba){0<=e<=2}").unwrap();
-        let find = re.find(text).map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+        let find = re
+            .find(text)
+            .map(|m| (m.start(), m.end(), m.fuzzy_counts()));
         let iter = re
             .find_iter(text)
             .next()
             .map(|m| (m.start(), m.end(), m.fuzzy_counts()));
-        assert_eq!(find, Some((1, 5, (2, 0, 0))), "find() must be deterministic and mrab-aligned");
+        assert_eq!(
+            find,
+            Some((1, 5, (2, 0, 0))),
+            "find() must be deterministic and mrab-aligned"
+        );
         assert_eq!(iter, find, "find_iter().next() must agree with find()");
 
         // Repeating on the same regex must also be stable.
-        let again = re.find(text).map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+        let again = re
+            .find(text)
+            .map(|m| (m.start(), m.end(), m.fuzzy_counts()));
         assert_eq!(again, find, "repeated find() must be deterministic");
     }
 }
@@ -1251,7 +1259,9 @@ fn test_end_anchored_match_after_last_literal_via_deletions() {
     // literal-guide prefilter, which stops scanning once past the last literal
     // position, used to miss it. mrab reports (3,4) with (s,i,d) = (0,0,2).
     let re = FuzzyRegex::new(r"(?:.a*c(?:c|ca)){d<=2}$").unwrap();
-    let find = re.find("baab").map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+    let find = re
+        .find("baab")
+        .map(|m| (m.start(), m.end(), m.fuzzy_counts()));
     assert_eq!(find, Some((3, 4, (0, 0, 2))));
     let iter = re
         .find_iter("baab")
@@ -1283,7 +1293,9 @@ fn test_match_starting_after_last_cached_literal_via_trailing_deletion() {
     // cached literal position -- never tried position 5. mrab reports (5,8)
     // with (s,i,d) = (0,0,1).
     let re = FuzzyRegex::new(r"(?:c|ccc|ccc)\w{2}a{d<=1}").unwrap();
-    let find = re.find("adbabcbb").map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+    let find = re
+        .find("adbabcbb")
+        .map(|m| (m.start(), m.end(), m.fuzzy_counts()));
     assert_eq!(find, Some((5, 8, (0, 0, 1))));
     let iter = re
         .find_iter("adbabcbb")
@@ -1312,3 +1324,147 @@ fn test_match_starting_after_last_cached_literal_via_trailing_deletion() {
     assert_eq!(iter, vec![(0, 3, (0, 0, 1)), (3, 6, (0, 0, 1))]);
 }
 
+// =============================================================================
+// Per-type minimum bounds ({min<=i/d/s<=max}) in mrab mode
+// =============================================================================
+
+use fuzzy_regex::FuzzyRegexBuilder;
+
+fn mrab_find(pat: &str, text: &str) -> Option<(usize, usize, (u32, u32, u32))> {
+    FuzzyRegexBuilder::new(pat)
+        .mrab_compat(true)
+        .build()
+        .unwrap()
+        .find(text)
+        .map(|m| (m.start(), m.end(), m.fuzzy_counts()))
+}
+
+#[test]
+fn test_mrab_per_type_min_find_uses_every_position() {
+    // `(?:wxyz){1<=d<=1}` on "Xwxyz" matches (2,5) by deleting the leading 'w',
+    // one char past the exact occurrence at 1. mrab's leftmost answer sits
+    // outside the prefilter's candidate window (found-1..=found), so `find()`
+    // must not skip it. mrab reports (s,i,d) = (0,0,1).
+    let find = mrab_find(r"(?:wxyz){1<=d<=1}", "Xwxyz");
+    assert_eq!(find, Some((2, 5, (0, 0, 1))));
+    let iter = FuzzyRegexBuilder::new(r"(?:wxyz){1<=d<=1}")
+        .mrab_compat(true)
+        .build()
+        .unwrap()
+        .find_iter("Xwxyz")
+        .next()
+        .map(|m| (m.start(), m.end(), m.fuzzy_counts()));
+    assert_eq!(iter, find, "find_iter().next() must agree with find()");
+}
+
+#[test]
+fn test_mrab_per_type_min_group_exempt_when_not_entered() {
+    // A fuzzy-min alternative must not constrain a sibling exact branch: mrab
+    // matches "a" exactly at (0,1) with zero edits even though `l` demands a
+    // substitution or insertion.
+    for pat in ["a|l{1<=s<=1}", "a|l{1<=i<=1}", "a|l{2<=s<=3}"] {
+        let find = mrab_find(pat, "abababc");
+        assert_eq!(find, Some((0, 1, (0, 0, 0))), "pattern: {pat}");
+    }
+
+    // When the fuzzy-min branch is tried first, mrab uses it (s=1).
+    let find = mrab_find("l{1<=s<=1}|a", "abababc");
+    assert_eq!(find, Some((0, 1, (1, 0, 0))));
+
+    // A min group that IS entered must still reach its minimum: the whole
+    // pattern is the group, so an exact "l" match (0 edits) is rejected.
+    let find = mrab_find("l{1<=s<=1}", "abababc");
+    assert_eq!(find, Some((0, 1, (1, 0, 0))));
+    assert_eq!(mrab_find("l{1<=s<=1}", "l"), None);
+    // An insertion minimum cannot be met by a pure substitution.
+    assert_eq!(mrab_find("l{1<=i<=1}", "abababc"), None);
+    assert_eq!(mrab_find("l{1<=i<=1}", "l"), None);
+}
+
+#[test]
+fn test_mrab_per_type_min_range_bounds() {
+    // `{2<=i<=3}` demands at least 2 insertions; "a" with a single insertion
+    // fails, but the sibling exact branch still matches.
+    assert_eq!(
+        mrab_find("a|l{2<=i<=3}", "abcabcabc"),
+        Some((0, 1, (0, 0, 0)))
+    );
+    assert_eq!(mrab_find("a|l{2<=i<=3}", "xyzwab"), Some((4, 5, (0, 0, 0))));
+    // `{1<=s<=1}` on a literal that matches exactly (0 edits) is rejected;
+    // a window differing by exactly one substitution matches with s=1.
+    assert_eq!(mrab_find("(?:abc){1<=s<=1}", "abcabcabc"), None);
+    assert_eq!(
+        mrab_find("(?:abc){1<=s<=1}", "abdcba"),
+        Some((0, 3, (1, 0, 0)))
+    );
+}
+
+#[test]
+fn test_mrab_per_type_min_alternation_group() {
+    // Fuzziness over the whole alternation: the `{1<=i<=1}` applies to both
+    // branches, and mrab's ordered first branch wins.
+    let find = mrab_find("(a|b){1<=s<=1}", "abababc");
+    assert_eq!(find, Some((0, 1, (1, 0, 0))));
+}
+
+#[test]
+fn test_mrab_below_min_trailing_not_rescued() {
+    // A body that matched below its minimum cannot be rescued by trailing
+    // insertions: `\d{2<=e<=3}` on "kl" must NOT yield sub+trailing-insert
+    // (0,2,(1,1,0)); the in-body del+ins alignment (1,2,(0,1,1)) wins.
+    assert_eq!(mrab_find(r"\d{2<=e<=3}", "kl"), Some((1, 2, (0, 1, 1))));
+    // Same rule for a zero-width body: `(?:b*){1<=i<=1}$` on "d" is None, not
+    // (0,1,(0,1,0)); without a minimum, the trailing insertion is allowed.
+    assert_eq!(mrab_find(r"(?:b*){1<=i<=1}$", "d"), None);
+    assert_eq!(mrab_find(r"(?:b*){i<=2}$", "d"), Some((0, 1, (0, 1, 0))));
+}
+
+#[test]
+fn test_mrab_group_min_met_then_trailing() {
+    // Once the group's insertion minimum is met by an earlier atom, the
+    // trailing insertion fires again: `(?:[c]b){1<=i<=1}$` on "cba" matches
+    // (0,3,(0,1,0)) via leading-insertion "cba" -> "cb" + trailing 'a'.
+    assert_eq!(
+        mrab_find(r"(?:[c]b){1<=i<=1}$", "cba"),
+        Some((0, 3, (0, 1, 0)))
+    );
+    // `{i<=1}` (no minimum) absorbs trailing text directly.
+    assert_eq!(
+        mrab_find(r"(?:[ab]c){i<=1}$", "acX"),
+        Some((0, 3, (0, 1, 0)))
+    );
+}
+
+#[test]
+fn test_mrab_find_rev_matches_findall_order() {
+    // find_rev in mrab-compat mode returns mrab's final non-overlapping match
+    // (default mode may differ: it keeps longest-within-budget spans).
+    let re = FuzzyRegexBuilder::new(r"(?:hello){e<=1}")
+        .mrab_compat(true)
+        .build()
+        .unwrap();
+    assert_eq!(
+        re.find_rev("hello world hello")
+            .map(|m| (m.start(), m.end())),
+        Some((11, 17))
+    );
+}
+
+#[test]
+fn test_mrab_zero_edit_tilde_case_insensitive() {
+    // `~0` (Fuzziness::Exact) must become a 0-edit fuzzy literal so the
+    // case-insensitive fast path still finds the match.
+    let re = FuzzyRegexBuilder::new(r"(?:world)~0")
+        .case_insensitive(true)
+        .build()
+        .unwrap();
+    let m = re.find("HeLlO WoRlD").unwrap();
+    assert_eq!((m.start(), m.end()), (6, 11));
+    assert_eq!(
+        re.find_iter("HeLlO WoRlD")
+            .next()
+            .map(|m| (m.start(), m.end())),
+        Some((6, 11)),
+        "find_iter().next() must agree with find()"
+    );
+}

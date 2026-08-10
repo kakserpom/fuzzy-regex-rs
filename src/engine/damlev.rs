@@ -428,12 +428,7 @@ impl DamLevNfa {
             // Keep the lowest-cost states. Sort by (total edits, ins+del) so
             // ties resolve to the most-substitution alignment deterministically
             // (select_nth_unstable_by_key is not stable for ties).
-            states.sort_by_key(|s| {
-                (
-                    s.state.total_edits,
-                    s.state.insertions + s.state.deletions,
-                )
-            });
+            states.sort_by_key(|s| (s.state.total_edits, s.state.insertions + s.state.deletions));
             states.truncate(self.beam_width);
         }
     }
@@ -620,8 +615,7 @@ impl DamLevNfa {
                         // result independent of FxHashMap iteration order.
                         if active_state.state.total_edits < existing.state.total_edits
                             || (active_state.state.total_edits == existing.state.total_edits
-                                && (active_state.state.insertions
-                                    + active_state.state.deletions)
+                                && (active_state.state.insertions + active_state.state.deletions)
                                     < (existing.state.insertions + existing.state.deletions))
                         {
                             *existing = active_state;
@@ -1179,8 +1173,7 @@ impl DamLevNfa {
                         // result independent of FxHashMap iteration order.
                         if active_state.state.total_edits < existing.state.total_edits
                             || (active_state.state.total_edits == existing.state.total_edits
-                                && (active_state.state.insertions
-                                    + active_state.state.deletions)
+                                && (active_state.state.insertions + active_state.state.deletions)
                                     < (existing.state.insertions + existing.state.deletions))
                         {
                             *existing = active_state;
@@ -1510,8 +1503,7 @@ impl DamLevNfa {
                         // result independent of FxHashMap iteration order.
                         if active_state.state.total_edits < existing.state.total_edits
                             || (active_state.state.total_edits == existing.state.total_edits
-                                && (active_state.state.insertions
-                                    + active_state.state.deletions)
+                                && (active_state.state.insertions + active_state.state.deletions)
                                     < (existing.state.insertions + existing.state.deletions))
                         {
                             *existing = active_state;
@@ -1795,8 +1787,7 @@ impl DamLevNfa {
                         // result independent of FxHashMap iteration order.
                         if active_state.state.total_edits < existing.state.total_edits
                             || (active_state.state.total_edits == existing.state.total_edits
-                                && (active_state.state.insertions
-                                    + active_state.state.deletions)
+                                && (active_state.state.insertions + active_state.state.deletions)
                                     < (existing.state.insertions + existing.state.deletions))
                         {
                             *existing = active_state;

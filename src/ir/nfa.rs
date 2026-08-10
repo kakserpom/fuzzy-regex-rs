@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use crate::engine::fuzzy_bridge::FuzzyBridge;
-use crate::types::FuzzyLimits;
+use crate::types::{FuzzyLimits, MinEdits};
 
 use super::hir::HirClass;
 use crate::parser::Anchor;
@@ -222,6 +222,7 @@ impl Nfa {
             // Any other state type makes it not simple
             State::Char { .. }
             | State::FuzzyChar { .. }
+            | State::GroupEntry { .. }
             | State::CaptureStart { .. }
             | State::CaptureEnd { .. }
             | State::Anchor { .. }
@@ -739,9 +740,10 @@ impl Nfa {
                     if fuzzy_char_id.is_some() {
                         return None;
                     }
-                    // An exclusive lower bound (`{0<e<=k}`) requires ≥1 edit, so
-                    // the 0-edit greedy run would be an invalid match.
-                    if min_edits.is_some_and(|m| m > 0) {
+                    // Any exclusive lower bound (`{0<e<=k}`, `{1<=s<=1}`)
+                    // requires ≥1 edit, so the 0-edit greedy run would be an
+                    // invalid match.
+                    if min_edits.is_some_and(|m| !m.is_empty()) {
                         return None;
                     }
                     // Require a genuine edit budget (≥1). A 0-budget or a
@@ -794,38 +796,38 @@ impl Nfa {
         if !fuzzy {
             return false;
         }
+        let mut result = false;
         for (sid, s) in self.states.iter().enumerate() {
-            if let State::Split { branches, .. } = s
-                && branches.iter().any(|&b| self.state_reaches_eps(b, id))
-                && self.reachable_avoiding(sid, id)
-            {
-                for &b in branches {
-                    let mut visited = vec![false; self.states.len()];
-                    if self.branch_skips_to_end(b, id, &mut visited) {
-                        return true;
+            if let State::Split { branches, .. } = s {
+                let reach = branches.iter().any(|&b| self.state_reaches_eps(b, id));
+                let rav = self.reachable_avoiding(sid, id);
+                if reach && rav {
+                    for &b in branches {
+                        let mut visited = vec![false; self.states.len()];
+                        let btend = self.branch_skips_to_end(b, id, &mut visited);
+                        if btend {
+                            result = true;
+                        }
                     }
                 }
             }
         }
-        false
+        result
     }
 
     /// Whether from `from` a non-consuming terminal (`Accept` or an end
     /// anchor) is reachable without passing through `ignore` and without
     /// crossing any other consuming state or text-sensitive lookaround.
-    fn branch_skips_to_end(
-        &self,
-        from: StateId,
-        ignore: StateId,
-        visited: &mut Vec<bool>,
-    ) -> bool {
+    fn branch_skips_to_end(&self, from: StateId, ignore: StateId, visited: &mut Vec<bool>) -> bool {
         if from == ignore || visited[from] {
             return false;
         }
         visited[from] = true;
         match &self.states[from] {
-            State::Accept => true,
-            State::Anchor { kind: Anchor::End, .. } => true,
+            State::Accept
+            | State::Anchor {
+                kind: Anchor::End, ..
+            } => true,
             State::Char { .. }
             | State::FuzzyChar { .. }
             | State::FuzzyLiteral { .. }
@@ -841,6 +843,7 @@ impl Nfa {
             State::CaptureStart { next, .. }
             | State::CaptureEnd { next, .. }
             | State::ResetMatchStart { next }
+            | State::GroupEntry { next, .. }
             | State::Anchor { next, .. }
             | State::Lookbehind { next, .. }
             | State::LookbehindLiteral { next, .. }
@@ -900,6 +903,7 @@ impl Nfa {
                 | State::FuzzyLiteral { next, .. }
                 | State::CaptureStart { next, .. }
                 | State::CaptureEnd { next, .. }
+                | State::GroupEntry { next, .. }
                 | State::Anchor { next, .. }
                 | State::Lookahead { next, .. }
                 | State::LookaheadLiteral { next, .. }
@@ -912,7 +916,7 @@ impl Nfa {
                 | State::RecursiveNamedGroup { next, .. }
                 | State::Handler { next, .. }
                 | State::ResetMatchStart { next } => stack.push(*next),
-                _ => {}
+                State::Accept => {}
             }
         }
         false
@@ -1197,8 +1201,10 @@ impl Nfa {
                 greedy: true,
                 ..
             }) = self.states.get(*next)
-                && branches.iter().any(|&b| b == idx)
-                && branches.iter().any(|&b| self.class_fed_literal_ends_at_accept(b))
+                && branches.contains(&idx)
+                && branches
+                    .iter()
+                    .any(|&b| self.class_fed_literal_ends_at_accept(b))
             {
                 return true;
             }
@@ -1206,7 +1212,7 @@ impl Nfa {
         })
     }
 
-    /// Whether `state` is a FuzzyLiteral whose `next` is the Accept state.
+    /// Whether `state` is a `FuzzyLiteral` whose `next` is the Accept state.
     fn class_fed_literal_ends_at_accept(&self, state: StateId) -> bool {
         match self.states.get(state) {
             Some(State::FuzzyLiteral { next, .. }) => {
@@ -1942,6 +1948,7 @@ impl Nfa {
             State::Char { next, .. }
             | State::FuzzyChar { next, .. }
             | State::FuzzyLiteral { next, .. }
+            | State::GroupEntry { next, .. }
             | State::CaptureStart { next, .. }
             | State::CaptureEnd { next, .. }
             | State::Backreference { next, .. }
@@ -2020,10 +2027,7 @@ impl Nfa {
                 // With fuzzy, the match length can vary
                 // Max is still 1 char for the pattern position
                 self.max_simple_length_from(*next, visited).map(|m| {
-                    m + 1
-                        + limits
-                            .as_ref()
-                            .map_or(0, FuzzyLimits::insertion_capacity) as usize
+                    m + 1 + limits.as_ref().map_or(0, FuzzyLimits::insertion_capacity) as usize
                 })
             }
 
@@ -2031,6 +2035,7 @@ impl Nfa {
 
             State::CaptureStart { next, .. }
             | State::CaptureEnd { next, .. }
+            | State::GroupEntry { next, .. }
             | State::Anchor { next, .. } => self.max_simple_length_from(*next, visited),
 
             State::Split { branches, .. } => {
@@ -2144,9 +2149,8 @@ impl Nfa {
                     .as_ref()
                     .and_then(FuzzyLimits::get_edits)
                     .unwrap_or(0) as usize;
-                let insertions = limits
-                    .as_ref()
-                    .map_or(0, FuzzyLimits::insertion_capacity) as usize;
+                let insertions =
+                    limits.as_ref().map_or(0, FuzzyLimits::insertion_capacity) as usize;
                 // With deletion allowed, can consume 0 chars; otherwise 1 char
                 let char_min = usize::from(max_edits == 0);
                 (next_min + char_min, next_max.map(|m| m + 1 + insertions))
@@ -2175,6 +2179,7 @@ impl Nfa {
 
             State::CaptureStart { next, .. }
             | State::CaptureEnd { next, .. }
+            | State::GroupEntry { next, .. }
             | State::Anchor { next, .. }
             | State::Lookahead { next, .. }
             | State::LookaheadLiteral { next, .. }
@@ -2254,8 +2259,9 @@ pub enum State {
         class: HirClass,
         /// Fuzzy matching limits (insertions, deletions, substitutions).
         limits: Option<FuzzyLimits>,
-        /// Minimum edits required (for exclusive lower bounds).
-        min_edits: Option<u8>,
+        /// Minimum edits required (for exclusive lower bounds and
+        /// per-operation ranges like `{1<=s<=1}`).
+        min_edits: Option<MinEdits>,
         /// Cost constraint (optional).
         cost_constraint: Option<CostConstraint>,
         /// Restriction on characters usable for edits, e.g. `{i<=1:[ab]}`.
@@ -2273,13 +2279,29 @@ pub enum State {
         pattern_index: PatternIndex,
         /// Per-pattern fuzzy limits.
         limits: Option<FuzzyLimits>,
-        /// Minimum edits required (for exclusive lower bounds like `{0<e<5}`).
-        min_edits: Option<u8>,
+        /// Minimum edits required (for exclusive lower bounds like `{0<e<5}`
+        /// and per-operation ranges like `{2<=i<=3}`).
+        min_edits: Option<MinEdits>,
         /// Cost constraint (optional).
         cost_constraint: Option<CostConstraint>,
         /// Group ID for shared budget tracking across multi-piece fuzzy groups.
         fuzzy_group_id: Option<usize>,
+        /// True for repeat-folded single-char repetitions (`(?:b{2})`): mrab
+        /// gives such bodies no trailing-insertion alternative.
+        repeat_fold: bool,
         /// Next state after matching.
+        next: StateId,
+    },
+
+    /// Entry marker of a fuzzy group. Marks the group as entered on this
+    /// thread so that accept-time `min_edits` lower bounds apply even when the
+    /// group body can match empty via an epsilon path (`(?:c?){1<=e<=2}` on
+    /// "cX" must reject the 0-edit empty accept; without the marker the
+    /// epsilon path never records that the group was entered).
+    GroupEntry {
+        /// The fuzzy group id this marker opens.
+        group_id: usize,
+        /// Next state after entering the group.
         next: StateId,
     },
 
@@ -2455,7 +2477,7 @@ impl State {
     pub fn fuzzy_literal(
         pattern_index: PatternIndex,
         limits: Option<FuzzyLimits>,
-        min_edits: Option<u8>,
+        min_edits: Option<MinEdits>,
         cost_constraint: Option<CostConstraint>,
         fuzzy_group_id: Option<usize>,
         next: StateId,
@@ -2466,8 +2488,15 @@ impl State {
             min_edits,
             cost_constraint,
             fuzzy_group_id,
+            repeat_fold: false,
             next,
         }
+    }
+
+    /// Create a fuzzy-group entry marker state.
+    #[must_use]
+    pub fn group_entry(group_id: usize, next: StateId) -> Self {
+        State::GroupEntry { group_id, next }
     }
 
     /// Create a capture start state.
@@ -2555,6 +2584,7 @@ impl State {
             State::Char { next, .. }
             | State::FuzzyChar { next, .. }
             | State::FuzzyLiteral { next, .. }
+            | State::GroupEntry { next, .. }
             | State::CaptureStart { next, .. }
             | State::CaptureEnd { next, .. }
             | State::Anchor { next, .. }
@@ -2602,7 +2632,7 @@ impl NfaFragment {
 
 /// Character class restriction for fuzzy edits.
 /// When set, edits (insertions, substitutions, etc.) must involve characters from this class.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EditCharRestriction {
     /// Characters that are allowed in edits.
     pub chars: Vec<char>,
@@ -2635,8 +2665,9 @@ pub struct LiteralPattern {
     pub text: String,
     /// Fuzzy limits for this pattern.
     pub limits: Option<FuzzyLimits>,
-    /// Minimum edits required (for exclusive lower bounds like `{0<e<5}`).
-    pub min_edits: Option<u8>,
+    /// Minimum edits required (for exclusive lower bounds like `{0<e<5}` and
+    /// per-operation ranges like `{2<=i<=3}`).
+    pub min_edits: Option<MinEdits>,
     /// Character class restriction for edits.
     /// If set, all edit characters must be from this class.
     pub edit_chars: Option<EditCharRestriction>,
@@ -2645,7 +2676,7 @@ pub struct LiteralPattern {
 impl LiteralPattern {
     /// Create a new literal pattern.
     #[must_use]
-    pub fn new(text: String, limits: Option<FuzzyLimits>, min_edits: Option<u8>) -> Self {
+    pub fn new(text: String, limits: Option<FuzzyLimits>, min_edits: Option<MinEdits>) -> Self {
         LiteralPattern {
             text,
             limits,
@@ -2659,7 +2690,7 @@ impl LiteralPattern {
     pub fn with_edit_chars(
         text: String,
         limits: Option<FuzzyLimits>,
-        min_edits: Option<u8>,
+        min_edits: Option<MinEdits>,
         edit_chars: Option<EditCharRestriction>,
     ) -> Self {
         LiteralPattern {

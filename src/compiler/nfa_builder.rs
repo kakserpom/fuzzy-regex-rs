@@ -117,6 +117,7 @@ impl NfaBuilder {
                 cost_info,
                 edit_chars,
                 fuzzy_group_id,
+                repeat_fold,
             } => {
                 // Create a fuzzy literal state
                 let pattern_index = self.literal_index;
@@ -137,6 +138,7 @@ impl NfaBuilder {
                     min_edits: *min_edits,
                     cost_constraint,
                     fuzzy_group_id: *fuzzy_group_id,
+                    repeat_fold: *repeat_fold,
                     next: 0, // Will be patched
                 });
                 NfaFragment::single(state, state)
@@ -228,6 +230,18 @@ impl NfaBuilder {
                 }
 
                 NfaFragment::single(cap_start, cap_end)
+            }
+
+            Hir::FuzzyGroup { group_id, inner } => {
+                // Entry marker for the fuzzy group: every thread that enters
+                // the body (even via an epsilon/empty path) passes through it
+                // and records the group as visited.
+                let inner_frag = self.build_fragment(inner);
+                let entry = self.nfa.add_state(State::GroupEntry {
+                    group_id: *group_id,
+                    next: inner_frag.start,
+                });
+                NfaFragment::new(entry, inner_frag.ends)
             }
 
             Hir::Anchor(kind) => {
@@ -596,6 +610,7 @@ impl NfaBuilder {
             State::Char { next, .. }
             | State::FuzzyChar { next, .. }
             | State::FuzzyLiteral { next, .. }
+            | State::GroupEntry { next, .. }
             | State::CaptureStart { next, .. }
             | State::CaptureEnd { next, .. }
             | State::Anchor { next, .. }

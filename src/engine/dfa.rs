@@ -463,6 +463,7 @@ impl Dfa {
                 State::Char { next, .. }
                 | State::FuzzyChar { next, .. }
                 | State::FuzzyLiteral { next, .. }
+                | State::GroupEntry { next, .. }
                 | State::CaptureStart { next, .. }
                 | State::CaptureEnd { next, .. }
                 | State::Anchor { next, .. }
@@ -1092,6 +1093,7 @@ impl Dfa {
                 State::Accept
                 | State::Epsilon { .. }
                 | State::ResetMatchStart { .. }
+                | State::GroupEntry { .. }
                 | State::Char { .. }
                 | State::Split { .. }
                 | State::CaptureStart { .. }

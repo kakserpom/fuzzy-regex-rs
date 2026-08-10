@@ -49,6 +49,10 @@ fn extract_recursive(hir: &Hir, out: &mut Vec<LiteralPattern>) {
             extract_recursive(expr, out);
         }
 
+        Hir::FuzzyGroup { inner, .. } => {
+            extract_recursive(inner, out);
+        }
+
         // These don't contain literals
         // NamedList is handled at runtime when word lists are provided
         // ResetMatchStart doesn't produce literals

@@ -34,11 +34,12 @@ fn capturing_group_fuzzy_populates_the_group() {
 #[test]
 fn capturing_matches_named_span() {
     // An unnamed capturing group must match exactly like the named form: both
-    // are captures compiled via `apply_group_fuzziness`. (The non-capturing
-    // form has a separate, pre-existing leading-insertion quirk — e.g. on
-    // "xabc" the capture forms return the leftmost (0,4) with a leading
-    // insertion while `(?:abc){e<=1}` returns the exact (1,4) — so it is not
-    // asserted equal here.)
+    // are captures compiled via a shared fuzzy non-capturing group (single
+    // `fuzzy_group_id`, group-level error accounting). (The default engine has
+    // a pre-existing leading-insertion quirk — on "xabc" the capture forms
+    // return the leftmost (0,4) with a leading insertion while `(?:abc){e<=1}`
+    // returns the exact (1,4) — so the non-capturing form is not asserted
+    // equal here; in mrab-compat mode all three agree with mrab's (1,4).)
     let cap = FuzzyRegex::new(r"(abc){e<=1}").unwrap();
     let named = FuzzyRegex::new(r"(?P<n>abc){e<=1}").unwrap();
     for t in ["abc", "abx", "ab", "xabc", "abcd", "abcx", "yabcy"] {

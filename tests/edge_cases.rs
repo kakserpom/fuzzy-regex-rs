@@ -206,13 +206,19 @@ fn test_min_edit_single_char_group_requires_edit() {
 
     // A genuine ≥1-edit alignment still works: "ab" is a 1-deletion of "abc".
     let re = FuzzyRegex::new(r"abc{1<=e<=2}$").unwrap();
-    assert_eq!((re.find("ab").unwrap().start(), re.find("ab").unwrap().end()), (0, 2));
+    assert_eq!(
+        (re.find("ab").unwrap().start(), re.find("ab").unwrap().end()),
+        (0, 2)
+    );
     assert!(!re.is_match("abc"));
 
     // Grouping the whole suffix keeps it a valid match (mrab returns (5,11)).
     let re = FuzzyRegex::new(r"(?:a|a)(?:aacc){1<=e<=3}").unwrap();
     assert_eq!(
-        (re.find("dcddbaaacccbbc").unwrap().start(), re.find("dcddbaaacccbbc").unwrap().end()),
+        (
+            re.find("dcddbaaacccbbc").unwrap().start(),
+            re.find("dcddbaaacccbbc").unwrap().end()
+        ),
         (5, 11)
     );
 }
@@ -1467,9 +1473,14 @@ fn test_fuzzy_long_text() {
 
 #[test]
 fn test_fuzzy_unicode_cafe() {
+    // Default mode prefers the exact match: "café" with 0 edits. (mrab's
+    // leftmost search instead suppresses insertion at the scan anchor and,
+    // once scanning passes it, reports the leading-space insertion
+    // " café"@(6,11) — reproduced by mrab-compat mode.)
     let re = FuzzyRegex::new("(?:café){e<=1}").unwrap();
     let m = re.find("I love café au lait").unwrap();
     assert_eq!(m.as_str(), "café");
+    assert_eq!(m.fuzzy_counts(), (0, 0, 0));
 }
 
 #[test]
@@ -1572,10 +1583,15 @@ fn test_char_restriction_deletion() {
 
 #[test]
 fn test_char_restriction_transposition() {
-    // Transposition "the" -> "teh"
+    // "the" -> "teh" is 1 transposition under the default engine's swap op
+    // (swaps are not counted in the (s,i,d) tuple), so the default mode
+    // matches "teh" with counts (0,0,0). mrab has no transposition op, so
+    // Python mrab (and mrab-compat mode) instead yield the 1-deletion
+    // alignment "te" (delete 'h').
     let re = FuzzyRegex::new(r"(?:the){e<=1:[a-z]}").unwrap();
     let m = re.find("teh").unwrap();
     assert_eq!(m.as_str(), "teh");
+    assert_eq!(m.fuzzy_counts(), (0, 0, 0));
 }
 
 // ============================================

@@ -252,9 +252,7 @@ impl<'a> Parser<'a> {
         // constraint applies to the immediately-preceding atom only, so wrap it
         // in a fuzzy non-capturing group rather than letting literal merging
         // spread the budget across the whole concatenation.
-        if matches!(self.lexer.peek_token()?, Token::OpenBrace)
-            && self.peek_is_mrab_fuzziness()
-        {
+        if matches!(self.lexer.peek_token()?, Token::OpenBrace) && self.peek_is_mrab_fuzziness() {
             self.lexer.next_token()?; // consume '{'
             let fuzziness = self.parse_mrab_fuzziness()?;
             return Ok(Ast::NonCapturingGroup {
@@ -267,7 +265,18 @@ impl<'a> Parser<'a> {
         match self.lexer.peek_token()? {
             Token::Star | Token::Plus | Token::Question | Token::OpenBrace => {
                 let (quantifier, greedy) = self.parse_quantifier()?;
-                Ok(Ast::quantified(expr, quantifier, greedy))
+                // mrab elides `{1}` / `{1,1}` (a bare atom), so `ab{1}` merges
+                // into the string literal `ab` (its compiled form is
+                // RE_OP_STRING, which allows trailing insertions) rather than
+                // staying a one-shot repeat node.
+                if matches!(
+                    quantifier,
+                    Quantifier::Exactly(1) | Quantifier::Between(1, 1)
+                ) {
+                    Ok(expr)
+                } else {
+                    Ok(Ast::quantified(expr, quantifier, greedy))
+                }
             }
             _ => Ok(expr),
         }
@@ -821,11 +830,20 @@ impl<'a> Parser<'a> {
             _ => Fuzziness::Inherited,
         };
 
-        // If there's fuzziness on a capture group, wrap the content
+        // If there's fuzziness on a capture group, wrap the content in a fuzzy
+        // non-capturing group so the whole body is lowered as ONE fuzzy unit:
+        // a shared `fuzzy_group_id` gives group-level error accounting and a
+        // single `min_edits` satisfaction check at the accept state, matching
+        // mrab's semantics for `(abc){e<=1}` / `(a|b){2<=s<=3}` etc. (The old
+        // per-literal distribution could not express group-level minima for
+        // multi-piece bodies and dropped fuzziness on character classes.)
         let expr = if matches!(fuzziness, Fuzziness::Inherited) {
             expr
         } else {
-            Self::apply_group_fuzziness(expr, fuzziness)
+            Ast::NonCapturingGroup {
+                expr: Box::new(expr),
+                fuzziness,
+            }
         };
 
         Ok(Ast::Group {
@@ -873,7 +891,10 @@ impl<'a> Parser<'a> {
         let expr = if matches!(fuzziness, Fuzziness::Inherited) {
             expr
         } else {
-            Self::apply_group_fuzziness(expr, fuzziness)
+            Ast::NonCapturingGroup {
+                expr: Box::new(expr),
+                fuzziness,
+            }
         };
 
         Ok(Ast::Group {
@@ -1007,16 +1028,22 @@ impl<'a> Parser<'a> {
                                 ));
                             };
 
-                            if key != 'e' {
+                            if !"eids".contains(key) {
                                 return Err(Error::invalid_fuzziness(
                                     start_pos,
-                                    "range constraint only valid for 'e'",
+                                    "range constraint only valid for 'e', 'i', 'd' or 's'",
                                 ));
                             }
 
                             // Exclusive lower bound: 1<e means min_errors = 2
                             let min_val = if lower_inclusive { num } else { num + 1 };
-                            mrab.min_errors = Some(min_val);
+                            match key {
+                                'e' => mrab.min_errors = Some(min_val),
+                                'i' => mrab.min_insertions = Some(min_val),
+                                'd' => mrab.min_deletions = Some(min_val),
+                                's' => mrab.min_substitutions = Some(min_val),
+                                _ => {}
+                            }
 
                             // Check for upper bound
                             if matches!(self.lexer.peek_token()?, Token::Char('<')) {
@@ -1031,7 +1058,13 @@ impl<'a> Parser<'a> {
                                 if !upper_inclusive && max > 0 {
                                     max -= 1;
                                 }
-                                mrab.max_errors = Some(max);
+                                match key {
+                                    'e' => mrab.max_errors = Some(max),
+                                    'i' => mrab.max_insertions = Some(max),
+                                    'd' => mrab.max_deletions = Some(max),
+                                    's' => mrab.max_substitutions = Some(max),
+                                    _ => {}
+                                }
                             }
                         }
                         Token::Char(k) if "idst".contains(k) => {
@@ -1297,51 +1330,6 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(())
-    }
-
-    /// Apply fuzziness to all literals in a group.
-    fn apply_group_fuzziness(ast: Ast, fuzziness: Fuzziness) -> Ast {
-        match ast {
-            Ast::Literal { text, .. } => Ast::Literal {
-                text,
-                fuzziness: fuzziness.clone(),
-            },
-            Ast::Char(ch) => Ast::Literal {
-                text: ch.to_string(),
-                fuzziness,
-            },
-            Ast::Concat(parts) => Ast::Concat(
-                parts
-                    .into_iter()
-                    .map(|p| Self::apply_group_fuzziness(p, fuzziness.clone()))
-                    .collect(),
-            ),
-            Ast::Alternation(alts) => Ast::Alternation(
-                alts.into_iter()
-                    .map(|a| Self::apply_group_fuzziness(a, fuzziness.clone()))
-                    .collect(),
-            ),
-            Ast::Group { index, name, expr } => Ast::Group {
-                index,
-                name,
-                expr: Box::new(Self::apply_group_fuzziness(*expr, fuzziness)),
-            },
-            Ast::NonCapturingGroup { expr, .. } => Ast::NonCapturingGroup {
-                expr: Box::new(Self::apply_group_fuzziness(*expr, fuzziness.clone())),
-                fuzziness,
-            },
-            Ast::Quantified {
-                expr,
-                quantifier,
-                greedy,
-            } => Ast::Quantified {
-                expr: Box::new(Self::apply_group_fuzziness(*expr, fuzziness)),
-                quantifier,
-                greedy,
-            },
-            // Other nodes pass through unchanged
-            other => other,
-        }
     }
 
     /// Parse a lookahead: (?=expr) or (?!expr)

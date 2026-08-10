@@ -109,6 +109,55 @@ impl FuzzyLimits {
     }
 }
 
+/// Per-operation minimum edit counts a fuzzy match must satisfy (mrab's
+/// `{1<=s<=1}`, `{2<=i<=3}` range syntax). Each field is a lower bound on the
+/// corresponding operation's count; `None` means no bound for that operation.
+/// `total` bounds the sum of insertions/deletions/substitutions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MinEdits {
+    /// Minimum total edits.
+    pub total: Option<NumEdits>,
+    /// Minimum insertions.
+    pub insertions: Option<NumEdits>,
+    /// Minimum deletions.
+    pub deletions: Option<NumEdits>,
+    /// Minimum substitutions.
+    pub substitutions: Option<NumEdits>,
+}
+
+impl MinEdits {
+    /// Whether no *effective* minimum is specified. A bound of `0` (mrab's
+    /// `{0<=e<=2}`) is always satisfied and must not count as a minimum, or the
+    /// matcher's below-min trailing-insertion suppression would wrongly fire for
+    /// patterns that are semantically equivalent to `{e<=2}`.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.total.is_none_or(|v| v == 0)
+            && self.insertions.is_none_or(|v| v == 0)
+            && self.deletions.is_none_or(|v| v == 0)
+            && self.substitutions.is_none_or(|v| v == 0)
+    }
+
+    /// Whether counts `(i, d, s, t)` satisfy every minimum bound. The `total`
+    /// bound counts all four operations (matching `EditCounts::total`), so a
+    /// transposition contributes toward it; the per-operation bounds apply to
+    /// their own counts (mrab has no transpositions, so `t` is 0 there).
+    #[must_use]
+    pub fn met_by(&self, i: u8, d: u8, s: u8, t: u8) -> bool {
+        self.total
+            .is_none_or(|min| i.saturating_add(d).saturating_add(s).saturating_add(t) >= min)
+            && self.insertions.is_none_or(|v| i >= v)
+            && self.deletions.is_none_or(|v| d >= v)
+            && self.substitutions.is_none_or(|v| s >= v)
+    }
+
+    /// Whether `e` satisfies every minimum bound.
+    #[must_use]
+    pub fn met_by_counts(&self, e: &crate::engine::EditCounts) -> bool {
+        self.met_by(e.insertions, e.deletions, e.substitutions, e.swaps)
+    }
+}
+
 /// Penalty weights for different edit operations.
 ///
 /// These weights are used to calculate a weighted edit distance where different

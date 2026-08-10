@@ -15,14 +15,15 @@
     let_underscore_drop
 )]
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use super::captures::CaptureState;
 use super::fuzzy_bridge::{CachedMatches, FuzzyBridge, FuzzyMatchResult};
 use crate::api::builder::{HandlerMap, HandlerResult};
-use crate::ir::{LiteralPattern, Nfa, State, StateId};
+use crate::ir::{EditCharRestriction, LiteralPattern, Nfa, State, StateId};
 use crate::parser::Anchor;
-use crate::types::{Distance, FuzzyLimits, NumEdits};
+use crate::types::{Distance, FuzzyLimits, MinEdits, NumEdits};
 
 /// A thread in the NFA simulation.
 #[derive(Debug, Clone)]
@@ -43,6 +44,17 @@ struct Thread {
     handler_overrides: Vec<(usize, usize, String)>,
     /// Per fuzzy-group cumulative edit counts (indexed by `fuzzy_group_id`).
     group_edits: Vec<EditCounts>,
+    /// Per fuzzy-group "was entered" flags. A group's `min_edits` lower bound
+    /// only constrains threads that actually traversed the group: in mrab,
+    /// `a|(?:l){1<=s<=1}` may match via the exact `a` branch with zero edits
+    /// even though the `l` group demands a substitution, because `l` is never
+    /// visited. Indexed by `fuzzy_group_id`.
+    group_visited: Vec<bool>,
+    /// Decision-token sequence (mrab-compat alignment mode only). Records, in
+    /// exploration order, the branch/option taken at each choice point: Split
+    /// branch index and fuzzy edit type. Empty (and untouched) when
+    /// `mrab_dfs` is off, so default mode pays no comparison cost.
+    path: Vec<u8>,
 }
 
 impl Default for Thread {
@@ -56,6 +68,8 @@ impl Default for Thread {
             edits: EditCounts::default(),
             handler_overrides: Vec::new(),
             group_edits: Vec::new(),
+            group_visited: Vec::new(),
+            path: Vec::new(),
         }
     }
 }
@@ -181,6 +195,371 @@ fn check_group_budget(
     true
 }
 
+/// Decision-token values (mrab-compat alignment mode only). A thread's `path`
+/// records, in exploration order, the option taken at every choice point; two
+/// paths compare lexicographically exactly like mrab's greedy-DFS first-match
+/// order. Per fuzzy character mrab tries the exact match first, then
+/// substitution, then insertion, then deletion (`next_fuzzy_match_item` order),
+/// hence the 0..3 values. At a Split the branch's DFS order index is used (the
+/// first-pushed branch — continue for greedy, exit for lazy — gets 0).
+const TOK_EXACT: u8 = 0;
+const TOK_SUB: u8 = 1;
+const TOK_INS: u8 = 2;
+const TOK_DEL: u8 = 3;
+
+/// Append `tokens` to a thread path, returning a fresh vector.
+fn mrab_path_extend(path: &[u8], tokens: &[u8]) -> Vec<u8> {
+    if tokens.is_empty() {
+        return path.to_vec();
+    }
+    let mut out = Vec::with_capacity(path.len() + tokens.len());
+    out.extend_from_slice(path);
+    out.extend_from_slice(tokens);
+    out
+}
+
+/// Edit budgets for a fuzzy literal in mrab mode: `(max_total, max_ins,
+/// max_del, max_sub)`.
+type MrabCaps = (u8, u8, u8, u8);
+
+/// Memoization keys for `mrab_literal_dfs`: (pattern char, text pos, ins, del,
+/// sub) triples whose subtree produced no alignments.
+type MrabFailedKeys = HashSet<(usize, usize, u8, u8, u8)>;
+
+/// Persistent frontier in `find_at_mrab`: per `(state, pos, mins_met)`, the
+/// Pareto set over (decision path, edit counts).
+type MrabFrontier = super::hash::FxHashMap<(StateId, usize, bool), Vec<(Vec<u8>, EditCounts)>>;
+
+/// One candidate alignment of a fuzzy literal, produced in mrab-DFS order.
+struct MrabAlignment {
+    /// End position (byte offset, exclusive) in the text.
+    end: usize,
+    insertions: u8,
+    deletions: u8,
+    substitutions: u8,
+    swaps: u8,
+    similarity: f32,
+    /// Decision tokens for this alignment relative to the literal's first
+    /// character (the caller prefixes the running thread path).
+    path: Vec<u8>,
+}
+
+/// Similarity of a literal alignment, using the same formula as the bridge
+/// (`1 - edits / max(pattern_len, matched_len)`). Only a tie-break in mrab
+/// mode (selection is by decision path), so the value is informational.
+fn mrab_literal_similarity(pattern_chars: usize, edits: &EditCounts) -> f32 {
+    let pattern_len = pattern_chars as f32;
+    if pattern_len == 0.0 {
+        return 1.0;
+    }
+    let ed = f32::from(edits.total());
+    let matched_len = pattern_len + f32::from(edits.insertions) - f32::from(edits.deletions);
+    let max_len = pattern_len.max(matched_len).max(1.0);
+    (1.0 - ed / max_len).max(0.0)
+}
+
+/// Enumerate every alignment of `pattern` against `text` starting at `at` (the
+/// caller's `thread.pos`), in mrab's greedy-DFS order: per pattern character,
+/// exact, then substitution, then insertion, then deletion; once the literal is
+/// complete, trailing insertions (mrab's `fuzzy_insert`/`END_FUZZY` retry).
+///
+/// Two mrab rules are encoded:
+/// - A pattern character that matches exactly is committed to (mrab records no
+///   retry frame for an exact match), so no sub/ins/del alternatives are tried
+///   at that position — only the exact continuation.
+/// - In-body insertions are forbidden at the search anchor `insertion_anchor`
+///   (mrab's `permit_insertion`: `!search || text_pos != search_anchor`), i.e.
+///   the initial search position of an unanchored search. Anchored searches
+///   (`search` false) pass `None` and allow insertions everywhere. Trailing
+///   insertions after the literal are always permitted within budget.
+///
+/// The state space is memoized: any (pattern char, text pos, edit counts) triple
+/// whose subtree produced nothing is never re-entered, so patterns like
+/// `(?:ab){0<=e<=3}` on long runs of text stay linear.
+#[allow(clippy::too_many_arguments)]
+fn mrab_literal_alignments(
+    pattern: &str,
+    text: &str,
+    at: usize,
+    insertion_anchor: Option<usize>,
+    caps: MrabCaps,
+    edit_chars: Option<&EditCharRestriction>,
+    case_insensitive: bool,
+    min_edits: Option<MinEdits>,
+    allow_below_min_trailing: bool,
+) -> Vec<MrabAlignment> {
+    let pchars: Vec<char> = pattern.chars().collect();
+    let mut out: Vec<MrabAlignment> = Vec::new();
+    let mut failed: MrabFailedKeys = HashSet::new();
+    let mut path: Vec<u8> = Vec::new();
+    let mut edits = EditCounts::default();
+    mrab_literal_dfs(
+        &pchars,
+        text,
+        insertion_anchor,
+        caps,
+        edit_chars,
+        case_insensitive,
+        min_edits,
+        allow_below_min_trailing,
+        0,
+        at,
+        &mut edits,
+        &mut path,
+        &mut out,
+        &mut failed,
+    );
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mrab_literal_dfs(
+    pchars: &[char],
+    text: &str,
+    insertion_anchor: Option<usize>,
+    caps: MrabCaps,
+    edit_chars: Option<&EditCharRestriction>,
+    case_insensitive: bool,
+    min_edits: Option<MinEdits>,
+    allow_below_min_trailing: bool,
+    pi: usize,
+    pos: usize,
+    edits: &mut EditCounts,
+    path: &mut Vec<u8>,
+    out: &mut Vec<MrabAlignment>,
+    failed: &mut HashSet<(usize, usize, u8, u8, u8)>,
+) {
+    let (max_e, cap_i, cap_d, cap_s) = caps;
+    if edits.total() > max_e {
+        return;
+    }
+    let char_eq = |pc: char, tc: char| {
+        if case_insensitive {
+            pc.to_lowercase().next().unwrap_or(pc) == tc.to_lowercase().next().unwrap_or(tc)
+        } else {
+            pc == tc
+        }
+    };
+    let edit_allows = |c: char| edit_chars.is_none_or(|r| r.allows(c));
+
+    if pi == pchars.len() {
+        // Literal complete: this alignment is a candidate. Then extend it with
+        // trailing insertions (group-end / boundary absorption), matching
+        // mrab's retry after a string. For repeat-folded and single-char
+        // literals, trailing insertions below the min bound are suppressed
+        // (`(?:b{2}){1<=e<=2}` on "bbX" -> (1,3)(1,0,0), not (0,3)(0,1,0);
+        // `^(?:c){1<=e<=2}$` on "cX" -> None), as in the engine.
+        out.push(MrabAlignment {
+            end: pos,
+            insertions: edits.insertions,
+            deletions: edits.deletions,
+            substitutions: edits.substitutions,
+            swaps: edits.swaps,
+            similarity: mrab_literal_similarity(pchars.len(), edits),
+            path: path.clone(),
+        });
+        let below_min = min_edits.is_some_and(|m| {
+            !m.met_by(
+                edits.insertions,
+                edits.deletions,
+                edits.substitutions,
+                edits.swaps,
+            )
+        });
+        if (!below_min || allow_below_min_trailing)
+            && edits.insertions < cap_i
+            && edits.total() < max_e
+            && pos < text.len()
+            && let Some(tc) = text[pos..].chars().next()
+            && edit_allows(tc)
+        {
+            edits.insertions += 1;
+            path.push(TOK_INS);
+            mrab_literal_dfs(
+                pchars,
+                text,
+                insertion_anchor,
+                caps,
+                edit_chars,
+                case_insensitive,
+                min_edits,
+                allow_below_min_trailing,
+                pi,
+                pos + tc.len_utf8(),
+                edits,
+                path,
+                out,
+                failed,
+            );
+            path.pop();
+            edits.insertions -= 1;
+        }
+        return;
+    }
+
+    let key = (
+        pi,
+        pos,
+        edits.insertions,
+        edits.deletions,
+        edits.substitutions,
+    );
+    if failed.contains(&key) {
+        return;
+    }
+    let before = out.len();
+    let pc = pchars[pi];
+    let tc = text.get(pos..).and_then(|s| s.chars().next());
+
+    match tc {
+        Some(tc) if char_eq(pc, tc) => {
+            // Exact match: mrab commits to it (no fuzzy retry frame is recorded
+            // for an exact match), so sub/ins/del alternatives are not tried at
+            // this position — e.g. `(?:ab){1<=e<=2}$` on "ab" yields no
+            // sub-alignment at the anchor, only the exact one.
+            path.push(TOK_EXACT);
+            mrab_literal_dfs(
+                pchars,
+                text,
+                insertion_anchor,
+                caps,
+                edit_chars,
+                case_insensitive,
+                min_edits,
+                allow_below_min_trailing,
+                pi + 1,
+                pos + tc.len_utf8(),
+                edits,
+                path,
+                out,
+                failed,
+            );
+            path.pop();
+        }
+        Some(tc) => {
+            // Mismatch: substitution, then insertion (self-loop), then deletion.
+            if edits.substitutions < cap_s && edits.total() < max_e && edit_allows(tc) {
+                edits.substitutions += 1;
+                path.push(TOK_SUB);
+                mrab_literal_dfs(
+                    pchars,
+                    text,
+                    insertion_anchor,
+                    caps,
+                    edit_chars,
+                    case_insensitive,
+                    min_edits,
+                    allow_below_min_trailing,
+                    pi + 1,
+                    pos + tc.len_utf8(),
+                    edits,
+                    path,
+                    out,
+                    failed,
+                );
+                path.pop();
+                edits.substitutions -= 1;
+            }
+            // In-body insertion is forbidden at the search anchor, where mrab
+            // would rather start searching one character later.
+            if insertion_anchor.is_none_or(|a| pos != a)
+                && edits.insertions < cap_i
+                && edits.total() < max_e
+                && edit_allows(tc)
+            {
+                edits.insertions += 1;
+                path.push(TOK_INS);
+                mrab_literal_dfs(
+                    pchars,
+                    text,
+                    insertion_anchor,
+                    caps,
+                    edit_chars,
+                    case_insensitive,
+                    min_edits,
+                    allow_below_min_trailing,
+                    pi,
+                    pos + tc.len_utf8(),
+                    edits,
+                    path,
+                    out,
+                    failed,
+                );
+                path.pop();
+                edits.insertions -= 1;
+            }
+            if edits.deletions < cap_d && edits.total() < max_e {
+                edits.deletions += 1;
+                path.push(TOK_DEL);
+                mrab_literal_dfs(
+                    pchars,
+                    text,
+                    insertion_anchor,
+                    caps,
+                    edit_chars,
+                    case_insensitive,
+                    min_edits,
+                    allow_below_min_trailing,
+                    pi + 1,
+                    pos,
+                    edits,
+                    path,
+                    out,
+                    failed,
+                );
+                path.pop();
+                edits.deletions -= 1;
+            }
+        }
+        None => {
+            // No text char left: the only option is deletion.
+            if edits.deletions < cap_d && edits.total() < max_e {
+                edits.deletions += 1;
+                path.push(TOK_DEL);
+                mrab_literal_dfs(
+                    pchars,
+                    text,
+                    insertion_anchor,
+                    caps,
+                    edit_chars,
+                    case_insensitive,
+                    min_edits,
+                    allow_below_min_trailing,
+                    pi + 1,
+                    pos,
+                    edits,
+                    path,
+                    out,
+                    failed,
+                );
+                path.pop();
+                edits.deletions -= 1;
+            }
+        }
+    }
+
+    if out.len() == before {
+        failed.insert(key);
+    }
+}
+
+/// Whether `a` dominates `b` in the mrab-mode frontier: `a` has a
+/// lexicographically-smaller decision path (mrab tries it first) and its edit
+/// counts are componentwise no larger (any continuation completing `b` also
+/// completes `a` within budget).
+fn mrab_dominates(
+    a_path: &[u8],
+    a_edits: &EditCounts,
+    b_path: &[u8],
+    b_edits: &EditCounts,
+) -> bool {
+    a_path <= b_path
+        && a_edits.insertions <= b_edits.insertions
+        && a_edits.deletions <= b_edits.deletions
+        && a_edits.substitutions <= b_edits.substitutions
+        && a_edits.swaps <= b_edits.swaps
+}
+
 /// Merge `match_edits` into `group_edits` at the given `group_id`.
 fn apply_group_edits(
     mut group_edits: Vec<EditCounts>,
@@ -193,6 +572,17 @@ fn apply_group_edits(
         group_edits[id] = group_edits[id].merge(match_edits);
     }
     group_edits
+}
+
+/// Mark `group_id` as entered on this thread (bound-respecting mirror of
+/// [`apply_group_edits`], sized to `group_edits`).
+fn mark_group_visited(mut group_visited: Vec<bool>, group_id: Option<usize>) -> Vec<bool> {
+    if let Some(id) = group_id
+        && id < group_visited.len()
+    {
+        group_visited[id] = true;
+    }
+    group_visited
 }
 
 /// Extract fuzzy group budgets from the NFA states.
@@ -222,9 +612,9 @@ fn extract_fuzzy_group_budgets(nfa: &Nfa) -> Vec<FuzzyLimits> {
 
 /// Extract per-group `min_edits` lower bounds from the NFA states.
 /// Returns a vec indexed by `fuzzy_group_id` (matching `fuzzy_group_budgets`).
-fn extract_fuzzy_group_mins(nfa: &Nfa) -> Vec<Option<u8>> {
+fn extract_fuzzy_group_mins(nfa: &Nfa) -> Vec<Option<MinEdits>> {
     use std::collections::BTreeMap;
-    let mut mins: BTreeMap<usize, Option<u8>> = BTreeMap::new();
+    let mut mins: BTreeMap<usize, Option<MinEdits>> = BTreeMap::new();
     for state in &nfa.states {
         match state {
             State::FuzzyLiteral {
@@ -237,8 +627,7 @@ fn extract_fuzzy_group_mins(nfa: &Nfa) -> Vec<Option<u8>> {
                 min_edits,
                 ..
             } => {
-                mins.entry(*id)
-                    .or_insert_with(|| *min_edits);
+                mins.entry(*id).or_insert_with(|| *min_edits);
             }
             _ => {}
         }
@@ -274,6 +663,15 @@ pub struct MatcherConfig {
     /// Greedy first-match mode - return first match found (faster).
     /// Similar to mrab-regex behavior.
     pub greedy_first: bool,
+    /// mrab-regex compatibility alignment mode. When set, the engine selects
+    /// matches by mrab's greedy-DFS semantics instead of cost/similarity: each
+    /// thread carries a decision-token sequence (the per-char exact->sub->ins->del
+    /// choices plus Split branch picks), threads are deduped at each (state, pos)
+    /// by keeping the lexicographically-minimal path plus the per-op budget
+    /// frontier, and the returned match is the leftmost one whose decision
+    /// sequence is minimal. Exactness is unaffected; alignment ordering and the
+    /// match span/edits follow mrab.
+    pub mrab_dfs: bool,
 }
 
 impl Default for MatcherConfig {
@@ -290,6 +688,7 @@ impl Default for MatcherConfig {
             prefer_shortest: false,
             unicode: false,
             greedy_first: false,
+            mrab_dfs: false,
         }
     }
 }
@@ -325,7 +724,7 @@ pub struct Matcher<'a> {
     /// Indexed by `fuzzy_group_id` from the NFA states.
     fuzzy_group_budgets: Vec<FuzzyLimits>,
     /// Per-group `min_edits` lower bounds, indexed by `fuzzy_group_id`.
-    fuzzy_group_mins: Vec<Option<u8>>,
+    fuzzy_group_mins: Vec<Option<MinEdits>>,
     /// Whether each NFA state is a consuming fuzzy state on a repetition loop
     /// (`*`/`+`/`?`/`{0,n}`), i.e. it may match zero characters. Used by the
     /// zero-width insertion path (see FuzzyLiteral/FuzzyChar handlers).
@@ -495,7 +894,12 @@ impl<'a> Matcher<'a> {
         // Skip for POSIX mode which needs to find the longest match.
         let has_alt = self.simple_alternation_indices.is_some();
         let has_pf = self.multi_prefilter.is_some();
-        if !self.config.global
+        // mrab-compat alignment mode: every fuzzy fast path below computes its
+        // own best/first alignment (Bitap/guard-NFA score ordering), which can
+        // disagree with mrab's DFS-first semantics. Route through the
+        // decision-sequence engine instead.
+        if !self.config.mrab_dfs
+            && !self.config.global
             && !self.config.best_match
             && !self.config.enhance_match
             && !self.config.posix
@@ -509,7 +913,8 @@ impl<'a> Matcher<'a> {
         // Fallback for multi-pattern when prefilter is inactive (e.g., short patterns like 'a' with e<=1).
         // Use individual streaming Bitap search for each pattern.
         // Skip for POSIX mode which needs to find the longest match.
-        if !self.config.global
+        if !self.config.mrab_dfs
+            && !self.config.global
             && !self.config.best_match
             && !self.config.enhance_match
             && !self.config.posix
@@ -523,7 +928,8 @@ impl<'a> Matcher<'a> {
         // Non-global mode: search position by position, return on first match.
         // This is similar to mrab-regex behavior and much faster when matches exist early.
         // Also use this path when greedy_first is explicitly enabled.
-        if !self.config.global
+        if !self.config.mrab_dfs
+            && !self.config.global
             && !self.config.best_match
             && !self.config.enhance_match
             && self.config.unanchored
@@ -537,7 +943,8 @@ impl<'a> Matcher<'a> {
         // Uses streaming Bitap which is O(N) instead of O(N*P) search_all.
         // Only used for simple fuzzy patterns where the literal IS the whole pattern.
         // Also use when greedy_first is enabled.
-        if !self.config.global
+        if !self.config.mrab_dfs
+            && !self.config.global
             && !self.config.best_match
             && !self.config.enhance_match
             && self.config.unanchored
@@ -551,7 +958,8 @@ impl<'a> Matcher<'a> {
         // Fast path for single-pattern first-match without prefilter.
         // Use search_first for early termination instead of search_all.
         // Skip if capture groups are needed (they require full search).
-        if !self.config.global
+        if !self.config.mrab_dfs
+            && !self.config.global
             && !self.config.best_match
             && !self.config.enhance_match
             && self.config.unanchored
@@ -629,8 +1037,13 @@ impl<'a> Matcher<'a> {
             // POSIX mode: find longest match at leftmost position
             self.find_posix_with_cache(text, cached.as_ref())
         } else if self.config.unanchored {
-            // For first-match, use prefilter to skip impossible positions
-            if self.prefilter.is_active() {
+            // For first-match, use prefilter to skip impossible positions.
+            // (Disabled in mrab mode: mrab probes every start position, and a
+            // match can begin beyond the prefilter's candidate window — e.g.
+            // `(?:wxyz){1<=d<=1}` on "Xwxyz" matches (2,5) by deleting the
+            // leading 'w', one char past the exact-occurrence window. The
+            // every-position probe below gives mrab's leftmost answer.)
+            if self.prefilter.is_active() && !self.config.mrab_dfs {
                 let mut last_tried = None;
                 let max_offset = self.prefilter.max_offset();
                 for candidate in self.prefilter.find_candidates(text.as_bytes()) {
@@ -648,16 +1061,22 @@ impl<'a> Matcher<'a> {
                         }
                         last_tried = Some(idx);
 
-                        if let Some(m) = self.find_at_with_cache(text, idx, cached.as_ref()) {
+                        if let Some(m) =
+                            self.find_at_with_search_anchor(text, idx, 0, cached.as_ref())
+                        {
                             return Some(m);
                         }
                     }
                 }
                 // Try at end for empty patterns
-                self.find_at_with_cache(text, text.len(), cached.as_ref())
-            } else if self.ends_with_end_anchor && !self.config.multi_line {
+                self.find_at_with_search_anchor(text, text.len(), 0, cached.as_ref())
+            } else if !self.config.mrab_dfs && self.ends_with_end_anchor && !self.config.multi_line
+            {
                 // Pattern ends with $ - search from end (much faster for patterns like \.$)
                 // (disabled in multiline mode where $ can match at any line boundary)
+                // (disabled in mrab mode: the reverse scan returns the rightmost
+                // matching start, but mrab picks the leftmost start; the generic
+                // left-to-right scan below gives the mrab answer)
                 if let Some(max_len) = self.max_simple_length {
                     // Only check last `max_len` character positions (very fast for short patterns)
                     // Iterate backwards from end, collecting only the positions we need
@@ -683,11 +1102,13 @@ impl<'a> Matcher<'a> {
                                 continue;
                             }
                         }
-                        if let Some(m) = self.find_at_with_cache(text, idx, cached.as_ref()) {
+                        if let Some(m) =
+                            self.find_at_with_search_anchor(text, idx, 0, cached.as_ref())
+                        {
                             return Some(m);
                         }
                     }
-                    self.find_at_with_cache(text, text.len(), cached.as_ref())
+                    self.find_at_with_search_anchor(text, text.len(), 0, cached.as_ref())
                 } else {
                     // Unknown max length - collect all positions and search in reverse
                     let positions: Vec<_> = text.char_indices().map(|(idx, _)| idx).collect();
@@ -698,26 +1119,33 @@ impl<'a> Matcher<'a> {
                                 continue;
                             }
                         }
-                        if let Some(m) = self.find_at_with_cache(text, idx, cached.as_ref()) {
+                        if let Some(m) =
+                            self.find_at_with_search_anchor(text, idx, 0, cached.as_ref())
+                        {
                             return Some(m);
                         }
                     }
-                    self.find_at_with_cache(text, text.len(), cached.as_ref())
+                    self.find_at_with_search_anchor(text, text.len(), 0, cached.as_ref())
                 }
             } else {
-                // No prefilter - try every position, but use first_char_class for quick rejection
+                // No prefilter - try every position, but use first_char_class for quick rejection.
+                // In mrab mode a non-anchor position can still start a match via an
+                // in-body insertion even when its first char is outside the class, so
+                // the quick-reject is disabled there (mrab probes every position).
+                let mrab = self.config.mrab_dfs;
                 for (idx, ch) in text.char_indices() {
-                    // Quick reject: if first_char_class is set and doesn't match, skip
-                    if let Some(ref fcc) = self.first_char_class
+                    if !mrab
+                        && let Some(ref fcc) = self.first_char_class
                         && !fcc.matches(ch)
                     {
                         continue;
                     }
-                    if let Some(m) = self.find_at_with_cache(text, idx, cached.as_ref()) {
+                    if let Some(m) = self.find_at_with_search_anchor(text, idx, 0, cached.as_ref())
+                    {
                         return Some(m);
                     }
                 }
-                self.find_at_with_cache(text, text.len(), cached.as_ref())
+                self.find_at_with_search_anchor(text, text.len(), 0, cached.as_ref())
             }
         } else {
             self.find_at_with_cache(text, 0, cached.as_ref())
@@ -1051,7 +1479,7 @@ impl<'a> Matcher<'a> {
 
         // Try starting at each position
         for (idx, _) in text.char_indices() {
-            if let Some(m) = self.find_at_with_cache(text, idx, cached) {
+            if let Some(m) = self.find_at_with_search_anchor(text, idx, 0, cached) {
                 // Perfect match (0 cost) - return immediately
                 if m.edits.cost(1, 1, 1, 1) == 0 {
                     return Some(m);
@@ -1067,7 +1495,7 @@ impl<'a> Matcher<'a> {
         }
 
         // Try at end for empty patterns
-        if let Some(m) = self.find_at_with_cache(text, text.len(), cached) {
+        if let Some(m) = self.find_at_with_search_anchor(text, text.len(), 0, cached) {
             if m.edits.total() == 0 {
                 return Some(m);
             }
@@ -1104,7 +1532,7 @@ impl<'a> Matcher<'a> {
 
         // Try each starting position (overlapping)
         for (idx, _) in text.char_indices() {
-            if let Some(m) = self.find_at_with_cache(text, idx, fuzzy_cached.as_ref()) {
+            if let Some(m) = self.find_at_with_search_anchor(text, idx, 0, fuzzy_cached.as_ref()) {
                 if m.start != idx {
                     continue;
                 }
@@ -1211,13 +1639,15 @@ impl<'a> Matcher<'a> {
             // suffix that disagreed with find() and mrab, e.g. `(?:baab){e<3}$`
             // on "baab" gave (2,4) instead of the full (0,4).
             for &idx in positions.iter().rev() {
-                if let Some(ref fcc) = self.first_char_class {
+                if let Some(ref fcc) = self.first_char_class
+                    && !self.config.mrab_dfs
+                {
                     let ch = text[idx..].chars().next().unwrap();
                     if !fcc.matches(ch) {
                         continue;
                     }
                 }
-                if let Some(m) = self.find_at_with_cache(text, idx, cached.as_ref()) {
+                if let Some(m) = self.find_at_with_search_anchor(text, idx, 0, cached.as_ref()) {
                     matches.push(m);
                     break; // End-anchored pattern can only match once
                 }
@@ -1225,7 +1655,8 @@ impl<'a> Matcher<'a> {
 
             // Try at end position for patterns that match empty string at end
             if matches.is_empty()
-                && let Some(m) = self.find_at_with_cache(text, text.len(), cached.as_ref())
+                && let Some(m) =
+                    self.find_at_with_search_anchor(text, text.len(), 0, cached.as_ref())
             {
                 matches.push(m);
             }
@@ -1267,18 +1698,27 @@ impl<'a> Matcher<'a> {
 
         let mut pos = 0;
 
+        // mrab's `search_anchor` for the current search phase: the position the
+        // overall search started at. It stays fixed as the attempt advances
+        // (insertions remain forbidden only there), and each new phase begins
+        // right after a forward match -- mirroring mrab's per-search `init_match`.
+        let mut search_anchor = 0;
+
         while pos < text.len() && matches.len() < limit {
             // Get the character at the current position for quick rejection
             let ch = text[pos..].chars().next();
 
-            // Quick reject: if first_char_class is set and doesn't match, skip
+            // Quick reject: if first_char_class is set and doesn't match, skip.
+            // Disabled in mrab mode: a non-anchor position can start a match
+            // via an in-body insertion even with an out-of-class first char.
             let should_try = match (&self.first_char_class, ch) {
-                (Some(fcc), Some(c)) => fcc.matches(c),
+                (Some(fcc), Some(c)) => self.config.mrab_dfs || fcc.matches(c),
                 _ => true, // No first_char_class or at end, try anyway
             };
 
             if should_try {
-                let result = self.find_at_with_cache(text, pos, cached.as_ref());
+                let result =
+                    self.find_at_with_search_anchor(text, pos, search_anchor, cached.as_ref());
                 if let Some(m) = result {
                     let end = m.end;
                     matches.push(m);
@@ -1288,6 +1728,7 @@ impl<'a> Matcher<'a> {
                     // land inside a multi-byte UTF-8 char and panic).
                     if end > pos {
                         pos = end;
+                        search_anchor = end;
                         continue;
                     }
                 }
@@ -1303,7 +1744,8 @@ impl<'a> Matcher<'a> {
         // Try at end for empty patterns (only if no first_char_class restriction)
         if matches.len() < limit
             && self.first_char_class.is_none()
-            && let Some(m) = self.find_at_with_cache(text, text.len(), cached.as_ref())
+            && let Some(m) =
+                self.find_at_with_search_anchor(text, text.len(), search_anchor, cached.as_ref())
         {
             matches.push(m);
         }
@@ -1348,6 +1790,7 @@ impl<'a> Matcher<'a> {
 
         let mut pos = 0;
         let mut lit_idx = 0;
+        let mut search_anchor = 0;
 
         while pos < text.len() && matches.len() < limit {
             let next_lit_pos = literal_positions
@@ -1370,13 +1813,18 @@ impl<'a> Matcher<'a> {
             // Get the character at the current position for quick rejection
             let ch = text[pos..].chars().next();
 
-            // Quick reject: if first_char_class is set and doesn't match, skip
+            // Quick reject: if first_char_class is set and doesn't match, skip.
+            // Disabled in mrab mode: a non-anchor position can start a match
+            // via an in-body insertion even with an out-of-class first char.
             let should_try = match (&self.first_char_class, ch) {
-                (Some(fcc), Some(c)) => fcc.matches(c),
+                (Some(fcc), Some(c)) => self.config.mrab_dfs || fcc.matches(c),
                 _ => true,
             };
 
-            if should_try && let Some(m) = self.find_at_with_cache(text, pos, Some(cached)) {
+            if should_try
+                && let Some(m) =
+                    self.find_at_with_search_anchor(text, pos, search_anchor, Some(cached))
+            {
                 let end = m.end;
                 matches.push(m);
                 // For a forward match jump to its end; a zero-width match falls
@@ -1384,6 +1832,7 @@ impl<'a> Matcher<'a> {
                 // could land inside a multi-byte UTF-8 char and panic).
                 if end > pos {
                     pos = end;
+                    search_anchor = end;
                     // Advance lit_idx past positions we've covered
                     while lit_idx < literal_positions.len() && literal_positions[lit_idx] < pos {
                         lit_idx += 1;
@@ -1433,9 +1882,32 @@ impl<'a> Matcher<'a> {
         thread.edits.cost(1, 1, 1, 1)
     }
 
-    /// Whether every fuzzy group with a `min_edits` lower bound has already
-    /// accumulated at least that many core edits. Threads that haven't yet met
-    /// their group minimums are deduped separately from those that have: both
+    /// Whether the edits a thread has already accumulated inside `group_id`
+    /// satisfy that group's `min_edits` (always true when the group has no
+    /// minimum or the atom is not in a group). mrab checks the fuzzy body's
+    /// counts at `END_FUZZY` *before* posting the trailing-insertion retry, so
+    /// a zero-width body (`(?:b*){i<=1}$`, `(?:c?){i<=2}$`) may absorb the
+    /// following text as insertions only when its minimum is already met:
+    /// `(?:b*){1<=i<=1}$` on "d" is None, not (0,1).
+    #[must_use]
+    fn group_min_met(&self, thread: &Thread, group_id: Option<usize>) -> bool {
+        let Some(gid) = group_id else {
+            return true;
+        };
+        match self.fuzzy_group_mins.get(gid) {
+            None | Some(None) => true,
+            Some(Some(m)) => thread
+                .group_edits
+                .get(gid)
+                .is_none_or(|e| m.met_by_counts(e)),
+        }
+    }
+
+    /// Whether every fuzzy group with a `min_edits` lower bound that this
+    /// thread has *entered* has already accumulated at least that many core
+    /// edits. Unentered groups impose no constraint (`a|(?:l){1<=s<=1}` may
+    /// match via the exact `a` branch). Threads that haven't yet met their
+    /// entered group minimums are deduped separately from those that have: both
     /// remain viable (the minimum may be satisfied by later atoms), so one must
     /// not evict the other at the same (state, pos).
     #[must_use]
@@ -1445,7 +1917,14 @@ impl<'a> Matcher<'a> {
             .enumerate()
             .all(|(id, min)| match min {
                 None => true,
-                Some(m) => thread.group_edits.get(id).is_none_or(|e| e.total() >= *m),
+                Some(m) => {
+                    let entered = thread.group_visited.get(id).copied().unwrap_or(false);
+                    !entered
+                        || thread
+                            .group_edits
+                            .get(id)
+                            .is_none_or(|e| m.met_by_counts(e))
+                }
             })
     }
 
@@ -1464,8 +1943,45 @@ impl<'a> Matcher<'a> {
     }
 
     /// Try to find a match starting at a specific position using cached fuzzy matches.
+    ///
+    /// The mrab insertion rule treats the *attempt* position as the search
+    /// anchor (`search_anchor`), so in-body insertions are forbidden exactly at
+    /// `start`. The unanchored scan in `find` instead uses
+    /// [`Self::find_at_with_search_anchor`] so insertions stay forbidden only at
+    /// the overall search start (mrab initialises `search_anchor` once, to the
+    /// initial text position, and never resets it as the search advances).
     #[must_use]
     pub fn find_at_with_cache(
+        &self,
+        text: &str,
+        start: usize,
+        cached: Option<&CachedMatches>,
+    ) -> Option<MatchResult> {
+        self.find_at_with_search_anchor(text, start, start, cached)
+    }
+
+    /// Like [`Self::find_at_with_cache`], but reports `search_start` (the
+    /// initial position of the overall unanchored search) as the mrab search
+    /// anchor instead of the per-attempt `start`. In non-mrab mode the two
+    /// coincide, so this just forwards.
+    #[must_use]
+    fn find_at_with_search_anchor(
+        &self,
+        text: &str,
+        start: usize,
+        search_start: usize,
+        cached: Option<&CachedMatches>,
+    ) -> Option<MatchResult> {
+        if self.config.mrab_dfs {
+            return self.find_at_mrab(text, start, search_start);
+        }
+        self.find_at_with_cache_plain(text, start, cached)
+    }
+
+    /// The non-mrab (beam) single-position search; `search_anchor` is the
+    /// attempt position itself.
+    #[must_use]
+    fn find_at_with_cache_plain(
         &self,
         text: &str,
         start: usize,
@@ -1483,6 +1999,8 @@ impl<'a> Matcher<'a> {
             edits: EditCounts::default(),
             handler_overrides: Vec::new(),
             group_edits: vec![EditCounts::default(); group_count],
+            group_visited: vec![false; group_count],
+            path: Vec::new(),
         }];
 
         let mut best_match: Option<MatchResult> = None;
@@ -1513,10 +2031,11 @@ impl<'a> Matcher<'a> {
             for thread in threads {
                 self.step_thread_with_cache(
                     text,
-                    start,
+                    self.insertion_anchor(start),
                     thread,
                     &mut next_threads,
                     &mut best_match,
+                    None,
                     cached,
                 );
             }
@@ -1585,36 +2104,165 @@ impl<'a> Matcher<'a> {
         best_match
     }
 
+    /// mrab-compat search from a fixed start: explores every continuation of
+    /// the pattern but keeps, per `(state, pos, mins_met)`, the Pareto frontier
+    /// over (decision path, edit counts), so both the lexicographically-first
+    /// alignment (which mrab's DFS prefers) and the cheapest one (which keeps a
+    /// match alive when the preferred alignment exhausts the edit budget) are
+    /// preserved. The returned match is the one mrab would find: leftmost start
+    /// (guaranteed by the caller scanning starts in order) with the minimal
+    /// decision sequence.
+    ///
+    /// `search_start` is the initial position of the overall unanchored search;
+    /// mrab initialises its `search_anchor` to that once and in-body insertions
+    /// stay forbidden at it even as the match attempt advances.
+    #[must_use]
+    fn find_at_mrab(&self, text: &str, start: usize, search_start: usize) -> Option<MatchResult> {
+        use super::hash::FxHashMap;
+
+        let insertion_anchor = self.insertion_anchor(search_start);
+
+        let group_count = self.fuzzy_group_budgets.len();
+        let mut threads = vec![Thread {
+            state: self.nfa.start,
+            pos: start,
+            match_start: start,
+            captures: CaptureState::new(self.capture_count),
+            similarity: 1.0,
+            edits: EditCounts::default(),
+            handler_overrides: Vec::new(),
+            group_edits: vec![EditCounts::default(); group_count],
+            group_visited: vec![false; group_count],
+            path: Vec::new(),
+        }];
+
+        let mut best_match: Option<MatchResult> = None;
+        let mut best_path: Option<Vec<u8>> = None;
+
+        // Persistent Pareto frontier per (state, pos, mins_met): a thread is
+        // admitted (and kept for later batches) only if no admitted thread has
+        // both a lexicographically-smaller path and componentwise-no-larger edit
+        // counts; the same check then removes frontier entries the new thread
+        // dominates. This preserves match-existence (the cheaper thread survives
+        // budget-exhaustion cases) while preferring mrab's DFS-first alignment
+        // (the lex-smaller thread) whenever both complete.
+        let mut frontier: MrabFrontier = FxHashMap::default();
+
+        while !threads.is_empty() {
+            let mut next_threads = Vec::new();
+
+            for thread in threads {
+                self.step_thread_with_cache(
+                    text,
+                    insertion_anchor,
+                    thread,
+                    &mut next_threads,
+                    &mut best_match,
+                    Some(&mut best_path),
+                    None,
+                );
+            }
+
+            let mut admitted: Vec<usize> = Vec::new();
+            for (idx, thread) in next_threads.iter().enumerate() {
+                let key = (thread.state, thread.pos, self.mins_met(thread));
+                let dominated = frontier.get(&key).is_some_and(|entries| {
+                    entries
+                        .iter()
+                        .any(|(p, e)| mrab_dominates(p, e, &thread.path, &thread.edits))
+                });
+                if dominated {
+                    continue;
+                }
+                let entry = frontier.entry(key).or_default();
+                entry.retain(|(p, e)| !mrab_dominates(&thread.path, &thread.edits, p, e));
+                entry.push((thread.path.clone(), thread.edits.clone()));
+                admitted.push(idx);
+            }
+            admitted.sort_unstable();
+
+            // Move (not clone) the surviving threads into the next batch,
+            // preserving the earliest-first order.
+            let mut ai = 0;
+            let mut deduped = Vec::with_capacity(admitted.len());
+            for (i, thread) in next_threads.drain(..).enumerate() {
+                if ai < admitted.len() && admitted[ai] == i {
+                    deduped.push(thread);
+                    ai += 1;
+                }
+            }
+            next_threads = deduped;
+
+            // Prune threads if too many, keeping the DFS (path) order rather
+            // than similarity — truncation must not reorder selection.
+            if next_threads.len() > self.config.max_threads {
+                next_threads.sort_by(|a, b| a.path.cmp(&b.path));
+                next_threads.truncate(self.config.max_threads);
+            }
+
+            threads = next_threads;
+        }
+
+        best_match
+    }
+
+    /// The position at which mrab's `permit_insertion` forbids in-body
+    /// insertions: the initial search position of an unanchored search
+    /// (`search` is true in mrab). A `^`-anchored non-multiline pattern runs
+    /// with `search` false (mrab's `RE_OP_START_OF_STRING`), so insertions are
+    /// allowed even at the anchor (`^(?:c){i<=1}$` on "Xc" matches at (0,2)).
+    /// The engine's `config.unanchored` is false exactly for those anchored
+    /// patterns, and true for multiline / unanchored ones (which match mrab's
+    /// per-line `search` state), so it is the right proxy for the anchor rule.
+    #[must_use]
+    fn insertion_anchor(&self, start: usize) -> Option<usize> {
+        if self.config.unanchored {
+            Some(start)
+        } else {
+            None
+        }
+    }
+
     /// Process a single thread for one step, using cached fuzzy matches.
+    #[allow(clippy::too_many_arguments)]
     fn step_thread_with_cache(
         &self,
         text: &str,
-        _start: usize,
+        insertion_anchor: Option<usize>,
         thread: Thread,
         next_threads: &mut Vec<Thread>,
         best_match: &mut Option<MatchResult>,
+        best_path: Option<&mut Option<Vec<u8>>>,
         cached: Option<&CachedMatches>,
     ) {
         let state = &self.nfa.states[thread.state];
 
         match state {
             State::Accept => {
-                // Enforce per-group `min_edits` lower bounds: a fuzzy group must
-                // have accumulated at least its minimum core edits by the time
-                // the pattern accepts. Trailing-padding insertions are not part
-                // of `group_edits` (see the FuzzyChar handler), so a zero-edit
-                // exact group match is rejected, matching mrab's `{1<=e<=N}`.
-                let group_min_ok = self
-                    .fuzzy_group_mins
-                    .iter()
-                    .enumerate()
-                    .all(|(id, min)|                     match min {
-                        None => true,
-                        Some(m) => thread
-                            .group_edits
-                            .get(id)
-                            .is_none_or(|e| e.total() >= *m),
-                    });
+                // Enforce per-group `min_edits` lower bounds: a fuzzy group the
+                // thread entered must have accumulated at least its minimum core
+                // edits by the time the pattern accepts. Trailing-padding
+                // insertions are not part of `group_edits` (see the FuzzyChar
+                // handler), so a zero-edit exact group match is rejected,
+                // matching mrab's `{1<=e<=N}`. Groups the thread never entered
+                // (e.g. a sibling alternative) are exempt — in mrab
+                // `a|(?:l){1<=s<=1}` matches "a" exactly with s=0.
+                let group_min_ok =
+                    self.fuzzy_group_mins
+                        .iter()
+                        .enumerate()
+                        .all(|(id, min)| match min {
+                            None => true,
+                            Some(m) => {
+                                let entered =
+                                    thread.group_visited.get(id).copied().unwrap_or(false);
+                                !entered
+                                    || thread
+                                        .group_edits
+                                        .get(id)
+                                        .is_none_or(|e| m.met_by_counts(e))
+                            }
+                        });
                 if !group_min_ok {
                     return;
                 }
@@ -1658,7 +2306,22 @@ impl<'a> Matcher<'a> {
                     });
                 let is_simple_alt = has_alternation && !has_fuzzy;
                 let is_special_mode = self.config.best_match || self.config.enhance_match;
-                if best_match.as_ref().is_none_or(|best| {
+                // In mrab mode the winner is the leftmost match whose decision
+                // sequence is lexicographically minimal — the first complete
+                // match of mrab's greedy DFS at this start position. The
+                // `best_path` side-channel carries the winning thread's path.
+                if let Some(best_path) = best_path {
+                    if best_match.as_ref().is_none_or(|best| {
+                        m.start < best.start
+                            || (m.start == best.start
+                                && best_path
+                                    .as_deref()
+                                    .is_none_or(|bp| thread.path.as_slice() < bp))
+                    }) {
+                        *best_path = Some(thread.path.clone());
+                        *best_match = Some(m);
+                    }
+                } else if best_match.as_ref().is_none_or(|best| {
                     // Earlier start wins
                     m.start < best.start
                         // At same start:
@@ -1721,20 +2384,42 @@ impl<'a> Matcher<'a> {
                 }
             }
 
+            State::GroupEntry { group_id, next } => {
+                next_threads.push(Thread {
+                    state: *next,
+                    group_visited: mark_group_visited(
+                        thread.group_visited.clone(),
+                        Some(*group_id),
+                    ),
+                    ..thread.clone()
+                });
+            }
+
             State::Split { branches, greedy } => {
                 // For greedy: try branches in order (first branch is match/continue)
                 // For non-greedy: try branches in reverse order (last branch is exit/skip)
+                let mrab = self.config.mrab_dfs;
                 if *greedy {
-                    for &branch in branches {
+                    for (bi, &branch) in branches.iter().enumerate() {
                         next_threads.push(Thread {
                             state: branch,
+                            path: if mrab {
+                                mrab_path_extend(&thread.path, &[bi as u8])
+                            } else {
+                                Vec::new()
+                            },
                             ..thread.clone()
                         });
                     }
                 } else {
-                    for &branch in branches.iter().rev() {
+                    for (bi, &branch) in branches.iter().rev().enumerate() {
                         next_threads.push(Thread {
                             state: branch,
+                            path: if mrab {
+                                mrab_path_extend(&thread.path, &[bi as u8])
+                            } else {
+                                Vec::new()
+                            },
                             ..thread.clone()
                         });
                     }
@@ -1805,7 +2490,7 @@ impl<'a> Matcher<'a> {
                     1.0
                 };
 
-                let has_min = min_edits.is_some_and(|m| m > 0);
+                let mrab = self.config.mrab_dfs;
 
                 // Emit a completed class-char match advancing to `next` at
                 // `base_pos`, then also emit "trailing insertion" variants that
@@ -1814,15 +2499,21 @@ impl<'a> Matcher<'a> {
                 // a fuzzy class match extra characters on either side, e.g.
                 // `^(?:[cd]){i<=1}$` matching "dz" (trailing) or "zd" (leading).
                 let push_match_and_trailing =
-                     |next_threads: &mut Vec<Thread>,
+                    |next_threads: &mut Vec<Thread>,
                      base_pos: usize,
                      base_edits: EditCounts,
-                     base_sim: f32| {
+                     base_sim: f32,
+                     tok: u8| {
                         let base_delta = EditCounts {
                             insertions: base_edits.insertions - thread.edits.insertions,
                             deletions: base_edits.deletions - thread.edits.deletions,
                             substitutions: base_edits.substitutions - thread.edits.substitutions,
                             swaps: base_edits.swaps - thread.edits.swaps,
+                        };
+                        let base_path = if mrab {
+                            mrab_path_extend(&thread.path, &[tok])
+                        } else {
+                            Vec::new()
                         };
                         if check_group_budget(
                             &thread.group_edits,
@@ -1843,73 +2534,97 @@ impl<'a> Matcher<'a> {
                                     *fuzzy_group_id,
                                     &base_delta,
                                 ),
+                                group_visited: mark_group_visited(
+                                    thread.group_visited.clone(),
+                                    *fuzzy_group_id,
+                                ),
+                                path: base_path.clone(),
                             });
                         }
                         let mut tpos = base_pos;
                         let mut edits = base_edits;
                         let mut extra_insertions: u8 = 0;
                         let mut sim = base_sim;
-                        // mrab: trailing insertions from single-char fuzzy
-                        // classes are suppressed for min-edit groups when the
-                        // base match is exact (0 core edits) AND the group has
-                        // not accumulated any edits yet. Once an edit has been
-                        // spent anywhere in the group (e.g. a leading insertion
-                        // consumed by the self-loop below), a later exact match
-                        // may be extended by trailing insertions again —
-                        // `(?:[ab]){1<=e<=2}$` on "Xab" inserts "X" before and
-                        // "b" after the exact "a", while "abX" stays a miss.
-                        // Multi-char trailing insertions are handled by the
-                        // FuzzyLiteral handler instead.
-                        let group_has_edits = fuzzy_group_id
-                            .and_then(|id| thread.group_edits.get(id))
-                            .is_some_and(|e| e.total() > 0);
-                        let suppress_trailing = has_min
-                            && base_delta.total() == 0
-                            && !group_has_edits;
+                        // mrab: the group-end trailing insertion fires only when
+                        // the body's own counts (plus anything already spent in
+                        // the group) meet the fuzzy minimums. A body that matched
+                        // below its minimum cannot be rescued by trailing text:
+                        // `\d{2<=e<=3}` on "kl" rejects sub+trailing (0,2,(1,1,0))
+                        // and instead matches (1,2,(0,1,1)) via in-body del+ins.
+                        // `(?:[ab]){1<=e<=2}$` on "abX" stays a miss while
+                        // "Xab" (leading insertion already spent) allows trailing
+                        // insertions again.
+                        let min_ok = match (min_edits, fuzzy_group_id) {
+                            (Some(m), None) => m.met_by_counts(&base_delta),
+                            (Some(m), Some(gid)) => {
+                                let acc = thread.group_edits.get(*gid).cloned().unwrap_or_default();
+                                let total = EditCounts {
+                                    insertions: acc.insertions + base_delta.insertions,
+                                    deletions: acc.deletions + base_delta.deletions,
+                                    substitutions: acc.substitutions + base_delta.substitutions,
+                                    swaps: acc.swaps + base_delta.swaps,
+                                };
+                                m.met_by_counts(&total)
+                            }
+                            _ => true,
+                        };
+                        let suppress_trailing = !min_ok;
                         if !suppress_trailing {
                             while edits.total() < max_edits
-                            && edits.insertions < max_insertions
-                            && tpos < text.len()
-                        {
-                            let Some(tch) = text[tpos..].chars().next() else {
-                                break;
-                            };
-                            if !edit_allows(tch) {
-                                break;
-                            }
-                            extra_insertions += 1;
-                            let acc_delta = EditCounts {
-                                insertions: base_delta.insertions + extra_insertions,
-                                deletions: base_delta.deletions,
-                                substitutions: base_delta.substitutions,
-                                swaps: base_delta.swaps,
-                            };
-                            if !check_group_budget(
-                                &thread.group_edits,
-                                *fuzzy_group_id,
-                                &acc_delta,
-                                &self.fuzzy_group_budgets,
-                            ) {
-                                break;
-                            }
-                            tpos += tch.len_utf8();
-                            edits.insertions += 1;
-                            sim *= 1.0 - edit_penalty;
-                            next_threads.push(Thread {
-                                state: *next,
-                                pos: tpos,
-                                similarity: sim,
-                                edits: edits.clone(),
-                                captures: thread.captures.clone(),
-                                match_start: thread.match_start,
-                                handler_overrides: thread.handler_overrides.clone(),
-                                group_edits: apply_group_edits(
-                                    thread.group_edits.clone(),
+                                && edits.insertions < max_insertions
+                                && tpos < text.len()
+                            {
+                                let Some(tch) = text[tpos..].chars().next() else {
+                                    break;
+                                };
+                                if !edit_allows(tch) {
+                                    break;
+                                }
+                                extra_insertions += 1;
+                                let acc_delta = EditCounts {
+                                    insertions: base_delta.insertions + extra_insertions,
+                                    deletions: base_delta.deletions,
+                                    substitutions: base_delta.substitutions,
+                                    swaps: base_delta.swaps,
+                                };
+                                if !check_group_budget(
+                                    &thread.group_edits,
                                     *fuzzy_group_id,
                                     &acc_delta,
-                                ),
-                            });
-                        }
+                                    &self.fuzzy_group_budgets,
+                                ) {
+                                    break;
+                                }
+                                tpos += tch.len_utf8();
+                                edits.insertions += 1;
+                                sim *= 1.0 - edit_penalty;
+                                let path = if mrab {
+                                    let mut p = base_path.clone();
+                                    p.resize(p.len() + usize::from(extra_insertions), TOK_INS);
+                                    p
+                                } else {
+                                    Vec::new()
+                                };
+                                next_threads.push(Thread {
+                                    state: *next,
+                                    pos: tpos,
+                                    similarity: sim,
+                                    edits: edits.clone(),
+                                    captures: thread.captures.clone(),
+                                    match_start: thread.match_start,
+                                    handler_overrides: thread.handler_overrides.clone(),
+                                    group_edits: apply_group_edits(
+                                        thread.group_edits.clone(),
+                                        *fuzzy_group_id,
+                                        &acc_delta,
+                                    ),
+                                    group_visited: mark_group_visited(
+                                        thread.group_visited.clone(),
+                                        *fuzzy_group_id,
+                                    ),
+                                    path,
+                                });
+                            }
                         }
                     };
 
@@ -1924,6 +2639,7 @@ impl<'a> Matcher<'a> {
                             thread.pos + ch.len_utf8(),
                             thread.edits.clone(),
                             thread.similarity,
+                            TOK_EXACT,
                         );
                     } else if current_edits < max_edits
                         && thread.edits.substitutions < max_substitutions
@@ -1948,6 +2664,7 @@ impl<'a> Matcher<'a> {
                                 thread.pos + ch.len_utf8(),
                                 new_edits,
                                 thread.similarity * (1.0 - edit_penalty),
+                                TOK_SUB,
                             );
                         }
                     }
@@ -1980,6 +2697,15 @@ impl<'a> Matcher<'a> {
                                 *fuzzy_group_id,
                                 &del_edit,
                             ),
+                            group_visited: mark_group_visited(
+                                thread.group_visited.clone(),
+                                *fuzzy_group_id,
+                            ),
+                            path: if mrab {
+                                mrab_path_extend(&thread.path, &[TOK_DEL])
+                            } else {
+                                Vec::new()
+                            },
                             ..thread.clone()
                         });
                     }
@@ -1987,8 +2713,13 @@ impl<'a> Matcher<'a> {
 
                 // 3. Try leading insertion (consume an extra text char before the
                 // class char). Self-loop on this FuzzyChar state; the (state, pos)
-                // dedup in the driver keeps it terminating.
+                // dedup in the driver keeps it terminating. In mrab mode this is
+                // further gated on not being at the search anchor: an insertion at
+                // the position where the search started is forbidden (mrab's
+                // `permit_insertion`), so `(?:ab){i<=1}` on "xab" starts at 1
+                // rather than inserting "x" at 0.
                 if !current_matches
+                    && (!mrab || insertion_anchor.is_none_or(|a| thread.pos != a))
                     && thread.pos < text.len()
                     && current_edits < max_edits
                     && thread.edits.insertions < max_insertions
@@ -2020,6 +2751,15 @@ impl<'a> Matcher<'a> {
                                 *fuzzy_group_id,
                                 &ins_edit,
                             ),
+                            group_visited: mark_group_visited(
+                                thread.group_visited.clone(),
+                                *fuzzy_group_id,
+                            ),
+                            path: if mrab {
+                                mrab_path_extend(&thread.path, &[TOK_INS])
+                            } else {
+                                Vec::new()
+                            },
                         });
                     }
                 }
@@ -2041,6 +2781,7 @@ impl<'a> Matcher<'a> {
                     && current_edits < max_edits
                     && thread.edits.insertions < max_insertions
                     && !self.next_consumes_beyond(*next, thread.state)
+                    && self.group_min_met(&thread, *fuzzy_group_id)
                 {
                     let mut pos = thread.pos;
                     let mut added: u8 = 0;
@@ -2072,6 +2813,13 @@ impl<'a> Matcher<'a> {
                         added += 1;
                         edits.insertions += 1;
                         sim *= 1.0 - edit_penalty;
+                        let path = if mrab {
+                            let mut p = thread.path.clone();
+                            p.resize(p.len() + usize::from(added), TOK_INS);
+                            p
+                        } else {
+                            Vec::new()
+                        };
                         next_threads.push(Thread {
                             state: *next,
                             pos,
@@ -2085,6 +2833,11 @@ impl<'a> Matcher<'a> {
                                 *fuzzy_group_id,
                                 &ins_edit,
                             ),
+                            group_visited: mark_group_visited(
+                                thread.group_visited.clone(),
+                                *fuzzy_group_id,
+                            ),
+                            path,
                         });
                     }
                 }
@@ -2097,6 +2850,7 @@ impl<'a> Matcher<'a> {
                 min_edits,
                 cost_constraint,
                 fuzzy_group_id,
+                repeat_fold,
             } => {
                 if let Some(bridge) = self.fuzzy_bridge {
                     // Fast path for exact matching (no fuzzy edits)
@@ -2113,32 +2867,250 @@ impl<'a> Matcher<'a> {
 
                     if max_edits.is_none() || max_edits == Some(0) {
                         // Exact match fast path - direct string comparison
-                        if let Some(pattern_text) = bridge.pattern_text(*pattern_index)
-                            && thread.pos + pattern_text.len() <= text.len()
-                            && text[thread.pos..].starts_with(pattern_text)
-                        {
-                            let new_end = thread.pos + pattern_text.len();
-                            // Only accept if we consume at least one character
-                            if new_end > thread.pos
-                                && check_group_budget(
-                                    &thread.group_edits,
-                                    *fuzzy_group_id,
-                                    &EditCounts::default(),
-                                    &self.fuzzy_group_budgets,
+                        if let Some(pattern_text) = bridge.pattern_text(*pattern_index) {
+                            let fits = thread.pos + pattern_text.len() <= text.len();
+                            // Case-insensitive (`n` / `(?i)`) must fold before
+                            // comparing: `(?:world)~0` on "WoRlD" is an exact
+                            // match even though the bytes differ.
+                            let eq = if bridge.is_case_insensitive() {
+                                text[thread.pos..].chars().zip(pattern_text.chars()).all(
+                                    |(tc, pc)| {
+                                        pc.to_lowercase().next().unwrap_or(pc)
+                                            == tc.to_lowercase().next().unwrap_or(tc)
+                                    },
                                 )
-                            {
-                                next_threads.push(Thread {
-                                    state: *next,
-                                    pos: new_end,
-                                    similarity: thread.similarity,
-                                    edits: thread.edits.clone(),
-                                    captures: thread.captures.clone(),
-                                    group_edits: thread.group_edits.clone(),
-                                    ..thread
-                                });
+                            } else {
+                                text[thread.pos..].starts_with(pattern_text)
+                            };
+                            if fits && eq {
+                                let new_end = thread.pos + pattern_text.len();
+                                // Only accept if we consume at least one character
+                                if new_end > thread.pos
+                                    && check_group_budget(
+                                        &thread.group_edits,
+                                        *fuzzy_group_id,
+                                        &EditCounts::default(),
+                                        &self.fuzzy_group_budgets,
+                                    )
+                                {
+                                    next_threads.push(Thread {
+                                        state: *next,
+                                        pos: new_end,
+                                        similarity: thread.similarity,
+                                        edits: thread.edits.clone(),
+                                        captures: thread.captures.clone(),
+                                        group_edits: thread.group_edits.clone(),
+                                        ..thread
+                                    });
+                                }
                             }
                         }
                         // Skip the full fuzzy matching path for exact patterns
+                    } else if self.config.mrab_dfs {
+                        // mrab-compatible literal handling: enumerate every
+                        // alignment of the literal in mrab's greedy-DFS order
+                        // and emit each as a thread, instead of going through
+                        // the bridge automata. This matches mrab's exact-commit
+                        // (an exact character allows no sub/ins/del alternatives),
+                        // its search-anchor insertion rule, and its trailing
+                        // insertion retries; the per-alignment `path` lets the
+                        // frontier pick mrab's first (lex-minimal) alignment.
+                        let Some(pattern_text) = bridge.pattern_text(*pattern_index) else {
+                            return;
+                        };
+                        let max_e = max_edits.unwrap_or(u8::MAX);
+                        let max_insertions = limits
+                            .as_ref()
+                            .and_then(FuzzyLimits::get_insertions)
+                            .unwrap_or(max_e);
+                        let max_deletions = limits
+                            .as_ref()
+                            .and_then(FuzzyLimits::get_deletions)
+                            .unwrap_or(max_e);
+                        let max_substitutions = limits
+                            .as_ref()
+                            .and_then(FuzzyLimits::get_substitutions)
+                            .unwrap_or(max_e);
+                        let literal_chars = pattern_text.chars().count();
+                        // mrab posts a trailing-insertion alternative only for
+                        // plain string literals (multi-char, not from a
+                        // repeat-fold): `(?:bb)` can absorb trailing text even
+                        // when its exact match is below the min, but `(?:b{2})`
+                        // (per-char repeat) and single chars cannot.
+                        let allow_below_min_trailing = literal_chars >= 2 && !repeat_fold;
+                        let alignments = mrab_literal_alignments(
+                            pattern_text,
+                            text,
+                            thread.pos,
+                            insertion_anchor,
+                            (max_e, max_insertions, max_deletions, max_substitutions),
+                            bridge.edit_char_restriction(*pattern_index),
+                            bridge.is_case_insensitive(),
+                            *min_edits,
+                            allow_below_min_trailing,
+                        );
+
+                        if alignments.is_empty() {
+                            // No alignment within budget: the literal cannot
+                            // match here. But a fuzzy literal on a repetition
+                            // loop (`(?:b*){i<=1}$`) may match empty, in which
+                            // case mrab absorbs the following text as pure
+                            // insertions (`(?:b*){i<=1}$` on "d" -> (0,1)).
+                            let optional_loop = self
+                                .fuzzy_zero_width_states
+                                .get(thread.state)
+                                .copied()
+                                .unwrap_or(false);
+                            let max_ins = limits.as_ref().map_or(0u8, |l| {
+                                l.get_insertions().or_else(|| l.get_edits()).unwrap_or(0)
+                            });
+                            let max_e = max_edits.unwrap_or(0);
+                            if optional_loop
+                                && thread.pos < text.len()
+                                && thread.edits.insertions < max_ins
+                                && thread.edits.total() < max_e
+                                && !self.next_consumes_beyond(*next, thread.state)
+                                && self.group_min_met(&thread, *fuzzy_group_id)
+                            {
+                                let edit_penalty = 1.0 / (f32::from(max_e) + 1.0);
+                                let mut pos = thread.pos;
+                                let mut added: u8 = 0;
+                                let mut sim = thread.similarity;
+                                let mut edits = thread.edits.clone();
+                                while thread.edits.insertions + added < max_ins
+                                    && edits.total() < max_e
+                                    && pos < text.len()
+                                {
+                                    let Some(ch) = text[pos..].chars().next() else {
+                                        break;
+                                    };
+                                    if bridge
+                                        .edit_char_restriction(*pattern_index)
+                                        .is_some_and(|r| !r.allows(ch))
+                                    {
+                                        break;
+                                    }
+                                    let delta = EditCounts {
+                                        insertions: added + 1,
+                                        ..EditCounts::default()
+                                    };
+                                    if !check_group_budget(
+                                        &thread.group_edits,
+                                        *fuzzy_group_id,
+                                        &delta,
+                                        &self.fuzzy_group_budgets,
+                                    ) {
+                                        break;
+                                    }
+                                    pos += ch.len_utf8();
+                                    added += 1;
+                                    edits.insertions += 1;
+                                    sim *= 1.0 - edit_penalty;
+                                    let min_ok = match (min_edits, fuzzy_group_id) {
+                                        (Some(min), None) => min.met_by(
+                                            edits.insertions,
+                                            edits.deletions,
+                                            edits.substitutions,
+                                            edits.swaps,
+                                        ),
+                                        _ => true,
+                                    };
+                                    let cost_ok =
+                                        cost_constraint.as_ref().is_none_or(|constraint| {
+                                            constraint.is_satisfied(added, 0, 0, 0)
+                                        });
+                                    if !(min_ok && cost_ok) {
+                                        continue;
+                                    }
+                                    let result_edits = edits.clone();
+                                    next_threads.push(Thread {
+                                        state: *next,
+                                        pos,
+                                        similarity: sim,
+                                        edits: thread.edits.merge(&result_edits),
+                                        captures: thread.captures.clone(),
+                                        match_start: thread.match_start,
+                                        handler_overrides: thread.handler_overrides.clone(),
+                                        group_edits: apply_group_edits(
+                                            thread.group_edits.clone(),
+                                            *fuzzy_group_id,
+                                            &delta,
+                                        ),
+                                        group_visited: mark_group_visited(
+                                            thread.group_visited.clone(),
+                                            *fuzzy_group_id,
+                                        ),
+                                        path: {
+                                            let mut p = thread.path.clone();
+                                            p.resize(p.len() + usize::from(added), TOK_INS);
+                                            p
+                                        },
+                                    });
+                                }
+                            }
+                            return;
+                        }
+
+                        for alignment in &alignments {
+                            let edits = EditCounts {
+                                insertions: alignment.insertions,
+                                deletions: alignment.deletions,
+                                substitutions: alignment.substitutions,
+                                swaps: alignment.swaps,
+                            };
+                            let meets_min = match (min_edits, fuzzy_group_id) {
+                                (Some(min), None) => min.met_by(
+                                    edits.insertions,
+                                    edits.deletions,
+                                    edits.substitutions,
+                                    edits.swaps,
+                                ),
+                                _ => true,
+                            };
+                            let meets_cost = cost_constraint.as_ref().is_none_or(|constraint| {
+                                constraint.is_satisfied(
+                                    alignment.insertions,
+                                    alignment.deletions,
+                                    alignment.substitutions,
+                                    alignment.swaps,
+                                )
+                            });
+                            if !meets_min || !meets_cost {
+                                continue;
+                            }
+                            // Zero-width whole-literal deletions
+                            // (`ab(?:c){d<=1}` on "ab") are allowed; anything
+                            // ending before the start would be malformed.
+                            if alignment.end < thread.pos {
+                                continue;
+                            }
+                            if check_group_budget(
+                                &thread.group_edits,
+                                *fuzzy_group_id,
+                                &edits,
+                                &self.fuzzy_group_budgets,
+                            ) {
+                                next_threads.push(Thread {
+                                    state: *next,
+                                    pos: alignment.end,
+                                    similarity: thread.similarity * alignment.similarity,
+                                    edits: thread.edits.merge(&edits),
+                                    captures: thread.captures.clone(),
+                                    match_start: thread.match_start,
+                                    handler_overrides: thread.handler_overrides.clone(),
+                                    group_edits: apply_group_edits(
+                                        thread.group_edits.clone(),
+                                        *fuzzy_group_id,
+                                        &edits,
+                                    ),
+                                    group_visited: mark_group_visited(
+                                        thread.group_visited.clone(),
+                                        *fuzzy_group_id,
+                                    ),
+                                    path: mrab_path_extend(&thread.path, &alignment.path),
+                                });
+                            }
+                        }
                     } else {
                         let expected_end = self.find_expected_end(*next, text.len());
 
@@ -2152,7 +3124,12 @@ impl<'a> Matcher<'a> {
                         // the final `bc` piece).
                         let meets_min_edits = |result: &FuzzyMatchResult| -> bool {
                             match (min_edits, fuzzy_group_id) {
-                                (Some(min), None) => result.total_edits() >= *min,
+                                (Some(min), None) => min.met_by(
+                                    result.insertions,
+                                    result.deletions,
+                                    result.substitutions,
+                                    result.swaps,
+                                ),
                                 _ => true,
                             }
                         };
@@ -2226,7 +3203,10 @@ impl<'a> Matcher<'a> {
                                 *pattern_index,
                                 thread.pos,
                                 self.config.threshold,
-                            ) && !candidates.iter().any(|m| m.end == del.end && m.deletions == del.deletions)
+                            )
+                            && !candidates
+                                .iter()
+                                .any(|m| m.end == del.end && m.deletions == del.deletions)
                         {
                             candidates.push(del);
                         }
@@ -2239,9 +3219,10 @@ impl<'a> Matcher<'a> {
                         // (e.g. `(?:ab){1<=e<=2}` on "ab" -> no match). Only a
                         // >=2-char literal may extend an exact match with
                         // trailing insertions to reach the minimum.
-                        let has_min = min_edits.is_some_and(|m| m > 0);
-                        let literal_chars =
-                            bridge.pattern_text(*pattern_index).map(|t| t.chars().count());
+                        let has_min = min_edits.is_some_and(|m| !m.is_empty());
+                        let literal_chars = bridge
+                            .pattern_text(*pattern_index)
+                            .map(|t| t.chars().count());
                         let exact_exists =
                             has_min && candidates.iter().any(|c| c.total_edits() == 0);
 
@@ -2275,8 +3256,8 @@ impl<'a> Matcher<'a> {
                                         });
 
                                     if should_try_boundary
-                                        && let Some(boundary_result) =
-                                            bridge.find_with_boundary_insertions(
+                                        && let Some(boundary_result) = bridge
+                                            .find_with_boundary_insertions(
                                                 text,
                                                 *pattern_index,
                                                 thread.pos,
@@ -2302,14 +3283,17 @@ impl<'a> Matcher<'a> {
                                                 edits: thread.edits.merge(&match_edits),
                                                 captures: thread.captures.clone(),
                                                 match_start: thread.match_start,
-                                                handler_overrides: thread
-                                                    .handler_overrides
-                                                    .clone(),
+                                                handler_overrides: thread.handler_overrides.clone(),
                                                 group_edits: apply_group_edits(
                                                     thread.group_edits.clone(),
                                                     *fuzzy_group_id,
                                                     &match_edits,
                                                 ),
+                                                group_visited: mark_group_visited(
+                                                    thread.group_visited.clone(),
+                                                    *fuzzy_group_id,
+                                                ),
+                                                path: Vec::new(),
                                             });
                                         }
                                     }
@@ -2344,6 +3328,11 @@ impl<'a> Matcher<'a> {
                                                 *fuzzy_group_id,
                                                 &match_edits,
                                             ),
+                                            group_visited: mark_group_visited(
+                                                thread.group_visited.clone(),
+                                                *fuzzy_group_id,
+                                            ),
+                                            path: Vec::new(),
                                         });
                                     }
                                 }
@@ -2363,20 +3352,16 @@ impl<'a> Matcher<'a> {
                                 // string pushes one even on an exact match, so
                                 // `^(?:baaa){1<=e<=2}` on "baaac" matches by
                                 // inserting past the end of the pattern.
-                                let suppress_trailing = has_min
-                                    && exact_exists
-                                    && literal_chars.is_some_and(|l| l < 2);
+                                let suppress_trailing =
+                                    has_min && exact_exists && literal_chars.is_some_and(|l| l < 2);
                                 if ci == 0
                                     && expected_end.is_none()
                                     && !suppress_trailing
                                     && (self.next_consumes_or_asserts(*next)
-                                        || (has_min
-                                            && literal_chars.is_some_and(|l| l >= 2)))
+                                        || (has_min && literal_chars.is_some_and(|l| l >= 2)))
                                 {
                                     let max_ins = limits.as_ref().map_or(0u8, |l| {
-                                        l.get_insertions()
-                                            .or_else(|| l.get_edits())
-                                            .unwrap_or(0)
+                                        l.get_insertions().or_else(|| l.get_edits()).unwrap_or(0)
                                     });
                                     let max_e = max_edits.unwrap_or(0);
                                     let rem_ins = max_ins.saturating_sub(result.insertions);
@@ -2391,10 +3376,8 @@ impl<'a> Matcher<'a> {
                                     let mut added: u8 = 0;
                                     for ch in text[result.end..].chars() {
                                         if added >= budget
-                                            || !bridge.boundary_insertion_allowed(
-                                                *pattern_index,
-                                                ch,
-                                            )
+                                            || !bridge
+                                                .boundary_insertion_allowed(*pattern_index, ch)
                                         {
                                             break;
                                         }
@@ -2423,19 +3406,21 @@ impl<'a> Matcher<'a> {
                                                 pos,
                                                 similarity: thread.similarity
                                                     * result.similarity
-                                                    * (1.0 - edit_penalty)
-                                                        .powi(i32::from(added)),
+                                                    * (1.0 - edit_penalty).powi(i32::from(added)),
                                                 edits: thread.edits.merge(&ext_edits),
                                                 captures: thread.captures.clone(),
                                                 match_start: thread.match_start,
-                                                handler_overrides: thread
-                                                    .handler_overrides
-                                                    .clone(),
+                                                handler_overrides: thread.handler_overrides.clone(),
                                                 group_edits: apply_group_edits(
                                                     thread.group_edits.clone(),
                                                     *fuzzy_group_id,
                                                     &ext_edits,
                                                 ),
+                                                group_visited: mark_group_visited(
+                                                    thread.group_visited.clone(),
+                                                    *fuzzy_group_id,
+                                                ),
+                                                path: Vec::new(),
                                             });
                                         }
                                     }
@@ -2479,6 +3464,11 @@ impl<'a> Matcher<'a> {
                                                 *fuzzy_group_id,
                                                 &match_edits,
                                             ),
+                                            group_visited: mark_group_visited(
+                                                thread.group_visited.clone(),
+                                                *fuzzy_group_id,
+                                            ),
+                                            path: Vec::new(),
                                         });
                                     }
                                 }
@@ -2496,9 +3486,7 @@ impl<'a> Matcher<'a> {
                                 .copied()
                                 .unwrap_or(false);
                             let max_ins = limits.as_ref().map_or(0u8, |l| {
-                                l.get_insertions()
-                                    .or_else(|| l.get_edits())
-                                    .unwrap_or(0)
+                                l.get_insertions().or_else(|| l.get_edits()).unwrap_or(0)
                             });
                             let max_e = max_edits.unwrap_or(0);
                             if optional_loop
@@ -2563,6 +3551,11 @@ impl<'a> Matcher<'a> {
                                             *fuzzy_group_id,
                                             &delta,
                                         ),
+                                        group_visited: mark_group_visited(
+                                            thread.group_visited.clone(),
+                                            *fuzzy_group_id,
+                                        ),
+                                        path: Vec::new(),
                                     });
                                 }
                             }
@@ -2651,6 +3644,11 @@ impl<'a> Matcher<'a> {
                                                     *fuzzy_group_id,
                                                     &match_edits,
                                                 ),
+                                                group_visited: mark_group_visited(
+                                                    thread.group_visited.clone(),
+                                                    *fuzzy_group_id,
+                                                ),
+                                                path: Vec::new(),
                                             });
                                         }
                                     }
@@ -2844,6 +3842,8 @@ impl<'a> Matcher<'a> {
                                     match_start: thread.match_start,
                                     handler_overrides: thread.handler_overrides.clone(),
                                     group_edits: Vec::new(),
+                                    group_visited: Vec::new(),
+                                    path: Vec::new(),
                                 });
                             }
                         }
@@ -2857,6 +3857,8 @@ impl<'a> Matcher<'a> {
                             edits: thread.edits.clone(),
                             handler_overrides: thread.handler_overrides.clone(),
                             group_edits: thread.group_edits.clone(),
+                            group_visited: thread.group_visited.clone(),
+                            path: Vec::new(),
                         });
                     }
                 } else {
@@ -3052,6 +4054,8 @@ impl<'a> Matcher<'a> {
                 !matches!(kind, Anchor::End) && self.next_reaches_beyond(*next, ignore, visited)
             }
 
+            State::GroupEntry { next, .. } => self.next_reaches_beyond(*next, ignore, visited),
+
             State::Epsilon { targets }
             | State::Split {
                 branches: targets, ..
@@ -3097,6 +4101,8 @@ impl<'a> Matcher<'a> {
                 !matches!(kind, Anchor::End) && self.next_reaches(*next, assert_stops, visited)
             }
 
+            State::GroupEntry { next, .. } => self.next_reaches(*next, assert_stops, visited),
+
             State::Epsilon { targets }
             | State::Split {
                 branches: targets, ..
@@ -3140,7 +4146,8 @@ impl<'a> Matcher<'a> {
             State::Lookahead { next, .. }
             | State::LookaheadLiteral { next, .. }
             | State::Lookbehind { next, .. }
-            | State::LookbehindLiteral { next, .. } => {
+            | State::LookbehindLiteral { next, .. }
+            | State::GroupEntry { next, .. } => {
                 self.find_expected_end_recursive(*next, text_len, visited)
             }
 

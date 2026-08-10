@@ -155,7 +155,11 @@ impl FuzzyBridge {
                 });
                 // mrab-regex has no transposition error type, so in compatibility
                 // mode swaps are never allowed, even under an explicit `{t<=N}`.
-                let swaps = if mrab_compat { Some(0) } else { lim.get_swaps() };
+                let swaps = if mrab_compat {
+                    Some(0)
+                } else {
+                    lim.get_swaps()
+                };
                 EditLimits::with_limits(
                     max_edits,
                     lim.get_insertions(),
@@ -249,6 +253,14 @@ impl FuzzyBridge {
     #[must_use]
     pub fn is_case_insensitive(&self) -> bool {
         self.case_insensitive
+    }
+
+    /// Get the edit-character restriction for a pattern index, if any.
+    #[must_use]
+    pub fn edit_char_restriction(&self, pattern_index: usize) -> Option<&EditCharRestriction> {
+        self.edit_char_restrictions
+            .get(pattern_index)
+            .and_then(Option::as_ref)
     }
 
     /// Add word list patterns (from \L<name>) for matching.
@@ -1922,7 +1934,9 @@ impl FuzzyBridge {
         from: usize,
         threshold: f32,
     ) -> Option<FuzzyMatchResult> {
-        self.find_at_all(text, pattern_index, from, threshold).into_iter().next()
+        self.find_at_all(text, pattern_index, from, threshold)
+            .into_iter()
+            .next()
     }
 
     /// Whole-pattern deletion candidate: the entire literal can be deleted,
@@ -2104,7 +2118,9 @@ impl FuzzyBridge {
         // fallthrough), which a lone deletion candidate would displace.
         if !out.is_empty()
             && let Some(c) = deletion_candidate
-            && !out.iter().any(|m| m.end == c.end && m.deletions == c.deletions)
+            && !out
+                .iter()
+                .any(|m| m.end == c.end && m.deletions == c.deletions)
         {
             out.push(c);
         }

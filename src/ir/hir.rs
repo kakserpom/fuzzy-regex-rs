@@ -8,13 +8,13 @@
 
 use std::cell::Cell;
 
-use crate::types::FuzzyLimits;
+use crate::types::{FuzzyLimits, MinEdits};
 
 use crate::ir::EditCharRestriction;
 use crate::parser::{Anchor, Ast, CharClass, CharClassItem, Fuzziness, MrabFuzziness, NamedClass};
 
 /// Cost information for fuzzy matching.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CostInfo {
     /// Cost per insertion.
     pub insertion_cost: Option<u8>,
@@ -48,14 +48,20 @@ pub enum Hir {
         text: String,
         /// Fuzzy matching limits (insertions, deletions, substitutions).
         limits: Option<FuzzyLimits>,
-        /// Minimum edits required (for exclusive lower bounds like `{0<e<5}`).
-        min_edits: Option<u8>,
+        /// Minimum edits required (for exclusive lower bounds like `{0<e<5}`
+        /// and per-operation ranges like `{1<=s<=1}`, `{2<=i<=3}`).
+        min_edits: Option<MinEdits>,
         /// Cost constraint info.
         cost_info: Option<CostInfo>,
         /// Character class restriction for edits (e.g., `{e<=1:[a-z]}`).
         edit_chars: Option<EditCharRestriction>,
         /// Group ID for shared budget tracking across multi-piece fuzzy groups.
         fuzzy_group_id: Option<usize>,
+        /// True when this literal was produced by folding a fuzzy bounded repeat
+        /// of a single char (e.g. `(?:b{2})`). mrab compiles such repeats as a
+        /// per-char repeat node (no trailing-insertion alternative), unlike a
+        /// plain string literal (`(?:bb)`) which gets one.
+        repeat_fold: bool,
     },
 
     /// A single character (exact match).
@@ -72,7 +78,7 @@ pub enum Hir {
         /// Fuzzy matching limits (insertions, deletions, substitutions).
         limits: Option<FuzzyLimits>,
         /// Minimum edits required (for exclusive lower bounds).
-        min_edits: Option<u8>,
+        min_edits: Option<MinEdits>,
         /// Cost constraint info.
         cost_info: Option<CostInfo>,
         /// Restriction on characters usable for edits, e.g. `{i<=1:[ab]}`.
@@ -107,6 +113,18 @@ pub enum Hir {
         name: Option<String>,
         /// The expression inside the capture group.
         expr: Box<Hir>,
+    },
+
+    /// A fuzzy group: the body of a `(?:...)` (or capture) that carries its own
+    /// fuzziness and a shared `fuzzy_group_id`. Compiled to a `GroupEntry`
+    /// marker state so every thread — including those that match the body via
+    /// an epsilon/empty path — records that the group was entered, making the
+    /// accept-time `min_edits` check meaningful.
+    FuzzyGroup {
+        /// The shared fuzzy group id.
+        group_id: usize,
+        /// The lowered body (with per-piece fuzziness applied).
+        inner: Box<Hir>,
     },
 
     /// Anchor.
@@ -196,7 +214,7 @@ impl Hir {
     pub fn literal(
         text: impl Into<String>,
         limits: Option<FuzzyLimits>,
-        min_edits: Option<u8>,
+        min_edits: Option<MinEdits>,
         cost_info: Option<CostInfo>,
     ) -> Self {
         Hir::Literal {
@@ -206,6 +224,7 @@ impl Hir {
             cost_info,
             edit_chars: None,
             fuzzy_group_id: None,
+            repeat_fold: false,
         }
     }
 
@@ -213,7 +232,7 @@ impl Hir {
     pub fn literal_with_edit_chars(
         text: impl Into<String>,
         limits: Option<FuzzyLimits>,
-        min_edits: Option<u8>,
+        min_edits: Option<MinEdits>,
         cost_info: Option<CostInfo>,
         edit_chars: Option<EditCharRestriction>,
     ) -> Self {
@@ -224,6 +243,7 @@ impl Hir {
             cost_info,
             edit_chars,
             fuzzy_group_id: None,
+            repeat_fold: false,
         }
     }
 
@@ -357,7 +377,10 @@ impl HirClass {
             return None;
         }
         // Single character or empty
-        self.chars.first().copied()
+        match self.chars.as_slice() {
+            [ch] => Some(*ch),
+            _ => None,
+        }
     }
 }
 
@@ -504,6 +527,7 @@ impl HirLowering {
                     cost_info,
                     edit_chars,
                     fuzzy_group_id: None,
+                    repeat_fold: false,
                 }
             }
 
@@ -551,10 +575,23 @@ impl HirLowering {
                 if matches!(fuzziness, Fuzziness::Inherited) {
                     // Just inline the contents
                     self.lower_ast(expr)
+                } else if matches!(expr.as_ref(), Ast::Literal { .. } | Ast::Char(_)) {
+                    // A single-atom body carries the fuzziness directly and
+                    // stays a plain fuzzy literal/char. Emitting a FuzzyGroup /
+                    // GroupEntry marker here would make the pattern
+                    // non-"simple-fuzzy", dropping the Bitap fast paths that
+                    // honor default-mode long-span/end-policy selection. The
+                    // group min/limits on one atom are exactly the atom's own,
+                    // so no shared-budget wrapper is needed.
+                    self.lower_with_fuzziness(expr, fuzziness, None)
                 } else {
                     // Assign a group ID for shared budget tracking across pieces
                     let group_id = self.next_fuzzy_group_id();
-                    self.lower_with_fuzziness(expr, fuzziness, Some(group_id))
+                    let inner = self.lower_with_fuzziness(expr, fuzziness, Some(group_id));
+                    Hir::FuzzyGroup {
+                        group_id,
+                        inner: Box::new(inner),
+                    }
                 }
             }
 
@@ -638,10 +675,15 @@ impl HirLowering {
         // Lower with the new default, but for detailed/mrab limits, inject them directly
         match fuzziness {
             Fuzziness::Exact => {
-                // Exact match - no edits allowed
-                let mut lowering = HirLowering::new(0);
-                lowering.fuzzy_group_counter = Cell::new(self.fuzzy_group_counter.get());
-                lowering.lower_ast(ast)
+                // Exact match - no edits allowed. Lower the body with a 0-edit
+                // budget so the pieces become 0-edit fuzzy atoms (matching the
+                // pre-fuzzy-group behavior of `~0`, e.g. `(?:world)~0` is a
+                // FuzzyLiteral with `max_edits == 0`, which takes the engine's
+                // exact fast path). A fresh plain lowering would drop the
+                // budget and, when the group sits inside a pattern with a
+                // non-zero default edit count, could re-inherit fuzziness.
+                let limits = FuzzyLimits::new().edits(0);
+                self.lower_with_detailed_limits(ast, &limits, None, None, None, fuzzy_group_id)
             }
             Fuzziness::Edits(n) => {
                 // Simple edit count - convert to FuzzyLimits and use detailed path
@@ -654,7 +696,17 @@ impl HirLowering {
             }
             Fuzziness::MrabStyle(mrab) => {
                 let limits = mrab.to_limits();
-                let min_edits = mrab.min_errors;
+                let min_edits = crate::types::MinEdits {
+                    total: mrab.min_errors,
+                    insertions: mrab.min_insertions,
+                    deletions: mrab.min_deletions,
+                    substitutions: mrab.min_substitutions,
+                };
+                let min_edits = if min_edits.is_empty() {
+                    None
+                } else {
+                    Some(min_edits)
+                };
                 let cost_info = extract_cost_info_from_mrab(mrab);
                 let edit_chars = extract_edit_chars_from_mrab(mrab);
                 self.lower_with_detailed_limits(
@@ -680,7 +732,7 @@ impl HirLowering {
         &self,
         ast: &Ast,
         limits: &FuzzyLimits,
-        min_edits: Option<u8>,
+        min_edits: Option<MinEdits>,
         cost_info: Option<CostInfo>,
         edit_chars: Option<EditCharRestriction>,
         fuzzy_group_id: Option<usize>,
@@ -693,6 +745,7 @@ impl HirLowering {
                 cost_info: cost_info.clone(),
                 edit_chars: edit_chars.clone(),
                 fuzzy_group_id,
+                repeat_fold: false,
             },
 
             Ast::Char(ch) => Hir::Literal {
@@ -702,6 +755,7 @@ impl HirLowering {
                 cost_info: cost_info.clone(),
                 edit_chars: edit_chars.clone(),
                 fuzzy_group_id,
+                repeat_fold: false,
             },
 
             Ast::Concat(parts) => {
@@ -718,7 +772,7 @@ impl HirLowering {
                         )
                     })
                     .collect();
-                Self::flatten_concat(lowered)
+                Self::merge_literals(Self::flatten_concat(lowered))
             }
 
             Ast::Alternation(alts) => {
@@ -757,6 +811,12 @@ impl HirLowering {
                     && (max - min) < MAX_FUZZY_FOLD_ALTS
                     && base.chars().count().saturating_mul(max) <= MAX_FUZZY_FOLD_LEN
                 {
+                    // mrab compiles a quantified single char (`b{2}`) as a
+                    // per-char repeat node with no trailing-insertion
+                    // alternative, but elides `{1}` (a bare char, string-merge
+                    // friendly). Mark repeat-folded single-char literals so the
+                    // matcher suppresses below-min trailing insertions.
+                    let repeat_fold = base.chars().count() == 1 && !(min == 1 && max == 1);
                     let make = |k: usize| -> Hir {
                         if k == 0 {
                             Hir::Empty
@@ -768,12 +828,19 @@ impl HirLowering {
                                 cost_info: cost_info.clone(),
                                 edit_chars: edit_chars.clone(),
                                 fuzzy_group_id,
+                                repeat_fold,
                             }
                         }
                     };
                     if min == max {
                         make(min)
+                    } else if *greedy {
+                        // Greedy bounded repeat: try the maximum repetition
+                        // first (mrab's `{2,3}` == `b b (b)?` greedy), so the
+                        // first matching branch is the longest one.
+                        Hir::Alt((min..=max).rev().map(make).collect())
                     } else {
+                        // Lazy repeat: try the minimum repetition first.
                         Hir::Alt((min..=max).map(make).collect())
                     }
                 } else {
@@ -817,14 +884,34 @@ impl HirLowering {
             ),
 
             // Character class with fuzzy limits becomes FuzzyClass
-            Ast::CharClass(class) => Hir::FuzzyClass {
-                class: self.char_class_to_hir(class),
-                limits: Some(limits.clone()),
-                min_edits,
-                cost_info,
-                edit_chars,
-                fuzzy_group_id,
-            },
+            Ast::CharClass(class) => {
+                let hir_class = self.char_class_to_hir(class);
+                // mrab folds a single-character class (`[c]`) into a plain char
+                // before merging adjacent chars into a string literal, so
+                // `(?:[c]b){1<=i<=1}$` on "cba" gets a 2-char literal whose
+                // trailing insertion counts toward the minimum ((0,3,(0,1,0))).
+                // `[cd]b` (multi-char) and `[c]{2}` (repeat) must NOT fold.
+                if let Some(ch) = hir_class.to_first_char() {
+                    Hir::Literal {
+                        text: ch.to_string(),
+                        limits: Some(limits.clone()),
+                        min_edits,
+                        cost_info: cost_info.clone(),
+                        edit_chars: edit_chars.clone(),
+                        fuzzy_group_id,
+                        repeat_fold: false,
+                    }
+                } else {
+                    Hir::FuzzyClass {
+                        class: hir_class,
+                        limits: Some(limits.clone()),
+                        min_edits,
+                        cost_info: cost_info.clone(),
+                        edit_chars: edit_chars.clone(),
+                        fuzzy_group_id,
+                    }
+                }
+            }
 
             // Backreference inside fuzzy group gets the fuzzy limits
             Ast::Backreference { group, fuzziness } => {
@@ -859,6 +946,63 @@ impl HirLowering {
             0 => Hir::Empty,
             1 => result.pop().unwrap(),
             _ => Hir::Concat(result),
+        }
+    }
+
+    /// Merge adjacent fuzzy string literals that share the same fuzzy
+    /// parameters into one literal. mrab folds adjacent plain chars into a
+    /// single STRING node before applying fuzziness, so `(?:[c]b){...}` and
+    /// `(?:ab){...}` both become one string literal with one shared edit
+    /// budget and one trailing-insertion alternative. Repeat-folded literals
+    /// (`(?:b{2})`, marked `repeat_fold`) are never merged.
+    fn merge_literals(hir: Hir) -> Hir {
+        let Hir::Concat(parts) = hir else {
+            return hir;
+        };
+        let mut merged: Vec<Hir> = Vec::with_capacity(parts.len());
+        for part in parts {
+            let can_merge = match (merged.last_mut(), &part) {
+                (
+                    Some(Hir::Literal {
+                        text: _,
+                        limits,
+                        min_edits,
+                        cost_info,
+                        edit_chars,
+                        fuzzy_group_id,
+                        repeat_fold: false,
+                    }),
+                    Hir::Literal {
+                        text: _,
+                        limits: l2,
+                        min_edits: m2,
+                        cost_info: c2,
+                        edit_chars: e2,
+                        fuzzy_group_id: g2,
+                        repeat_fold: false,
+                    },
+                ) => {
+                    limits == l2
+                        && min_edits == m2
+                        && cost_info == c2
+                        && edit_chars == e2
+                        && fuzzy_group_id == g2
+                }
+                _ => false,
+            };
+            if can_merge
+                && let Some(Hir::Literal { text, .. }) = merged.last_mut()
+                && let Hir::Literal { text: t2, .. } = &part
+            {
+                text.push_str(t2);
+                continue;
+            }
+            merged.push(part);
+        }
+        match merged.len() {
+            0 => Hir::Empty,
+            1 => merged.pop().unwrap(),
+            _ => Hir::Concat(merged),
         }
     }
 }
