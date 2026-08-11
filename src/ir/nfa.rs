@@ -1736,6 +1736,19 @@ impl Nfa {
             && !class.negated
     }
 
+    /// Whether `class` is a bare `.` (`Any` / `AnyExceptNewline`). Returns
+    /// `Some` with `dotall` for a pure dot class, `None` for anything else.
+    fn is_dot_class(class: &crate::ir::hir::HirClass) -> Option<bool> {
+        if class.negated || !class.chars.is_empty() || !class.ranges.is_empty() {
+            return None;
+        }
+        match class.named.as_slice() {
+            [crate::parser::NamedClass::Any] => Some(true),
+            [crate::parser::NamedClass::AnyExceptNewline] => Some(false),
+            _ => None,
+        }
+    }
+
     /// Check that Accept is reachable from `state_id` through ZERO-WIDTH
     /// transitions only (epsilon).
     ///
@@ -1767,6 +1780,153 @@ impl Nfa {
                 .iter()
                 .any(|&t| self.check_reaches_accept(t, visited)),
             _ => false,
+        }
+    }
+
+    /// Shape info for the `LITERAL .* LITERAL` / `LITERAL .+ LITERAL` fast path
+    /// (greedy or lazy middle). Such patterns can be matched with two literal
+    /// searches (memmem for the prefix, forward/`rfind` for the suffix) instead
+    /// of a per-byte DFA scan — the same idea as `.*SUFFIX`.
+    #[must_use]
+    pub fn literal_dotstar_suffix(&self) -> Option<PrefixDotStarSuffix> {
+        // Leading non-fuzzy literal (prefix).
+        let (prefix_index, after_prefix) = self.leading_fuzzy_literal(self.start)?;
+
+        // Middle: either the Split directly (.*), or a dot then the Split (.+).
+        let (split_id, min_chars) = {
+            let id = self.follow_epsilons(after_prefix)?;
+            match &self.states[id] {
+                State::Split { branches, .. } if branches.len() == 2 => (id, 0),
+                State::Char { class, next } if Self::is_dot_class(class).is_some() => {
+                    let split = self.follow_epsilons(*next)?;
+                    match &self.states[split] {
+                        State::Split { branches, .. } if branches.len() == 2 => (split, 1),
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            }
+        };
+
+        let State::Split { branches, greedy } = &self.states[split_id] else {
+            return None;
+        };
+        let greedy = *greedy;
+        if branches.len() != 2 {
+            return None;
+        }
+
+        // The loop branch must be a `.` that actually loops back to the Split.
+        let loop_branch = branches
+            .iter()
+            .copied()
+            .find(|&b| self.can_reach_state(b, split_id))?;
+        let exit_branch = branches
+            .iter()
+            .copied()
+            .find(|&b| !self.can_reach_state(b, split_id))?;
+
+        let dot_state = self.follow_epsilons(loop_branch)?;
+        let (dot_next, dotall) = match &self.states[dot_state] {
+            State::Char { class, next } => (Some(*next), Self::is_dot_class(class)?),
+            _ => return None,
+        };
+        if !self.can_reach_state(dot_next?, split_id) {
+            return None;
+        }
+
+        // Trailing literal (suffix) ending at Accept.
+        let suffix_index = self.trailing_fuzzy_literal(exit_branch)?;
+
+        Some(PrefixDotStarSuffix {
+            prefix_index,
+            suffix_index,
+            greedy,
+            min_chars,
+            dotall,
+        })
+    }
+
+    /// Follow a single-target epsilon chain from `id` to the next consuming or
+    /// structural state. Returns `None` for multi-target epsilons (ambiguity) or
+    /// out-of-range states.
+    fn follow_epsilons(&self, mut id: StateId) -> Option<StateId> {
+        let mut guard = 0;
+        loop {
+            let state = self.states.get(id)?;
+            match state {
+                State::Epsilon { targets } if targets.len() == 1 => {
+                    id = targets[0];
+                }
+                _ => return Some(id),
+            }
+            guard += 1;
+            if guard > self.states.len() {
+                return None;
+            }
+        }
+    }
+
+    /// Walk from `start` through epsilons to a non-fuzzy `FuzzyLiteral`; returns
+    /// its pattern index and `next` state.
+    fn leading_fuzzy_literal(&self, mut id: StateId) -> Option<(usize, StateId)> {
+        let mut guard = 0;
+        loop {
+            let state = self.states.get(id)?;
+            match state {
+                State::Epsilon { targets } if targets.len() == 1 => {
+                    id = targets[0];
+                }
+                State::FuzzyLiteral {
+                    pattern_index,
+                    limits,
+                    min_edits,
+                    cost_constraint,
+                    next,
+                    ..
+                } if limits.is_none() && min_edits.is_none() && cost_constraint.is_none() => {
+                    return Some((*pattern_index, *next));
+                }
+                _ => return None,
+            }
+            guard += 1;
+            if guard > self.states.len() {
+                return None;
+            }
+        }
+    }
+
+    /// Walk from `state_id` through epsilons to a non-fuzzy `FuzzyLiteral` that
+    /// reaches `Accept` through zero-width transitions only; returns its pattern
+    /// index.
+    fn trailing_fuzzy_literal(&self, mut id: StateId) -> Option<usize> {
+        let mut guard = 0;
+        loop {
+            let state = self.states.get(id)?;
+            match state {
+                State::Epsilon { targets } if targets.len() == 1 => {
+                    id = targets[0];
+                }
+                State::FuzzyLiteral {
+                    pattern_index,
+                    limits,
+                    min_edits,
+                    cost_constraint,
+                    next,
+                    ..
+                } if limits.is_none() && min_edits.is_none() && cost_constraint.is_none() => {
+                    let mut visited = vec![false; self.states.len()];
+                    if self.check_reaches_accept(*next, &mut visited) {
+                        return Some(*pattern_index);
+                    }
+                    return None;
+                }
+                _ => return None,
+            }
+            guard += 1;
+            if guard > self.states.len() {
+                return None;
+            }
         }
     }
 
@@ -2656,6 +2816,24 @@ impl EditCharRestriction {
                 .iter()
                 .any(|&(start, end)| ch >= start && ch <= end)
     }
+}
+
+/// Shape info for the `LITERAL .* LITERAL` / `LITERAL .+ LITERAL` fast path
+/// (greedy or lazy middle). Such patterns can be matched with two literal
+/// searches (memmem for the prefix, forward/`rfind` for the suffix) instead
+/// of a per-byte DFA scan — the same idea as `.*SUFFIX`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefixDotStarSuffix {
+    /// Pattern index (into `LiteralPattern` list) of the leading literal.
+    pub prefix_index: usize,
+    /// Pattern index (into `LiteralPattern` list) of the trailing literal.
+    pub suffix_index: usize,
+    /// Greedy (`.*`) vs lazy (`.*?`) middle.
+    pub greedy: bool,
+    /// Minimum chars the middle must consume: 0 for `.*`, 1 for `.+`.
+    pub min_chars: usize,
+    /// Whether `.` matches newlines (dot-all).
+    pub dotall: bool,
 }
 
 /// A literal pattern extracted from the HIR for fuzzy matching.

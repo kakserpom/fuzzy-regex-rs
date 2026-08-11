@@ -33,7 +33,7 @@ use crate::engine::backtrack::{BacktrackConfig, BacktrackMatcher};
 use crate::engine::hash::FxHashMap;
 use crate::engine::{Dfa, FuzzyBridge, MatchResult, Matcher, MatcherConfig, Prefilter};
 use crate::error::Result;
-use crate::ir::nfa::State;
+use crate::ir::nfa::{PrefixDotStarSuffix, State};
 use crate::ir::{Hir, LiteralPattern, Nfa, lower_with_unicode};
 use crate::parser::ast::NamedClass;
 use crate::parser::{Anchor, Ast, parse_with_flags};
@@ -114,6 +114,11 @@ pub struct FuzzyRegex {
     /// Minimum chars the leading greedy dot-repeat must consume before the suffix
     /// in the `.*SUFFIX`/`.+SUFFIX` fast path (0 for `.*`, 1 for `.+`).
     greedy_prefix_min: usize,
+    /// `LITERAL .* LITERAL` / `LITERAL .+ LITERAL` shape info (greedy or lazy
+    /// middle), when detected at compile time. Gates the two-literal-search
+    /// fast path in `find` (memmem prefix + suffix) that skips the DFA's
+    /// full-text scan.
+    dotstar_pair: Option<PrefixDotStarSuffix>,
     is_word_bounded_class: bool,
     #[allow(dead_code)]
     is_char_class_plus: bool,
@@ -440,6 +445,36 @@ impl FuzzyRegex {
         let has_char_classes = nfa.has_char_classes();
         let nfa_states_len = nfa.states.len();
 
+        // `LITERAL .* LITERAL` / `LITERAL .+ LITERAL` (greedy or lazy middle):
+        // two literal searches replace the DFA's full-text scan. Gated to the
+        // byte-exact, unambiguous case: no case folding, no fuzzy/edit bounds on
+        // the literals, no captures (the NFA shape check already rejects
+        // anchors/captures/alternations/groups). Note the shape is only
+        // registered when there is exactly one `LiteralPattern` per literal
+        // boundary, so `literals[idx]` below is always that literal.
+        let dotstar_pair = if !config.case_insensitive
+            && capture_count == 0
+            && config.handlers.is_empty()
+            && nfa_states_len <= 64
+            && !config.mrab_compat
+            && !has_recursion
+            && !flags.best_match
+            && !flags.enhance_match
+            && !flags.posix
+            && !flags.reverse
+        {
+            nfa.literal_dotstar_suffix().filter(|p| {
+                literals[p.prefix_index].limits.is_none()
+                    && literals[p.prefix_index].min_edits.is_none()
+                    && literals[p.prefix_index].edit_chars.is_none()
+                    && literals[p.suffix_index].limits.is_none()
+                    && literals[p.suffix_index].min_edits.is_none()
+                    && literals[p.suffix_index].edit_chars.is_none()
+            })
+        } else {
+            None
+        };
+
         // Pre-compute whether we can use the memchr fast path
         // word_lists is always empty at this point (set later via set_word_list)
         let can_use_memchr_fast_path = literals.len() == 1
@@ -589,6 +624,7 @@ impl FuzzyRegex {
             pure_dotstar_requires_char,
             is_greedy_prefix_with_suffix,
             greedy_prefix_min,
+            dotstar_pair,
             is_word_bounded_class,
             is_char_class_plus,
             is_char_class_plus_or_lazy,
@@ -779,6 +815,12 @@ impl FuzzyRegex {
 
     /// Check if the pattern matches anywhere in the text.
     pub fn is_match(&self, text: &str) -> bool {
+        // `LITERAL.*LITERAL`: existence check needs only the leftmost suffix
+        // (a match exists iff some prefix reaches any suffix), so skip the
+        // greedy rightmost-suffix work `find` does. Agrees with `find().is_some()`.
+        if let Some(pair) = self.dotstar_pair && self.word_lists.is_empty() {
+            return self.is_match_literal_dotstar(text, pair);
+        }
         self.find(text).is_some()
     }
 
@@ -1438,6 +1480,23 @@ impl FuzzyRegex {
                 // Found word-bounded exact count pattern
                 return Self::find_word_bounded_class_exact(text, word_char_count);
             }
+        }
+
+        // Fast path for `LITERAL .* LITERAL` / `LITERAL .+ LITERAL` (greedy or
+        // lazy middle): locate the boundary literals with two byte searches
+        // (memmem prefix scan, then forward/`rfind` suffix) instead of the
+        // DFA's per-byte full-text scan. For greedy the rightmost suffix in the
+        // newline-free span is the leftmost-longest match (matches
+        // `find_iter`'s `find_all_hardened`); for lazy the leftmost suffix is
+        // the NFA's lazy match. Returns nothing on no-match so later paths
+        // (partial-mode handling, etc.) still run — this branch only shortens
+        // the matched case. The shape is rejected whenever the DFA/iterators
+        // would route elsewhere (see `dotstar_pair` construction).
+        if let Some(pair) = self.dotstar_pair
+            && self.word_lists.is_empty()
+            && let Some(m) = self.find_literal_dotstar(text, pair)
+        {
+            return Some(m);
         }
 
         // DFA fast path: use DFA for exact/non-fuzzy patterns
@@ -2354,6 +2413,146 @@ impl FuzzyRegex {
         matches
     }
 
+    /// Existence check for the `LITERAL .* LITERAL` shape: a match exists iff
+    /// some prefix occurrence has a reachable suffix (leftmost is enough — the
+    /// greedy end position is irrelevant for a boolean). Bounded scans: the
+    /// terminator check only covers the span up to the first suffix
+    /// occurrence, so a match near the prefix costs O(match), not O(text).
+    fn is_match_literal_dotstar(&self, text: &str, pair: PrefixDotStarSuffix) -> bool {
+        let bytes = text.as_bytes();
+        let prefix = self.literals[pair.prefix_index].text.as_bytes();
+        let suffix = self.literals[pair.suffix_index].text.as_bytes();
+        if prefix.is_empty() || suffix.is_empty() {
+            return false;
+        }
+        let prefix_finder = memmem::Finder::new(prefix);
+        let min_gap = pair.min_chars;
+
+        let mut offset = 0;
+        while offset + prefix.len() <= bytes.len() {
+            let Some(rel) = prefix_finder.find(&bytes[offset..]) else {
+                return false;
+            };
+            let p_start = offset + rel;
+            let p_end = p_start + prefix.len();
+
+            let search_start = p_end + min_gap;
+            if search_start > bytes.len() {
+                return false;
+            }
+            // First suffix occurrence (anywhere after the gap).
+            let s1 = match memmem::find(&bytes[search_start..], suffix) {
+                Some(s1) => search_start + s1,
+                None => return false,
+            };
+            if pair.dotall {
+                return true;
+            }
+            // Without dot-all, `.` excludes `\n`/`\r`; the dot span
+            // `[p_end, s_start)` must be terminator-free. If the first
+            // suffix's span is clean, it's valid (leftmost). Otherwise the
+            // first terminator `nl` in that span caps every valid suffix start
+            // at `nl` — search a window bounded by it.
+            match memchr::memchr2(b'\n', b'\r', &bytes[p_end..s1]) {
+                None => return true,
+                Some(nl) => {
+                    let nl = p_end + nl;
+                    let window_end = (nl + suffix.len()).min(bytes.len());
+                    if search_start >= window_end {
+                        offset = p_start + 1;
+                        continue;
+                    }
+                    if memmem::find(&bytes[search_start..window_end], suffix).is_some() {
+                        return true;
+                    }
+                }
+            }
+            offset = p_start + 1;
+        }
+        false
+    }
+
+    /// Fast path for `LITERAL .* LITERAL` / `LITERAL .+ LITERAL` (greedy or
+    /// lazy middle): locate the boundary literals with two byte searches
+    /// instead of the DFA's full-text scan.
+    ///
+    /// Leftmost semantics (matches `find_iter().next()`):
+    /// - iterate prefix occurrences in order; the first prefix that reaches a
+    ///   suffix yields the leftmost match (earliest start wins);
+    /// - greedy `.`* consumes as much as possible → the RIGHTMOST reachable
+    ///   suffix (this is the DFA's leftmost-longest answer);
+    /// - lazy `.*?` ends at the FIRST reachable suffix (the NFA's lazy answer);
+    /// - when `.` is `AnyExceptNewline`, the dot span cannot cross a `\n`, so
+    ///   the suffix must lie strictly before the first `\n` at/after the prefix;
+    /// - `.+` requires at least one byte of gap (byte offsets are char
+    ///   boundaries here, so ≥1 byte ⟺ ≥1 char).
+    fn find_literal_dotstar<'t>(
+        &self,
+        text: &'t str,
+        pair: PrefixDotStarSuffix,
+    ) -> Option<Match<'t>> {
+        let bytes = text.as_bytes();
+        let prefix = self.literals[pair.prefix_index].text.as_bytes();
+        let suffix = self.literals[pair.suffix_index].text.as_bytes();
+        if prefix.is_empty() || suffix.is_empty() {
+            return None;
+        }
+        let prefix_finder = memmem::Finder::new(prefix);
+        let min_gap = pair.min_chars;
+
+        let mut offset = 0;
+        while offset + prefix.len() <= bytes.len() {
+            let rel = prefix_finder.find(&bytes[offset..])?;
+            let p_start = offset + rel;
+            let p_end = p_start + prefix.len();
+
+            // The suffix must start at least `min_gap` bytes after the prefix.
+            let search_start = p_end + min_gap;
+            if search_start > bytes.len() {
+                return None;
+            }
+            // Without dot-all, `.` matches neither `\n` nor `\r` (see
+            // `NamedClass::AnyExceptNewline`), so the dot SPAN `[p_end, s_start)`
+            // must be line-terminator-free: the suffix may start AT the first
+            // terminator after the prefix (its `\n`/`\r` is consumed by the
+            // literal, not the dot), but not beyond it. Window end
+            // `nl + suffix.len()` lets any suffix starting ≤ `nl` fit in full;
+            // every occurrence fully inside `[search_start, window_end)` starts
+            // ≤ `nl` (even when truncated at the text end).
+            let suffix_start_limit = if pair.dotall {
+                bytes.len()
+            } else {
+                match memchr::memchr2(b'\n', b'\r', &bytes[p_end..]) {
+                    Some(nl) => (p_end + nl + suffix.len()).min(bytes.len()),
+                    None => bytes.len(),
+                }
+            };
+            if search_start >= suffix_start_limit {
+                offset = p_start + 1;
+                continue;
+            }
+            let window = &bytes[search_start..suffix_start_limit];
+            let found = if pair.greedy {
+                memmem::rfind(window, suffix)
+            } else {
+                memmem::find(window, suffix)
+            };
+            let Some(s_start) = found else {
+                offset = p_start + 1;
+                continue;
+            };
+            let s_start = search_start + s_start;
+            return Some(self.make_match(
+                text,
+                p_start,
+                s_start + suffix.len(),
+                1.0,
+                crate::engine::EditCounts::default(),
+            ));
+        }
+        None
+    }
+
     /// Optimized matching for word-bounded literals like `\bword\b`.
     ///
     /// Finds all literal occurrences using fast prefilter, then filters
@@ -2501,8 +2700,6 @@ impl FuzzyRegex {
         nfa: &crate::ir::Nfa,
         literals: &[crate::ir::LiteralPattern],
     ) -> (Option<(String, String)>, Option<(String, String)>) {
-        use crate::ir::nfa::State;
-
         let mut lookbehind = None;
         let mut lookahead = None;
 
@@ -7005,4 +7202,116 @@ fn test_case_insensitive_fuzzy_no_substitution_penalty() {
     // "hallo" has 'a' for 'e' - that's a substitution
     let m = re.find("HALLO").unwrap();
     assert_eq!(m.total_edits(), 1, "case diff + substitution should be 1");
+}
+
+#[cfg(test)]
+mod dotstar_fast_path_tests {
+    use super::*;
+
+    fn spans(pat: &str, text: &str) -> (Option<(usize, usize)>, Option<(usize, usize)>, bool) {
+        let re = FuzzyRegex::new(pat).unwrap();
+        let f = re.find(text).map(|m| (m.start(), m.end()));
+        let it = re.find_iter(text).next().map(|m| (m.start(), m.end()));
+        (f, it, re.is_match(text))
+    }
+
+    #[test]
+    fn find_agrees_with_iter_greedy() {
+        for (pat, text) in [
+            ("quick.*fox", "quickXfoxYfox"),
+            ("quick.*fox", "quick.fox.fox"),
+            ("quick.+fox", "quickXfox"),
+            ("quick.+fox", "quickfox"),
+            ("(?s)quick.*fox", "quick\nfox"),
+            ("quick.*fox", "quick\nfox"),
+            ("quick.*fox", "quickX\rfox"),
+            ("quick.*fox", "Xquick\nXfox"),
+            ("ab.*ab", "abXabXab"),
+            ("aa.*bb", "aaaabb"),
+        ] {
+            let (f, it, _) = spans(pat, text);
+            assert_eq!(f, it, "pattern {pat:?} on {text:?}");
+        }
+    }
+
+    #[test]
+    fn lazy_find_agrees_with_iter() {
+        for (pat, text) in [
+            ("quick.*?fox", "quickXfoxYfox"),
+            ("quick.*?fox", "quickX\nfox"),
+            ("quick.+?fox", "quickXfox"),
+            ("(?s)quick.*?fox", "quick\nfoxYfox"),
+        ] {
+            let (f, it, _) = spans(pat, text);
+            assert_eq!(f, it, "pattern {pat:?} on {text:?}");
+        }
+    }
+
+    #[test]
+    fn greedy_rightmost_suffix() {
+        let re = FuzzyRegex::new(r"quick.*fox").unwrap();
+        let m = re.find("quickXfoxYfoxZfox").unwrap();
+        assert_eq!((m.start(), m.end()), (0, 17), "greedy .* reaches last fox");
+    }
+
+    #[test]
+    fn lazy_leftmost_suffix() {
+        let re = FuzzyRegex::new(r"quick.*?fox").unwrap();
+        let m = re.find("quickXfoxYfox").unwrap();
+        assert_eq!((m.start(), m.end()), (0, 9), "lazy .*? stops at first fox");
+    }
+
+    #[test]
+    fn newline_terminator_blocks_dot() {
+        let re = FuzzyRegex::new(r"quick.*fox").unwrap();
+        assert!(!re.is_match("quick\nfox"), "`.` cannot cross \\n");
+        assert!(re.is_match("quickX\nfoxYfox") || !re.find("quickX\nfoxYfox").is_some());
+        let m = re.find("quickX\nfoxYfox");
+        // Only the span within the first line is reachable: prefix at 0, but
+        // the dot span must stay before the `\n` at 5, so no "fox" fits.
+        assert!(m.is_none());
+    }
+
+    #[test]
+    fn dotall_crosses_newline() {
+        let re = FuzzyRegex::new(r"(?s)quick.*fox").unwrap();
+        let m = re.find("quick\nfox").unwrap();
+        assert_eq!((m.start(), m.end()), (0, 9));
+    }
+
+    #[test]
+    fn carriage_return_blocks_dot() {
+        let re = FuzzyRegex::new(r"quick.*fox").unwrap();
+        assert!(!re.is_match("quick\rfox"), "`.` also excludes \\r here");
+    }
+
+    #[test]
+    fn suffix_may_contain_newline() {
+        // The suffix literal's own `\n` is not part of the dot span, so a
+        // suffix starting AT the terminator is reachable.
+        let re = FuzzyRegex::new(r"x.+\nb").unwrap();
+        assert!(re.is_match("x0a\nb"), "suffix literal may start at a newline");
+        // A terminator INSIDE the dot span still blocks the match.
+        assert!(!re.is_match("x0a\n\nb"), "dot span cannot cross \\n");
+    }
+
+    #[test]
+    fn is_match_matches_find() {
+        for (pat, text) in [
+            ("quick.*fox", "the quick brown fox jumps"),
+            ("quick.*fox", "no match"),
+            ("quick.+fox", "quickXfox"),
+            ("quick.+fox", "quickfox"),
+            ("a.*b", "aaa"),
+            ("foo.*bar", "foo baz bar"),
+            ("foo.*bar", "foobar"),
+        ] {
+            let re = FuzzyRegex::new(pat).unwrap();
+            assert_eq!(
+                re.is_match(text),
+                re.find(text).is_some(),
+                "is_match diverges from find for {pat:?} on {text:?}"
+            );
+        }
+    }
 }

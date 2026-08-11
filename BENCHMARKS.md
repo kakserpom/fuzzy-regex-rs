@@ -46,7 +46,7 @@ says otherwise:
 | exactly 3 digits `\d{3}`              | 90.1 ns     | 59.2 ns     | regex 1.5x     |
 | lazy digits `\d+?`                    | 74.9 ns     | 57.6 ns     | regex 1.3x     |
 | alternation `(?:quick\| brown\| fox)` | 59.6 ns     | 14.5 ns     | regex 4.1x     |
-| wildcard `quick.*fox`                 | 242.6 ns    | 33.1 ns     | regex 7.3x     |
+| wildcard `quick.*fox`                 | 41.9 ns     | 37.9 ns     | tie             |
 | repetition `(?:quick){2}`             | 45.5 ns     | 10.9 ns     | regex 4.2x     |
 | decimal `\d+\.\d+`                    | 50.2 ns     | 9.9 ns      | regex 5.1x     |
 
@@ -58,7 +58,7 @@ says otherwise:
 | digits `\d+`              | 104.5 ns    | 58.5 ns     | regex 1.8x      |
 | char class `[a-z]+`       | 55.0 ns     | 11.8 ns     | regex 4.7x      |
 | repetition `(?:quick){2}` | 326.5 ns    | 307.8 ns    | tie             |
-| wildcard `quick.*fox`     | 21037.8 ns  | 33.3 ns     | regex ~630x    |
+| wildcard `quick.*fox`     | 34.1 ns     | 35.0 ns     | tie             |
 | word boundary `\b\w+\b`   | 15.1 ns     | 12.2 ns     | regex 1.2x      |
 
 #### Very Long Text (48000 bytes)
@@ -69,7 +69,7 @@ says otherwise:
 | digits `\d+`              | 104.1 ns    | 58.8 ns     | regex 1.8x       |
 | char class `[a-z]+`       | 54.5 ns     | 11.9 ns     | regex 4.6x       |
 | repetition `(?:quick){2}` | 3003.9 ns   | 2922.5 ns   | tie              |
-| wildcard `quick.*fox`     | 209312.7 ns | 35.7 ns     | regex ~5900x    |
+| wildcard `quick.*fox`     | 32.9 ns     | 35.5 ns     | tie              |
 | word boundary `\b\w+\b`   | 15.0 ns     | 12.1 ns     | regex 1.2x       |
 
 ### Key Wins
@@ -91,13 +91,14 @@ The strongest advantages are outside plain `is_match`:
 
 ### Areas for Improvement
 
-1. **Wildcard `quick.*fox`**: 9x regression fixed — `find`/`is_match` were
-   routed through `find_iter().next()`, which materializes *all* matches via
-   `find_all_hardened` (full-text scan). Now uses the DFA first-match path
-   (`dfa.find`): 243 ns / 21 µs / 209 µs on 48 B / 4.8 KB / 48 KB (was 2067 ns /
-   205 µs / 2.07 ms). Remaining gap vs regex (~630x on 4.8 KB) is that the DFA
-   scans the whole text while the regex crate locates the boundary literals in
-   O(1); `find_iter` still uses the all-matches scan.
+1. **Wildcard `quick.*fox`**: resolved — `find`/`is_match` now use a dedicated
+   two-literal-search fast path (`PrefixDotStarSuffix` shape detection at
+   compile time; memmem prefix scan + forward/`rfind` suffix instead of the
+   DFA's full-text scan). `is_match` short-circuits to a bounded existence
+   check. Results: 41.9 ns / 34.1 ns / 32.9 ns on 48 B / 4.8 KB / 48 KB —
+   parity with the regex crate on all three sizes (was 2067 ns / 205 µs /
+   2.07 ms before the first fix, then 243 ns / 21 µs / 209 µs after routing
+   through `dfa.find`).
 2. **Exact literal matching**: 3-4x slower than regex crate (SIMD memchr).
 3. **Character classes**: 3-7x slower (prefilter not as selective).
 4. **Alternation**: 4x slower on short text.
@@ -241,6 +242,7 @@ count 111 μs/iter.
 7. **Two-pass algorithm**: Reverse prefilter + forward verification for all-matches
 8. **Hardened mode**: True O(n) for pathological patterns
 9. **End-anchor windowing**: Fuzzy patterns ending in `$` (single-line) search only a bounded window near the end of the text and shift results back, making `find`/`find_iter` cost independent of input size instead of a full O(n) scan
+10. **`LITERAL.*LITERAL` two-literal search**: compile-time NFA shape detection (`PrefixDotStarSuffix`) for `LITERAL .* LITERAL` / `LITERAL .+ LITERAL` (greedy or lazy middle); `find` locates the boundary literals with memmem (prefix scan + rightmost/leftmost suffix, line-terminator aware) instead of the DFA's full-text scan, and `is_match` short-circuits to a bounded existence check
 
 ## Performance Optimization Findings
 
@@ -340,11 +342,14 @@ Key insight: For `.*SUFFIX` patterns, finding SUFFIX from the right (using rever
 1. More selective prefilters (currently limited by pattern length)
 2. Parallel processing for very long texts
 3. SIMD improvements to Bitap (AVX2/NEON already implemented)
-4. **Wildcard `quick.*fox`**: `find`/`is_match` regression (fixed — now 7.3x
-   on 48 B via `dfa.find`), but still ~630x on 4.8 KB and ~5900x on 48 KB:
-   the DFA scans the whole text while the regex crate locates the boundary
-   literals in O(1). The leading-literal fast path needs the same
-   reverse-search treatment as the `.*SUFFIX` optimization above.
+4. **`find_iter` for `LITERAL.*LITERAL`**: `find`/`is_match` reach parity with
+   the regex crate via the `PrefixDotStarSuffix` two-literal-search fast path,
+   but `find_iter` still materializes every match through the DFA's
+   all-matches scan. A dot-star iterator that repeatedly locates the next
+   literal pair could make `find_iter` O(matches) instead of O(text).
+5. **Bounded dot-repeats** (`quick.{1,3}fox`): the shape detector rejects
+   bounded middle repeats (falls back to the DFA); an interval-aware search
+   would extend the literal-pair trick to them.
 
 ## Pathological Pattern Benchmark
 

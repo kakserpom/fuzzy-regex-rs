@@ -11,6 +11,6 @@ pub mod nfa;
 
 pub use hir::{CostInfo, Hir, HirClass, HirLowering, lower, lower_with_unicode};
 pub use nfa::{
-    CostConstraint, EditCharRestriction, LiteralPattern, Nfa, NfaFragment, PatternIndex, State,
-    StateId,
+    CostConstraint, EditCharRestriction, LiteralPattern, Nfa, NfaFragment, PatternIndex,
+    PrefixDotStarSuffix, State, StateId,
 };
