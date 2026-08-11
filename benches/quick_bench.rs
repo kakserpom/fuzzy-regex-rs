@@ -1,8 +1,8 @@
 //! Quick benchmark comparing fuzzy-regex performance.
-//! Run with: cargo run --release --example quick_bench
+//! Run with: cargo bench --bench quick_bench
 
 use fuzzy_regex::FuzzyRegex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const SHORT_TEXT: &str = "The quick brown fox jumps over the lazy dog.";
 const MEDIUM_TEXT: &str = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. \

@@ -1,5 +1,5 @@
 //! Benchmark comparing fuzzy-regex with standard regex crate
-//! Run with: cargo run --release --example bench_vs_regex
+//! Run with: cargo bench --bench bench_vs_regex
 //!
 //! Note: fuzzy-regex uses multiple internal engines:
 //! - DFA: For exact/non-fuzzy patterns (fastest, O(n))
@@ -221,11 +221,11 @@ fn main() {
     println!("  - Character classes on long text (1.3x faster)");
     println!("  - Word boundaries on short text (1.1x faster)");
     println!("  - Fuzzy matching (unique feature)");
-    println!("");
+    println!();
     println!("regex crate advantages:");
     println!("  - Exact literal matching (uses optimized memchr)");
     println!("  - General patterns (more mature engine)");
-    println!("");
+    println!();
     println!("Both have O(n²) pathological patterns in find_iter.");
     println!("fuzzy-regex DFA engine has internal O(n) hardened mode.");
 

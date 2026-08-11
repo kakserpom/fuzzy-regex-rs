@@ -1,5 +1,5 @@
 //! Unicode mode benchmarks.
-//! Run with: cargo run --release --example bench_unicode
+//! Run with: cargo bench --bench bench_unicode
 
 use fuzzy_regex::FuzzyRegex;
 use fuzzy_regex::FuzzyRegexBuilder;

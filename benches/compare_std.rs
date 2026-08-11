@@ -108,7 +108,6 @@ fn main() {
 
     for (pattern, desc) in &tests {
         let fre = FuzzyRegex::new(pattern).unwrap();
-        let rex = Regex::new(pattern).unwrap();
 
         bench(
             &format!("fuzzy {:20}", format!("({})", desc)),

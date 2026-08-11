@@ -1,5 +1,5 @@
 //! Benchmark for comparing with mrab-regex (Python/C).
-//! Run with: cargo run --release --example compare_bench
+//! Run with: cargo bench --bench compare_bench
 
 use fuzzy_regex::{FuzzyRegex, FuzzyRegexBuilder};
 use std::time::Instant;

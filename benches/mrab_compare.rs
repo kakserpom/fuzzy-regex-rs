@@ -5,7 +5,7 @@
 //! (`benches/mrab_compare.py`) reads the same file; `benches/mrab_compare.sh`
 //! runs both and prints a side-by-side table.
 //!
-//! Run with: cargo run --release --example mrab_compare
+//! Run with: cargo bench --bench mrab_compare
 
 use fuzzy_regex::FuzzyRegex;
 use std::hint::black_box;
