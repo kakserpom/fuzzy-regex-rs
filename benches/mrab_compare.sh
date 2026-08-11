@@ -6,11 +6,11 @@ set -eu
 cd "$(dirname "$0")/.."
 
 echo "building rust harness (release)..." >&2
-cargo build --release --example mrab_compare >/dev/null 2>&1
+cargo build --release --bench mrab_compare >/dev/null 2>&1
 
 r=$(mktemp)
 m=$(mktemp)
 trap 'rm -f "$r" "$m"' EXIT
-cargo run --release --example mrab_compare 2>/dev/null >"$r"
+cargo bench --bench mrab_compare 2>/dev/null >"$r"
 python3 benches/mrab_compare.py 2>/dev/null >"$m"
 cat "$r" "$m" | python3 benches/mrab_compare_merge.py

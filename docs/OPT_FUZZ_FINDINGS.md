@@ -150,8 +150,8 @@ classes — none a crash, all niche:
 
 ## 4. Performance vs mrab-regex (existing harness)
 
-`examples/mrab_bench.py` vs the equivalent Rust harness
-(`benchmarks/bench_vs_mrab.rs`). us/iter, lower is better:
+`benches/mrab_bench.py` vs the equivalent Rust harness
+(`benches/bench_vs_mrab.rs`). us/iter, lower is better:
 
 | test                              | mrab   | fuzzy-regex | speedup |
 |-----------------------------------|-------:|------------:|--------:|
@@ -164,7 +164,7 @@ classes — none a crash, all niche:
 | `ACGTACGT` e≤2 in DNA (1 kb)      |  0.33  |   0.09      | ~4×     |
 
 fuzzy-regex is already 4–16× faster on these. The slowest path is full-scan
-no-match (`1.77 µs` on 191 B). See `PERFORMANCE.md` for the vs-`regex`-crate
+no-match (`1.77 µs` on 191 B). See `BENCHMARKS.md` for the vs-`regex`-crate
 picture (we win on `\d+`, `\b\w+\b`, classes; lose on exact-literal memchr,
 `$`-anchors, `(?:x){N}` repetition).
 

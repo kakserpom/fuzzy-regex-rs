@@ -1443,11 +1443,17 @@ impl FuzzyRegex {
         // DFA fast path: use DFA for exact/non-fuzzy patterns
         // Skip if word_lists is populated (use word list matching instead)
         // Skip if pattern has word boundaries (DFA can't handle them)
-        // Skip if pattern is class+literal (use specialized fast path instead)
-        if let Some(dfa) = &self.dfa
-            && self.word_lists.is_empty()
-            && !self.is_class_plus_with_literal
-        {
+        //
+        // Class+literal patterns (`\w+@`, `\d+\.`, `quick.*fox`) are allowed
+        // here too: whenever a DFA exists, `find_iter_forward` dispatches to the
+        // same DFA (`find_all_hardened`, regex.rs:2069), so `dfa.find` and
+        // `find_iter().next()` agree — the memchr class+literal fast path only
+        // runs when no DFA was built. (Previously class+literal was forced
+        // through `find_iter().next()`, which materializes *all* matches and
+        // turned a first-match scan into a full-text scan — the `quick.*fox`
+        // regression.) Patterns without a DFA (lazy/lookahead/word-boundary)
+        // fall through to the class+literal delegation below.
+        if let Some(dfa) = &self.dfa && self.word_lists.is_empty() {
             let mut dfa = dfa.borrow_mut();
             return dfa.find(text).map(|m| {
                 self.make_match(
@@ -1476,14 +1482,16 @@ impl FuzzyRegex {
             return Self::find_char_class_plus_first(text, self.has_lazy, Some(class_type));
         }
 
-        // Character class + literal (\w+@, \d+\., email, etc.): delegate to the
-        // same class-aware logic `find_iter` uses (`find_all_class_plus_literal`)
-        // and take the leftmost match. find's former dedicated first-match helper
+        // Character class + literal without a DFA (lazy/lookahead/word-boundary
+        // patterns like `\w+?@`): delegate to the same class-aware logic
+        // `find_iter` uses (`find_all_class_plus_literal`) and take the leftmost
+        // match. find's former dedicated first-match helper
         // (`find_class_plus_with_literal_first`) always extended by a fixed
         // word/email character set regardless of the actual class, so it
         // over-/under-matched non-word classes — e.g. `\d?,` on "b,.2-1"
         // returned "b,.2-1" instead of ",". Routing through `find_iter`
-        // guarantees `find(x) == find_iter(x).next()`.
+        // guarantees `find(x) == find_iter(x).next()`. (DFA-compatible
+        // class+literal patterns are handled by the DFA fast path above.)
         if self.is_class_plus_with_literal {
             return self.find_iter_forward(text).next();
         }

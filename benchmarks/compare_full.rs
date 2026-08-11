@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --release --example `compare_full`
 //!
-//! Then run: python3 `examples/compare_full.py`
+//! Then run: python3 `benches/compare_full.py`
 //! to get mrab-regex results for comparison.
 
 use fuzzy_regex::FuzzyRegexBuilder;
